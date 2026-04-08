@@ -1,0 +1,84 @@
+{
+  "process_graph": {
+    "loadcollection1": {
+      "arguments": {
+        "id": "SENTINEL2_L2A",
+        "bands": ["B04", "B03", "B02"],
+        "properties": {
+          "eo:cloud_cover": {
+            "process_graph": {
+              "lte1": {
+                "arguments": {
+                  "x": { "from_parameter": "value" },
+                  "y": 50
+                },
+                "process_id": "lte",
+                "result": true
+              }
+            }
+          }
+        },
+        "spatial_extent": {
+          "west": 16.35,
+          "south": 48.20,
+          "east": 16.40,
+          "north": 48.25
+        },
+        "temporal_extent": ["2024-06-01", "2024-06-15"]
+      },
+      "process_id": "load_collection"
+    },
+    "loadcollection2": {
+      "arguments": {
+        "id": "SENTINEL2_L2A",
+        "bands": ["B04", "B03", "B02"],
+        "properties": {
+          "eo:cloud_cover": {
+            "process_graph": {
+              "lte2": {
+                "arguments": {
+                  "x": { "from_parameter": "value" },
+                  "y": 50
+                },
+                "process_id": "lte",
+                "result": true
+              }
+            }
+          }
+        },
+        "spatial_extent": {
+          "west": 16.35,
+          "south": 48.20,
+          "east": 16.40,
+          "north": 48.25
+        },
+        "temporal_extent": ["2024-06-01", "2024-06-15"]
+      },
+      "process_id": "load_collection"
+    },
+    "resample1": {
+      "arguments": {
+        "data": { "from_node": "loadcollection2" },
+        "projection": 3035,
+        "resolution": 10
+      },
+      "process_id": "resample_spatial"
+    },
+    "merge1": {
+      "arguments": {
+        "cube1": { "from_node": "loadcollection1" },
+        "cube2": { "from_node": "resample1" }
+      },
+      "process_id": "merge_cubes"
+    },
+    "saveresult1": {
+      "arguments": {
+        "data": { "from_node": "merge1" },
+        "format": "GTiff",
+        "options": {}
+      },
+      "process_id": "save_result",
+      "result": true
+    }
+  }
+}

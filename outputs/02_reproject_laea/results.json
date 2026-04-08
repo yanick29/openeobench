@@ -1,0 +1,29 @@
+{
+  "backend_url": "https://openeo.dataspace.copernicus.eu",
+  "backend_name": "openeo_dataspace_copernicus_eu",
+  "process_graph": "02_reproject_to_laea",
+  "status": "success",
+  "job_id": "j-2603271108524481983341323d079bb5",
+  "job_status": "finished",
+  "start_time": 1774609729.0536363,
+  "submit_time": 0.8305163383483887,
+  "start_job_time": 1774609731.9766133,
+  "job_execution_time": 230.23514485359192,
+  "download_time": 3.4149246215820312,
+  "total_time": 236.5741114616394,
+  "queue_time": 86.243603,
+  "processing_time": 90.72716,
+  "file_path": null,
+  "process_graph_file": "processgraph.json",
+  "error": null,
+  "job_status_history": {
+    "submitted": "2026-03-27T12:08:51.976617",
+    "created": "2026-03-27T12:09:08.037897",
+    "queued": "2026-03-27T12:09:44.730551",
+    "running": "2026-03-27T12:11:10.974154",
+    "finished": "2026-03-27T12:12:41.701314"
+  },
+  "timestamp": "2026-03-27T12:12:45.627756",
+  "download_timestamp": "20260327_121242",
+  "downloads_directory": "outputs/02_reproject_laea/"
+}

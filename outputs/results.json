@@ -1,0 +1,28 @@
+{
+  "backend_url": "https://openeo.dataspace.copernicus.eu",
+  "backend_name": "openeo_dataspace_copernicus_eu",
+  "process_graph": "crs_baseline_no_reproject",
+  "status": "success",
+  "job_id": "j-26032710022844faa2ce5241cd15abdb",
+  "job_status": "finished",
+  "start_time": 1774605745.2739508,
+  "submit_time": 1.334740400314331,
+  "start_job_time": 1774605748.4143293,
+  "job_execution_time": 141.21586108207703,
+  "download_time": 3.859231948852539,
+  "total_time": 148.21606707572937,
+  "queue_time": null,
+  "processing_time": 60.442329,
+  "file_path": null,
+  "process_graph_file": "processgraph.json",
+  "error": null,
+  "job_status_history": {
+    "submitted": "2026-03-27T11:02:28.414334",
+    "created": "2026-03-27T11:02:46.329716",
+    "running": "2026-03-27T11:03:48.672052",
+    "finished": "2026-03-27T11:04:49.114381"
+  },
+  "timestamp": "2026-03-27T11:04:53.490021",
+  "download_timestamp": "20260327_110449",
+  "downloads_directory": "outputs/"
+}

@@ -1,0 +1,59 @@
+{
+  "process_graph": {
+    "loadcollection1": {
+      "arguments": {
+        "id": "SENTINEL2_L2A",
+        "bands": ["B04", "B03", "B02"],
+        "properties": {
+          "eo:cloud_cover": {
+            "process_graph": {
+              "lte1": {
+                "arguments": {
+                  "x": { "from_parameter": "value" },
+                  "y": 30
+                },
+                "process_id": "lte",
+                "result": true
+              }
+            }
+          }
+        },
+        "spatial_extent": {
+          "west": 16.36,
+          "south": 48.21,
+          "east": 16.39,
+          "north": 48.24
+        },
+        "temporal_extent": ["2024-06-01", "2024-06-10"]
+      },
+      "process_id": "load_collection"
+    },
+    "reduce1": {
+      "arguments": {
+        "data": { "from_node": "loadcollection1" },
+        "dimension": "t",
+        "reducer": {
+          "process_graph": {
+            "mean1": {
+              "arguments": {
+                "data": { "from_parameter": "data" }
+              },
+              "process_id": "mean",
+              "result": true
+            }
+          }
+        }
+      },
+      "process_id": "reduce_dimension"
+    },
+    "saveresult1": {
+      "arguments": {
+        "data": { "from_node": "reduce1" },
+        "format": "GTiff",
+        "options": {}
+      },
+      "process_id": "save_result",
+      "result": true
+    }
+  }
+}

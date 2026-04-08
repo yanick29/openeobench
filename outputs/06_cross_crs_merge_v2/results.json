@@ -1,0 +1,28 @@
+{
+  "backend_url": "https://openeo.dataspace.copernicus.eu",
+  "backend_name": "openeo_dataspace_copernicus_eu",
+  "process_graph": "06_cross_crs_merge_v2",
+  "status": "success",
+  "job_id": "j-26032711381149848086b0d262cac3ca",
+  "job_status": "finished",
+  "start_time": 1774611489.205864,
+  "submit_time": 0.5542428493499756,
+  "start_job_time": 1774611491.6304028,
+  "job_execution_time": 232.38388323783875,
+  "download_time": 3.4885993003845215,
+  "total_time": 238.29778623580933,
+  "queue_time": null,
+  "processing_time": 176.649044,
+  "file_path": null,
+  "process_graph_file": "processgraph.json",
+  "error": null,
+  "job_status_history": {
+    "submitted": "2026-03-27T12:38:11.630405",
+    "created": "2026-03-27T12:38:30.346745",
+    "running": "2026-03-27T12:39:06.734174",
+    "finished": "2026-03-27T12:42:03.383218"
+  },
+  "timestamp": "2026-03-27T12:42:07.503653",
+  "download_timestamp": "20260327_124204",
+  "downloads_directory": "outputs/06_cross_crs_merge_v2/"
+}

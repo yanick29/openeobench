@@ -1,0 +1,2 @@
+URL;Timestamp;Response Time (ms);HTTP Code;Errors;Body Size (bytes)
+https://openeo.dataspace.copernicus.eu/.well-known/openeo;1774005760.218701;498.18;200;OK;318

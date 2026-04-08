@@ -1,0 +1,78 @@
+{
+  "bands": [
+    {
+      "band": 1,
+      "valid_pixels": 77402,
+      "total_pixels": 77740,
+      "coverage_percent": 99.56521739130434,
+      "reference_mean": 1203.2852381075425,
+      "reference_std": 569.7216478881273,
+      "test_mean": 1203.1113343324462,
+      "test_std": 569.8742282254348,
+      "RMSE": 308.6615579912604,
+      "RMSE_relative_percent": 25.65157023589066,
+      "MAE": 180.6587103692411,
+      "MAE_relative_percent": 15.013789303471444,
+      "ME_bias": -0.17390377509625074,
+      "correlation": 0.8532787192061646,
+      "min_diff": -3686.0,
+      "max_diff": 4571.0
+    },
+    {
+      "band": 2,
+      "valid_pixels": 77402,
+      "total_pixels": 77740,
+      "coverage_percent": 99.56521739130434,
+      "reference_mean": 1129.688993824449,
+      "reference_std": 511.9815580272187,
+      "test_mean": 1129.8305857729774,
+      "test_std": 512.0530659751023,
+      "RMSE": 289.2434848965074,
+      "RMSE_relative_percent": 25.603815428643113,
+      "MAE": 164.51526446345056,
+      "MAE_relative_percent": 14.562881055121252,
+      "ME_bias": 0.1415919485284618,
+      "correlation": 0.8404386301788348,
+      "min_diff": -3743.0,
+      "max_diff": 3714.5
+    },
+    {
+      "band": 3,
+      "valid_pixels": 77402,
+      "total_pixels": 77740,
+      "coverage_percent": 99.56521739130434,
+      "reference_mean": 972.9705563163742,
+      "reference_std": 511.63410598845684,
+      "test_mean": 972.9516937546833,
+      "test_std": 511.48321099739456,
+      "RMSE": 286.2994171551944,
+      "RMSE_relative_percent": 29.425290960408095,
+      "MAE": 162.8879615513811,
+      "MAE_relative_percent": 16.741304296819433,
+      "ME_bias": -0.01886256169091238,
+      "correlation": 0.8433898377749683,
+      "min_diff": -3426.0,
+      "max_diff": 3382.5
+    }
+  ],
+  "overall": {
+    "total_valid_pixels": 232206,
+    "RMSE": 294.9017391155187,
+    "MAE": 169.35397879469093,
+    "ME_bias": -0.01705812941956711
+  },
+  "metadata": {
+    "reference_file": "outputs\\accuracy_reference\\openEO.tif",
+    "test_file": "outputs\\accuracy_roundtrip\\openEO.tif",
+    "reference_shape": [
+      3,
+      338,
+      230
+    ],
+    "test_shape": [
+      3,
+      338,
+      230
+    ]
+  }
+}

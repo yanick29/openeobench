@@ -1,0 +1,28 @@
+{
+  "backend_url": "https://openeo.dataspace.copernicus.eu",
+  "backend_name": "openeo_dataspace_copernicus_eu",
+  "process_graph": "accuracy_roundtrip_3035",
+  "status": "success",
+  "job_id": "j-2603271023234933aac5bb54099a4784",
+  "job_status": "finished",
+  "start_time": 1774607000.8093715,
+  "submit_time": 0.4472792148590088,
+  "start_job_time": 1774607003.021119,
+  "job_execution_time": 201.9649543762207,
+  "download_time": 2.2915618419647217,
+  "total_time": 206.4689211845398,
+  "queue_time": null,
+  "processing_time": 121.043679,
+  "file_path": null,
+  "process_graph_file": "processgraph.json",
+  "error": null,
+  "job_status_history": {
+    "submitted": "2026-03-27T11:23:23.021125",
+    "created": "2026-03-27T11:23:41.553714",
+    "running": "2026-03-27T11:24:43.434209",
+    "finished": "2026-03-27T11:26:44.477888"
+  },
+  "timestamp": "2026-03-27T11:26:47.278297",
+  "download_timestamp": "20260327_112644",
+  "downloads_directory": "outputs/accuracy_roundtrip/"
+}

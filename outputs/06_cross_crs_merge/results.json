@@ -1,0 +1,186 @@
+{
+  "backend_url": "https://openeo.dataspace.copernicus.eu",
+  "backend_name": "openeo_dataspace_copernicus_eu",
+  "process_graph": "06_cross_crs_merge_fixed",
+  "status": "failed",
+  "job_id": "j-2603271133144094b92a270baaf31cd0",
+  "job_status": "error",
+  "start_time": 1774611192.110495,
+  "submit_time": 0.6037771701812744,
+  "start_job_time": 1774611194.5625808,
+  "job_execution_time": 201.73482871055603,
+  "download_time": null,
+  "total_time": 204.35995507240295,
+  "queue_time": null,
+  "processing_time": null,
+  "file_path": null,
+  "process_graph_file": "processgraph.json",
+  "error": "Job ended with status: error",
+  "job_status_history": {
+    "submitted": "2026-03-27T12:33:14.562585",
+    "created": "2026-03-27T12:33:33.247838",
+    "running": "2026-03-27T12:34:09.482801",
+    "error": "2026-03-27T12:36:36.040588"
+  },
+  "timestamp": "2026-03-27T12:36:36.470453",
+  "job_details": {
+    "costs": 4,
+    "created": "2026-03-27T11:33:14Z",
+    "id": "j-2603271133144094b92a270baaf31cd0",
+    "process": {
+      "process_graph": {
+        "loadcollection1": {
+          "arguments": {
+            "bands": [
+              "B04",
+              "B03",
+              "B02"
+            ],
+            "id": "SENTINEL2_L2A",
+            "properties": {
+              "eo:cloud_cover": {
+                "process_graph": {
+                  "lte1": {
+                    "arguments": {
+                      "x": {
+                        "from_parameter": "value"
+                      },
+                      "y": 50
+                    },
+                    "process_id": "lte",
+                    "result": true
+                  }
+                }
+              }
+            },
+            "spatial_extent": {
+              "east": 16.4,
+              "north": 48.25,
+              "south": 48.2,
+              "west": 16.35
+            },
+            "temporal_extent": [
+              "2024-06-01",
+              "2024-06-15"
+            ]
+          },
+          "process_id": "load_collection"
+        },
+        "loadcollection2": {
+          "arguments": {
+            "bands": [
+              "B04",
+              "B03",
+              "B02"
+            ],
+            "id": "SENTINEL2_L2A",
+            "properties": {
+              "eo:cloud_cover": {
+                "process_graph": {
+                  "lte2": {
+                    "arguments": {
+                      "x": {
+                        "from_parameter": "value"
+                      },
+                      "y": 50
+                    },
+                    "process_id": "lte",
+                    "result": true
+                  }
+                }
+              }
+            },
+            "spatial_extent": {
+              "east": 16.4,
+              "north": 48.25,
+              "south": 48.2,
+              "west": 16.35
+            },
+            "temporal_extent": [
+              "2024-06-01",
+              "2024-06-15"
+            ]
+          },
+          "process_id": "load_collection"
+        },
+        "merge1": {
+          "arguments": {
+            "cube1": {
+              "from_node": "loadcollection1"
+            },
+            "cube2": {
+              "from_node": "resample1"
+            },
+            "overlap_resolver": {
+              "process_graph": {
+                "mean1": {
+                  "arguments": {
+                    "data": {
+                      "from_parameter": "data"
+                    }
+                  },
+                  "process_id": "mean",
+                  "result": true
+                }
+              }
+            }
+          },
+          "process_id": "merge_cubes"
+        },
+        "resample1": {
+          "arguments": {
+            "data": {
+              "from_node": "loadcollection2"
+            },
+            "projection": 3035,
+            "resolution": 10
+          },
+          "process_id": "resample_spatial"
+        },
+        "saveresult1": {
+          "arguments": {
+            "data": {
+              "from_node": "merge1"
+            },
+            "format": "GTiff",
+            "options": {}
+          },
+          "process_id": "save_result",
+          "result": true
+        }
+      }
+    },
+    "status": "error",
+    "updated": "2026-03-27T11:36:28Z",
+    "usage": {
+      "cpu": {
+        "unit": "cpu-seconds",
+        "value": 270
+      },
+      "duration": {
+        "unit": "seconds",
+        "value": 122
+      },
+      "input_pixel": {
+        "unit": "mega-pixel",
+        "value": 0
+      },
+      "max_executor_memory": {
+        "unit": "gb",
+        "value": 0.3461570739746094
+      },
+      "memory": {
+        "unit": "mb-seconds",
+        "value": 1996800
+      },
+      "memory_requested": {
+        "unit": "mb-seconds",
+        "value": 1996800
+      },
+      "network_received": {
+        "unit": "b",
+        "value": 259330
+      }
+    }
+  }
+}

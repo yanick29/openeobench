@@ -1,16 +1,15 @@
-output.csv
-.venv
-scenario_results.json
-scenario_runner.log
-output
-testing
-test
-test_output
-*.log
-results/
+﻿# Virtual environments
+venv*/
+.venv/
 
-# Python cache files
+# Large output files (TIFs)
+*.tif
+*.tiff
+
+# Python cache
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
+
+# IDE
+.vscode/
+.idea/
