@@ -1,0 +1,28 @@
+{
+  "backend_url": "https://openeo.dataspace.copernicus.eu",
+  "backend_name": "openeo_dataspace_copernicus_eu",
+  "process_graph": "ndvi_median_bratislava_10km_2024_cdse",
+  "status": "success",
+  "job_id": "j-26041009220441118eb7beaf53dbce64",
+  "job_status": "finished",
+  "start_time": 1775812853.70858,
+  "submit_time": 1.1880950927734375,
+  "start_job_time": 1775812924.730399,
+  "job_execution_time": 401.66808104515076,
+  "download_time": 4.465674877166748,
+  "total_time": 477.155837059021,
+  "queue_time": null,
+  "processing_time": 309.416805,
+  "file_path": null,
+  "process_graph_file": "processgraph.json",
+  "error": null,
+  "job_status_history": {
+    "submitted": "2026-04-10T11:22:04.730402",
+    "created": "2026-04-10T11:22:27.561271",
+    "running": "2026-04-10T11:23:31.760936",
+    "finished": "2026-04-10T11:28:41.177741"
+  },
+  "timestamp": "2026-04-10T11:28:50.864431",
+  "download_timestamp": "20260410_112846",
+  "downloads_directory": "outputs/07_ndvi_cloudmask/"
+}

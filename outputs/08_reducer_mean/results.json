@@ -1,0 +1,28 @@
+{
+  "backend_url": "https://openeo.dataspace.copernicus.eu",
+  "backend_name": "openeo_dataspace_copernicus_eu",
+  "process_graph": "reducer_mean_bratislava_10km_2024_cdse",
+  "status": "success",
+  "job_id": "j-260410094125408b844a715578feb23a",
+  "job_status": "finished",
+  "start_time": 1775814084.519121,
+  "submit_time": 0.5182993412017822,
+  "start_job_time": 1775814086.061553,
+  "job_execution_time": 265.4692521095276,
+  "download_time": 9.43927001953125,
+  "total_time": 276.45133900642395,
+  "queue_time": null,
+  "processing_time": 164.391512,
+  "file_path": null,
+  "process_graph_file": "processgraph.json",
+  "error": null,
+  "job_status_history": {
+    "submitted": "2026-04-10T11:41:26.061555",
+    "created": "2026-04-10T11:41:55.323009",
+    "running": "2026-04-10T11:42:57.678756",
+    "finished": "2026-04-10T11:45:42.070268"
+  },
+  "timestamp": "2026-04-10T11:46:00.970467",
+  "download_timestamp": "20260410_114551",
+  "downloads_directory": "outputs/08_reducer_mean/"
+}
