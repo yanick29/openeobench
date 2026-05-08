@@ -1,0 +1,22 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "id": "dem_reprojected_32633",
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [[[13.3, 52.45], [13.4, 52.45], [13.4, 52.55], [13.3, 52.55], [13.3, 52.45]]]
+  },
+  "bbox": [13.3, 52.45, 13.4, 52.55],
+  "properties": {
+    "datetime": "2011-01-06T00:00:00Z"
+  },
+  "assets": {
+    "data": {
+      "href": "https://raw.githubusercontent.com/yanick29/openeobench/main/data/dem_reprojected_32633.tif",
+      "type": "image/tiff; application=geotiff",
+      "roles": ["data"],
+      "proj:epsg": 32633
+    }
+  },
+  "links": []
+}
