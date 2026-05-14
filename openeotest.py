@@ -387,6 +387,18 @@ def run_task(api_url, scenario_path, output_directory=None):
         
         # Handle job completion
         if results["job_status"] == "finished":
+            # Fetch job details for credits and usage info
+            try:
+                job_info = job.describe()
+                results["credits"] = job_info.get("costs")
+                usage = job_info.get("usage", {})
+                results["cpu_seconds"] = usage.get("cpu", {}).get("value")
+                results["duration_backend"] = usage.get("duration", {}).get("value")
+                results["input_pixels_mp"] = usage.get("input_pixel", {}).get("value")
+                results["max_memory_gb"] = usage.get("max_executor_memory", {}).get("value")
+                logger.info(f"Job credits: {results['credits']}, CPU: {results['cpu_seconds']}s")
+            except Exception as e:
+                logger.warning(f"Could not fetch job details: {e}")
             # Download results
             download_start = time.time()
             logger.info(f"Downloading results for job {job_id}")

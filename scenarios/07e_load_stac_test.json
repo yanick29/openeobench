@@ -1,0 +1,19 @@
+{
+  "process_graph": {
+    "loadstac1": {
+      "arguments": {
+        "url": "https://raw.githubusercontent.com/yanick29/openeobench/main/data/dem_stac_item.json"
+      },
+      "process_id": "load_stac"
+    },
+    "saveresult1": {
+      "arguments": {
+        "data": { "from_node": "loadstac1" },
+        "format": "GTiff",
+        "options": {}
+      },
+      "process_id": "save_result",
+      "result": true
+    }
+  }
+}
