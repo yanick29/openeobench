@@ -159,7 +159,14 @@ def import_run(output_directory, crs_strategy=None, run_type=None, preprocessing
                 backend_version = json.dumps(software)
     
     run_id = get_next_id(conn, "runs", "run_id")
-    
+
+    cdse_total_time = results.get("total_time")
+    total_time = (
+        preprocessing_time + cdse_total_time
+        if preprocessing_time is not None and cdse_total_time is not None
+        else cdse_total_time
+    )
+
     conn.execute('''INSERT INTO runs (
         run_id, backend_url, backend_name, scenario, job_id, status,
         submit_time, queue_time, processing_time, job_execution_time,
@@ -179,7 +186,7 @@ def import_run(output_directory, crs_strategy=None, run_type=None, preprocessing
         processing_time,
         results.get("job_execution_time"),
         results.get("download_time"),
-        results.get("total_time"),
+        total_time,
         results.get("timestamp"),
         results.get("error"),
         json.dumps(results.get("job_status_history")),
