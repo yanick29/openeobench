@@ -15,6 +15,7 @@ import json
 import sys
 from pathlib import Path
 
+import duckdb
 import numpy as np
 
 try:
@@ -24,6 +25,8 @@ try:
 except ImportError:
     print("Error: rasterio is required. Install with: pip install rasterio")
     sys.exit(1)
+
+DEFAULT_DB_PATH = "benchmark_results.duckdb"
 
 
 def load_raster(filepath):
@@ -205,6 +208,68 @@ def print_results(results, ref_path, test_path):
     print("=" * 60 + "\n")
 
 
+def _ensure_accuracy_schema(conn):
+    """Stellt sicher, dass die accuracy-Tabelle existiert und die neuen Spalten hat."""
+    conn.execute('''CREATE TABLE IF NOT EXISTS accuracy (
+        accuracy_id INTEGER PRIMARY KEY,
+        run_id INTEGER,
+        reference_file TEXT,
+        rmse DOUBLE,
+        max_diff DOUBLE,
+        mean_diff DOUBLE,
+        mae DOUBLE,
+        correlation DOUBLE
+    )''')
+    existing = {r[1] for r in conn.execute("PRAGMA table_info('accuracy')").fetchall()}
+    for col in ("mae", "correlation"):
+        if col not in existing:
+            conn.execute(f"ALTER TABLE accuracy ADD COLUMN {col} DOUBLE")
+
+
+def save_to_db(results, run_id, db_path=DEFAULT_DB_PATH, reference_file=None):
+    """Schreibt die Overall-Accuracy-Metriken in die accuracy-Tabelle."""
+    overall = results.get("overall") or {}
+    if not overall:
+        print("Warning: No overall metrics to save (no valid pixels?).")
+        return None
+
+    # Korrelation und max_diff aus den Bands aggregieren (overall hat sie nicht)
+    bands = results.get("bands") or []
+    correlations = [b["correlation"] for b in bands
+                    if b.get("correlation") is not None and np.isfinite(b["correlation"])]
+    correlation = float(np.mean(correlations)) if correlations else None
+    max_diffs = [b["max_diff"] for b in bands if b.get("max_diff") is not None]
+    max_diff = float(max(max_diffs, key=abs)) if max_diffs else None
+
+    conn = duckdb.connect(db_path)
+    try:
+        _ensure_accuracy_schema(conn)
+        next_id = conn.execute(
+            "SELECT COALESCE(MAX(accuracy_id), 0) + 1 FROM accuracy"
+        ).fetchone()[0]
+
+        conn.execute(
+            '''INSERT INTO accuracy
+               (accuracy_id, run_id, reference_file, rmse, max_diff, mean_diff, mae, correlation)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                next_id,
+                run_id,
+                str(reference_file) if reference_file is not None else None,
+                overall.get("RMSE"),
+                max_diff,
+                overall.get("ME_bias"),
+                overall.get("MAE"),
+                correlation,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    print(f"Accuracy saved to DB (accuracy_id={next_id}, run_id={run_id})")
+    return next_id
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Calculate RMSE and MAE between reference and test rasters"
@@ -213,8 +278,17 @@ def main():
     parser.add_argument("test", help="Path to test raster (roundtrip transformed)")
     parser.add_argument("--output", "-o", help="Output JSON file for results")
     parser.add_argument("--nodata", type=float, help="NoData value to exclude")
-    
+    parser.add_argument("--run-id", type=int, default=None,
+                        help="Run-ID in der benchmark DB (Pflicht bei --save-db)")
+    parser.add_argument("--save-db", action="store_true",
+                        help="Ergebnisse in die accuracy-Tabelle der DuckDB schreiben")
+    parser.add_argument("--db", default=DEFAULT_DB_PATH,
+                        help=f"Pfad zur DuckDB (default: {DEFAULT_DB_PATH})")
+
     args = parser.parse_args()
+
+    if args.save_db and args.run_id is None:
+        parser.error("--save-db erfordert --run-id")
     
     # Check files exist
     ref_path = Path(args.reference)
@@ -257,7 +331,10 @@ def main():
         with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"Results saved to: {output_path}")
-    
+
+    if args.save_db:
+        save_to_db(results, args.run_id, db_path=args.db, reference_file=ref_path)
+
     return results
 
 

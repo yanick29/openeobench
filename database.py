@@ -70,8 +70,16 @@ def create_database():
         rmse DOUBLE,
         max_diff DOUBLE,
         mean_diff DOUBLE,
+        mae DOUBLE,
+        correlation DOUBLE,
         FOREIGN KEY (run_id) REFERENCES runs(run_id)
     )''')
+
+    # Idempotente Migration für bereits existierende DBs
+    existing_cols = {r[1] for r in c.execute("PRAGMA table_info('accuracy')").fetchall()}
+    for col in ("mae", "correlation"):
+        if col not in existing_cols:
+            c.execute(f"ALTER TABLE accuracy ADD COLUMN {col} DOUBLE")
     
     conn.commit()
     conn.close()
