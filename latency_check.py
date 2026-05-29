@@ -201,6 +201,7 @@ def print_summary(stats: dict) -> None:
 
     off = stats["median_offset_s"]
     stddev = stats["stddev_offset_s"]
+    """
     if stddev > 5:
         print(f"WARNUNG: Offset-Stddev={stddev:.1f} s - CDSE-Loadbalancer mit "
               f"unterschiedlichen Uhren oder instabile Verbindung.")
@@ -217,6 +218,7 @@ def print_summary(stats: dict) -> None:
     if stats["stddev_latency_ms"] > 100:
         print("Hinweis: Hohe Latenzvarianz - Netz instabil.")
     print("Hinweis: HTTP Date-Header hat 1-Sekunden-Aufloesung. Restfehler <= 0.5 s.")
+    """
     print("=" * 62)
 
 

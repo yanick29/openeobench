@@ -114,22 +114,12 @@ def main() -> None:
         print(f"  Max    : {max(http_offsets):+.4f} s")
         print(f"  Stdev  : {stdev:.4f} s")
 
-        print("\nFazit:")
-        if stdev > 10 or abs(median_off) > 10:
-            print("  NICHT synchron – Stdev oder Offset > 10 s.")
-            print("  Mögliche Ursache: Loadbalancer mit unterschiedlichen Uhren.")
-        else:
-            print("  CDSE erscheint NTP-synchron (Stdev und Offset <= 10 s).")
-            if abs(median_off) < 1:
-                print(f"  Uhren praktisch gleich (Median-Offset {median_off:+.3f} s < 1 s).")
-            else:
-                richtung = "vor" if median_off > 0 else "nach"
-                print(f"  CDSE-Uhr geht {abs(median_off):.3f} s {richtung} der lokalen Uhr.")
+
     else:
         print("\nHTTP: Keine Messungen erfolgreich.")
 
     print("=" * 62)
-    print("Hinweis: HTTP Date-Header hat 1-Sekunden-Auflösung → Restfehler bis 0.5 s.")
+
 
 
 if __name__ == "__main__":

@@ -1,0 +1,20 @@
+{
+  "process_graph": {
+    "loadurl1": {
+      "arguments": {
+        "url": "https://raw.githubusercontent.com/yanick29/openeobench/main/data/dem_reprojected_32633.tif",
+        "format": "GTiff"
+      },
+      "process_id": "load_url"
+    },
+    "saveresult1": {
+      "arguments": {
+        "data": { "from_node": "loadurl1" },
+        "format": "GTiff",
+        "options": {}
+      },
+      "process_id": "save_result",
+      "result": true
+    }
+  }
+}
