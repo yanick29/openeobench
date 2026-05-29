@@ -13,3 +13,13 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+# Secrets
+s3_config.json
+
+# Database
+benchmark_results.duckdb
+
+# Logs
+scenario_runner.log
+latency_results.json

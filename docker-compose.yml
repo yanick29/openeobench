@@ -1,19 +1,69 @@
-version: '3.8'
+version: '3.9'
 
 services:
-  minio:
-    image: minio/minio:RELEASE.2023-01-02T09-40-09Z
-    container_name: minio
+  master:
+    image: chrislusf/seaweedfs
     ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: benchmarkadmin
-      MINIO_ROOT_PASSWORD: benchmarkpass2026
+      - 9333:9333
+      - 9324:9324
+    command: 'master -ip=master -ip.bind=0.0.0.0 -metricsPort=9324'
     volumes:
-      - minio_data:/data
-    command: server /data --console-address ":9001"
+      - master_data:/data
+    restart: unless-stopped
+
+  volume:
+    image: chrislusf/seaweedfs
+    ports:
+      - 8080:8080
+      - 9325:9325
+    command: 'volume -ip=volume -master="master:9333" -ip.bind=0.0.0.0 -port=8080 -metricsPort=9325'
+    volumes:
+      - volume_data:/data
+    depends_on:
+      - master
+    restart: unless-stopped
+
+  filer:
+    image: chrislusf/seaweedfs
+    ports:
+      - 8888:8888
+      - 9326:9326
+    command: 'filer -ip=filer -master="master:9333" -ip.bind=0.0.0.0 -metricsPort=9326'
+    volumes:
+      - filer_data:/data
+    depends_on:
+      - master
+      - volume
+    restart: unless-stopped
+
+  s3:
+    image: chrislusf/seaweedfs
+    ports:
+      - 8333:8333
+      - 9327:9327
+    command: 's3 -filer="filer:8888" -ip.bind=0.0.0.0 -metricsPort=9327 -config=/etc/seaweedfs/s3_config.json'
+    volumes:
+      - ./s3_config.json:/etc/seaweedfs/s3_config.json
+    depends_on:
+      - master
+      - volume
+      - filer
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.21.0
+    ports:
+      - 9000:9090
+    volumes:
+      - prometheus_data:/prometheus
+      - ./prometheus:/etc/prometheus
+    command: '--web.enable-lifecycle --config.file=/etc/prometheus/prometheus.yml'
+    depends_on:
+      - s3
     restart: unless-stopped
 
 volumes:
-  minio_data:
+  master_data:
+  volume_data:
+  filer_data:
+  prometheus_data:
