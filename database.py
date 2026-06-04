@@ -126,7 +126,14 @@ def import_run(output_directory, crs_strategy=None, run_type=None, preprocessing
             running = datetime.fromisoformat(history["running"])
             finished = datetime.fromisoformat(history["finished"])
             processing_time = (finished - running).total_seconds()
-    
+
+    # Fallback: duration_backend nutzen wenn kein "running" Status kam
+    duration_backend = results.get("duration_backend")
+    if processing_time is None and duration_backend is not None:
+        processing_time = duration_backend
+        if queue_time is not None:
+            queue_time = max(queue_time - duration_backend, 0)
+
     # job-results.json lesen
     job_results_path = os.path.join(output_directory, "job-results.json")
     output_crs = None
@@ -236,6 +243,24 @@ def import_run(output_directory, crs_strategy=None, run_type=None, preprocessing
     return run_id
 
 
+def fix_runs():
+    """Korrigiert Runs wo processing_time None ist aber duration_backend vorhanden."""
+    conn = duckdb.connect(DB_PATH)
+    affected = conn.execute('''SELECT run_id, queue_time, duration_backend FROM runs
+                               WHERE processing_time IS NULL
+                               AND duration_backend IS NOT NULL''').fetchall()
+    conn.execute('''UPDATE runs
+                    SET processing_time = duration_backend,
+                        queue_time = GREATEST(queue_time - duration_backend, 0)
+                    WHERE processing_time IS NULL
+                    AND duration_backend IS NOT NULL''')
+    conn.commit()
+    conn.close()
+    print(f"Korrigierte Runs: {len(affected)}")
+    for run_id, qt, db in affected:
+        print(f"  run_id={run_id}: processing_time={db}, queue_time={max((qt or 0) - db, 0):.1f}")
+
+
 def show_runs():
     """Zeigt alle Runs in der DB."""
     conn = duckdb.connect(DB_PATH)
@@ -270,6 +295,7 @@ if __name__ == "__main__":
         print("  python database.py create                          - Datenbank erstellen")
         print("  python database.py import <ordner> [optionen]      - Run importieren")
         print("  python database.py show                            - Alle Runs anzeigen")
+        print("  python database.py fix                             - Runs mit fehlendem processing_time korrigieren")
         print("")
         print("Import-Optionen:")
         print("  --strategy baseline|preprocessing|onthefly")
@@ -316,6 +342,9 @@ if __name__ == "__main__":
     
     elif command == "show":
         show_runs()
+
+    elif command == "fix":
+        fix_runs()
     
     else:
         print(f"Unbekannter Befehl: {command}")
