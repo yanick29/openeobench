@@ -21,18 +21,20 @@ from collections import defaultdict
 
 import duckdb
 
-REGIONS = ("berlin", "hamburg")
 TIMING_FIELDS = ("total_time", "queue_time", "processing_time", "preprocessing_time")
 BOOTSTRAP_ITERS = 2000
+NON_REGION_TOKENS = {"laea", "test"}
 
 
 def detect_region(scenario: str) -> str:
-    """Derive region from scenario name; falls back to 'unknown'."""
-    s = (scenario or "").lower()
-    for region in REGIONS:
-        if region in s:
-            return region
-    return "unknown"
+    """Derive region from the last underscore-separated token of the scenario name."""
+    s = (scenario or "").lower().strip()
+    if not s or "_" not in s:
+        return "unknown"
+    last = s.rsplit("_", 1)[-1]
+    if not last or last.isdigit() or last in NON_REGION_TOKENS:
+        return "unknown"
+    return last
 
 
 def fetch_runs(db_path: str):
