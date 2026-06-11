@@ -302,13 +302,61 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
         }
 
 
+def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
+                         use_cache: bool) -> tuple:
+    """
+    Liefert (dem_tif_path, t_download). Die Download-Zeit zaehlt bewusst NICHT
+    zur preprocessing_time und wird hier nur zu Info-Zwecken zurueckgegeben.
+
+    use_cache=True : DEM einmal pro Region herunterladen + in cache_dir ablegen,
+                     bei weiteren Runs wiederverwenden (t_download=0.0 bei Hit).
+    use_cache=False: DEM bei jedem Run frisch in den run-spezifischen base/step1_dem_download
+                     herunterladen.
+    """
+    if use_cache:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached = cache_dir / f"dem_{region}.tif"
+        if cached.exists():
+            print(f"  Cache-Hit: {cached}  (Download uebersprungen)")
+            return str(cached), 0.0
+
+        dl_dir = cache_dir / f"_dl_{region}_{_ts()}"
+        dl_dir.mkdir()
+        dem_scenario = build_dem_download_scenario(
+            region, dl_dir / "scenario_dem_download.json"
+        )
+        results = run_openeo(args.api_url, str(dem_scenario), str(dl_dir))
+        t_download = results.get("total_time") or 0.0
+
+        tif_files = glob.glob(str(dl_dir / "*.tif"))
+        if not tif_files:
+            raise RuntimeError(f"Kein .tif gefunden in {dl_dir}")
+        Path(tif_files[0]).replace(cached)
+        print(f"  DEM heruntergeladen + gecached: {cached}  ({t_download:.1f} s)")
+        return str(cached), t_download
+
+    # Kein Cache: jedes Mal frisch herunterladen
+    step1_dir = base / "step1_dem_download"
+    step1_dir.mkdir()
+    dem_scenario = build_dem_download_scenario(
+        region, base / "scenario_dem_download.json"
+    )
+    results = run_openeo(args.api_url, str(dem_scenario), str(step1_dir))
+    t_download = results.get("total_time") or 0.0
+
+    tif_files = glob.glob(str(step1_dir / "*.tif"))
+    if not tif_files:
+        raise RuntimeError(f"Kein .tif gefunden in {step1_dir}")
+    dem_tif = tif_files[0]
+    print(f"  DEM heruntergeladen: {dem_tif}  ({t_download:.1f} s)")
+    return dem_tif, t_download
+
+
 def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     run_type = _run_type_for(repeat_idx, args.run_type)
     base = _make_outdir(args.output_dir, "local_preprocessing")
-    step1_dir = base / "step1_dem_download"
     step2_tif = str(base / "step2_reprojected.tif")
     step3_dir = base / "step3_main"
-    step1_dir.mkdir()
     step3_dir.mkdir()
 
     region = args.region
@@ -319,25 +367,19 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     remote_stac_name = f"stac_item_{region}_{run_ts}.json"
     asset_url = f"{HETZNER_URL_BASE}{remote_tif_name}"
     stac_url = f"{HETZNER_URL_BASE}{remote_stac_name}"
+    cache_dir = Path(args.output_dir) / "dem_cache"
 
     print(f"\n{'='*60}")
     print(f"  Strategie: local_preprocessing  |  Region: {region}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
     print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}")
 
     try:
-        # Schritt 1: DEM herunterladen
-        print(f"\n  [Schritt 1/5] DEM herunterladen ({region})...")
-        dem_scenario = build_dem_download_scenario(
-            region, base / "scenario_dem_download.json"
+        # Schritt 1: DEM aus Cache laden oder herunterladen (Download NICHT in preprocessing_time)
+        cache_mode = "Cache aktiv" if args.dem_cache else "Cache deaktiviert (frischer Download)"
+        print(f"\n  [Schritt 1/5] DEM bereitstellen ({region}, {cache_mode})...")
+        dem_tif, t_download = _get_or_download_dem(
+            args, region, base, cache_dir, use_cache=args.dem_cache
         )
-        results_step1 = run_openeo(args.api_url, str(dem_scenario), str(step1_dir))
-        t_download = results_step1.get("total_time") or 0.0
-
-        tif_files = glob.glob(str(step1_dir / "*.tif"))
-        if not tif_files:
-            raise RuntimeError(f"Kein .tif gefunden in {step1_dir}")
-        dem_tif = tif_files[0]
-        print(f"  DEM heruntergeladen: {dem_tif}  ({t_download:.1f} s)")
 
         # Schritt 2: Lokal reprojizieren
         print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs}...")
@@ -366,8 +408,11 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         t_stac = t_stac_build + t_scp_stac
         print(f"  STAC Item Upload fertig: {stac_url}  ({t_stac:.2f} s)")
 
-        preprocessing_time = t_download + t_reproject + t_scp_tif + t_stac
-        print(f"  Gesamte Pre-Processing-Zeit: {preprocessing_time:.2f} s")
+        # preprocessing_time = Reprojektion + SCP Upload + STAC (OHNE DEM Download)
+        preprocessing_time = t_reproject + t_scp_tif + t_stac
+        print(f"  Pre-Processing-Zeit (ohne DEM Download): {preprocessing_time:.2f} s")
+        if t_download > 0.0:
+            print(f"  (DEM Download {t_download:.1f} s separat, nicht in preprocessing_time)")
 
         # Schritt 5: load_stac Szenario ausfuehren
         print(f"\n  [Schritt 5/5] load_stac Szenario auf CDSE ausfuehren...")
@@ -459,6 +504,11 @@ def main() -> None:
                         help="cold/hot/auto (auto: erster Run cold, Rest hot)")
     parser.add_argument("--output-dir", default="outputs",
                         help="Basisverzeichnis fuer Output-Ordner (Standard: outputs/)")
+    parser.add_argument("--dem-cache", action="store_true",
+                        help="DEM nur einmal pro Region herunterladen + cachen "
+                             "(outputs/dem_cache/dem_{region}.tif). "
+                             "Ohne Flag wird das DEM bei jedem Run neu geladen. "
+                             "Download zaehlt in keinem Fall zur preprocessing_time.")
 
     args = parser.parse_args()
 
