@@ -318,9 +318,9 @@ def run_task(api_url, scenario_path, output_directory=None):
         logger.info(f"Starting job {job_id}")
         job.start()
         
-        # Monitor job status with increasing poll intervals
-        poll_interval = 5  # Start with 5 seconds
-        max_poll_interval = 30
+        # Monitor job status with fixed 5 s polling (max Messfehler ~5 s)
+        poll_interval = 5
+        max_poll_interval = 30  # nicht mehr benutzt
         timeout = 3600  # 1 hour timeout
         last_status = "submitted"
         status_times = {"submitted": job_start_datetime}
@@ -357,8 +357,8 @@ def run_task(api_url, scenario_path, output_directory=None):
                 if current_status in ["finished", "error", "canceled"]:
                     break
                 
-                # Increase poll interval
-                poll_interval = min(poll_interval * 1.5, max_poll_interval)
+                # Festes Polling-Intervall (5 s) statt zunehmend
+                # poll_interval = min(poll_interval * 1.5, max_poll_interval)
                 time.sleep(poll_interval)
                 
             except Exception as e:
