@@ -23,6 +23,7 @@ import csv
 import tempfile
 import re
 import base64
+import signal
 from pathlib import Path
 from collections import defaultdict
 
@@ -336,7 +337,19 @@ def run_task(api_url, scenario_path, output_directory=None):
             
             try:
                 current_time = datetime.datetime.now()
-                current_status = job.status()
+
+                # 30 s Timeout fuer den job.status() Call via SIGALRM,
+                # damit ein haengender CDSE-Request den Loop nicht blockiert.
+                def _status_timeout_handler(signum, frame):
+                    raise TimeoutError("job.status() exceeded 30 s")
+
+                signal.signal(signal.SIGALRM, _status_timeout_handler)
+                signal.alarm(30)
+                try:
+                    current_status = job.status()
+                finally:
+                    signal.alarm(0)
+
                 check_count += 1
                 results["job_status"] = current_status
                 
@@ -361,6 +374,12 @@ def run_task(api_url, scenario_path, output_directory=None):
                 # poll_interval = min(poll_interval * 1.5, max_poll_interval)
                 time.sleep(poll_interval)
                 
+            except TimeoutError as e:
+                logger.warning(f"job.status() timed out: {e} - retry naechstes Intervall")
+                if time.time() - job_start_time > timeout:
+                    results["error"] = f"Job status checking failed: {str(e)}"
+                    break
+                time.sleep(poll_interval)
             except Exception as e:
                 logger.error(f"Error checking job status: {e}")
                 if time.time() - job_start_time > timeout:
