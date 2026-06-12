@@ -368,9 +368,10 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     asset_url = f"{HETZNER_URL_BASE}{remote_tif_name}"
     stac_url = f"{HETZNER_URL_BASE}{remote_stac_name}"
     cache_dir = Path(args.output_dir) / "dem_cache"
+    strategy_label = "local_pp_cached" if args.dem_cache else "local_preprocessing"
 
     print(f"\n{'='*60}")
-    print(f"  Strategie: local_preprocessing  |  Region: {region}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
+    print(f"  Strategie: {strategy_label}  |  Region: {region}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
     print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}")
 
     try:
@@ -425,12 +426,12 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
 
         run_id = import_run(
             str(step3_dir),
-            crs_strategy="local_preprocessing",
+            crs_strategy=strategy_label,
             run_type=run_type,
             preprocessing_time=preprocessing_time,
         )
         return {
-            "strategy": "local_preprocessing", "repeat": repeat_idx + 1, "run_type": run_type,
+            "strategy": strategy_label, "repeat": repeat_idx + 1, "run_type": run_type,
             "status": results_step5.get("status", "unknown"),
             "preprocessing_time": preprocessing_time, "total_time": total_time,
             "run_id": run_id, "outdir": str(base),
@@ -438,7 +439,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     except Exception as exc:
         print(f"  FEHLER: {exc}")
         return {
-            "strategy": "local_preprocessing", "repeat": repeat_idx + 1, "run_type": run_type,
+            "strategy": strategy_label, "repeat": repeat_idx + 1, "run_type": run_type,
             "status": "error", "preprocessing_time": None, "total_time": None,
             "run_id": None, "outdir": str(base),
         }
