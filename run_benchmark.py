@@ -417,8 +417,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
 
         # Schritt 5: load_stac Szenario ausfuehren
         print(f"\n  [Schritt 5/5] load_stac Szenario auf CDSE ausfuehren...")
+        scenario_filename = f"{strategy_label}_{region}.json"
         local_pp_scenario = build_local_pp_scenario(
-            region, stac_url, base / "scenario_local_pp.json"
+            region, stac_url, base / scenario_filename
         )
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir))
         t_main = results_step5.get("total_time") or 0.0
