@@ -309,7 +309,7 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
     zur preprocessing_time und wird hier nur zu Info-Zwecken zurueckgegeben.
 
     use_cache=True : DEM einmal pro Region herunterladen + in cache_dir ablegen,
-                     bei weiteren Runs wiederverwenden (t_download=0.0 bei Hit).
+                     bei weiteren Runs wiederverwenden (t_download=None bei Hit).
     use_cache=False: DEM bei jedem Run frisch in den run-spezifischen base/step1_dem_download
                      herunterladen.
     """
@@ -318,7 +318,7 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
         cached = cache_dir / f"dem_{region}.tif"
         if cached.exists():
             print(f"  Cache-Hit: {cached}  (Download uebersprungen)")
-            return str(cached), 0.0
+            return str(cached), None
 
         dl_dir = cache_dir / f"_dl_{region}_{_ts()}"
         dl_dir.mkdir()
@@ -412,7 +412,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         # preprocessing_time = Reprojektion + SCP Upload + STAC (OHNE DEM Download)
         preprocessing_time = t_reproject + t_scp_tif + t_stac
         print(f"  Pre-Processing-Zeit (ohne DEM Download): {preprocessing_time:.2f} s")
-        if t_download > 0.0:
+        if t_download is not None and t_download > 0.0:
             print(f"  (DEM Download {t_download:.1f} s separat, nicht in preprocessing_time)")
 
         # Schritt 5: load_stac Szenario ausfuehren
@@ -430,6 +430,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             crs_strategy=strategy_label,
             run_type=run_type,
             preprocessing_time=preprocessing_time,
+            dem_download_time=t_download,
         )
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf TIF + STAC)

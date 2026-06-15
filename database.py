@@ -48,6 +48,7 @@ def create_database():
         crs_strategy TEXT,
         run_type TEXT,
         preprocessing_time DOUBLE,
+        dem_download_time DOUBLE,
         extent_size TEXT,
         
         -- Extra
@@ -100,6 +101,10 @@ def create_database():
         if col not in existing_cols:
             c.execute(f"ALTER TABLE accuracy ADD COLUMN {col} DOUBLE")
 
+    existing_run_cols = {r[1] for r in c.execute("PRAGMA table_info('runs')").fetchall()}
+    if "dem_download_time" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN dem_download_time DOUBLE")
+
     conn.commit()
     conn.close()
     print(f"Datenbank erstellt: {DB_PATH}")
@@ -111,7 +116,8 @@ def get_next_id(conn, table, id_column):
     return result[0]
 
 
-def import_run(output_directory, crs_strategy=None, run_type=None, preprocessing_time=None, extent_size=None):
+def import_run(output_directory, crs_strategy=None, run_type=None,
+               preprocessing_time=None, extent_size=None, dem_download_time=None):
     """Importiert einen Run aus results.json und job-results.json in die DB."""
     conn = duckdb.connect(DB_PATH)
     
@@ -206,9 +212,9 @@ def import_run(output_directory, crs_strategy=None, run_type=None, preprocessing
         submit_time, queue_time, processing_time, job_execution_time,
         download_time, total_time, timestamp, error, job_status_history,
         output_crs, pixel_shape, bounding_box, num_output_files, backend_version,
-        crs_strategy, run_type, preprocessing_time, extent_size,
+        crs_strategy, run_type, preprocessing_time, dem_download_time, extent_size,
         credits, cpu_seconds, duration_backend, input_pixels_mp, max_memory_gb
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
         run_id,
         results.get("backend_url"),
         results.get("backend_name"),
@@ -232,6 +238,7 @@ def import_run(output_directory, crs_strategy=None, run_type=None, preprocessing
         crs_strategy,
         run_type,
         preprocessing_time,
+        dem_download_time,
         extent_size,
         results.get("credits"),
         results.get("cpu_seconds"),
@@ -405,7 +412,8 @@ if __name__ == "__main__":
         run_type = None
         preproc_time = None
         extent = None
-        
+        dem_dl_time = None
+
         i = 3
         while i < len(sys.argv):
             if sys.argv[i] == "--strategy" and i + 1 < len(sys.argv):
@@ -417,13 +425,17 @@ if __name__ == "__main__":
             elif sys.argv[i] == "--preprocessing-time" and i + 1 < len(sys.argv):
                 preproc_time = float(sys.argv[i + 1])
                 i += 2
+            elif sys.argv[i] == "--dem-download-time" and i + 1 < len(sys.argv):
+                dem_dl_time = float(sys.argv[i + 1])
+                i += 2
             elif sys.argv[i] == "--extent-size" and i + 1 < len(sys.argv):
                 extent = sys.argv[i + 1]
                 i += 2
             else:
                 i += 1
-        
-        import_run(output_dir, strategy, run_type, preproc_time, extent)
+
+        import_run(output_dir, strategy, run_type, preproc_time, extent,
+                   dem_download_time=dem_dl_time)
     
     elif command == "show":
         show_runs()

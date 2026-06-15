@@ -21,7 +21,8 @@ from collections import defaultdict
 
 import duckdb
 
-TIMING_FIELDS = ("total_time", "queue_time", "processing_time", "preprocessing_time")
+TIMING_FIELDS = ("total_time", "queue_time", "processing_time", "preprocessing_time",
+                 "dem_download_time")
 BOOTSTRAP_ITERS = 2000
 NON_REGION_TOKENS = {"laea", "test"}
 
@@ -50,10 +51,18 @@ def fetch_runs(db_path: str):
         "credits", "cpu_seconds", "duration_backend", "input_pixels_mp",
         "max_memory_gb", "output_crs", "timestamp",
     ]
+    existing_cols = {r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()}
+    select_cols = list(col_names)
+    if "dem_download_time" in existing_cols:
+        select_cols.append("dem_download_time")
     rows = con.execute(
-        f"SELECT {','.join(col_names)} FROM runs WHERE status = 'success'"
+        f"SELECT {','.join(select_cols)} FROM runs WHERE status = 'success'"
     ).fetchall()
-    return [dict(zip(col_names, r)) for r in rows]
+    out = [dict(zip(select_cols, r)) for r in rows]
+    if "dem_download_time" not in existing_cols:
+        for r in out:
+            r["dem_download_time"] = None
+    return out
 
 
 def fetch_accuracy(db_path: str):
@@ -104,8 +113,13 @@ def bootstrap_median_ci(values, iters=BOOTSTRAP_ITERS, conf=0.95):
     return (medians[lo_idx], medians[hi_idx])
 
 
-def summarize(runs, accuracy_map=None):
-    """Return a dict of metrics for a set of runs."""
+def summarize(runs, accuracy_map=None, amortize_dem_seconds=None):
+    """Return a dict of metrics for a set of runs.
+
+    amortize_dem_seconds: if set (e.g. median dem_download_time of non-cached
+        runs in the same region), compute total_amortized_median as the median
+        of (total_time + amortize_dem_seconds). Meant for cached-strategy runs.
+    """
     clean = [r for r in runs if r.get("total_time") is not None]
     n = len(clean)
     if n == 0:
@@ -135,6 +149,13 @@ def summarize(runs, accuracy_map=None):
         rmse_median = statistics.median(rmses) if rmses else None
         mae_median = statistics.median(maes) if maes else None
 
+    dem_download_median = med("dem_download_time")
+
+    total_amortized_median = None
+    if amortize_dem_seconds is not None:
+        amortized = [t + amortize_dem_seconds for t in total_times]
+        total_amortized_median = statistics.median(amortized)
+
     return {
         "n": n,
         "n_cold": cold,
@@ -147,6 +168,9 @@ def summarize(runs, accuracy_map=None):
         "queue_median": med("queue_time"),
         "processing_median": med("processing_time"),
         "preprocessing_median": med("preprocessing_time"),
+        "dem_download_median": dem_download_median,
+        "total_amortized_median": total_amortized_median,
+        "amortize_dem_seconds": amortize_dem_seconds,
         "credits_total": credits,
         "rmse_median": rmse_median,
         "mae_median": mae_median,
@@ -177,6 +201,8 @@ def print_table(group_label, strategy_metrics):
         ("queue median [s]",      lambda m: fmt(m["queue_median"])),
         ("processing median [s]", lambda m: fmt(m["processing_median"])),
         ("preprocessing median [s]", lambda m: fmt(m["preprocessing_median"])),
+        ("dem_download median [s]", lambda m: fmt(m.get("dem_download_median"))),
+        ("total_time_amortized median [s]", lambda m: fmt(m.get("total_amortized_median"))),
         ("credits (sum)",         lambda m: fmt(m["credits_total"], 2)),
         ("RMSE median",           lambda m: fmt(m.get("rmse_median"), 4) if m.get("rmse_median") is not None else "-"),
         ("MAE median",            lambda m: fmt(m.get("mae_median"), 4) if m.get("mae_median") is not None else "-"),
@@ -202,6 +228,7 @@ def write_csv(path, all_results):
         "total_median", "total_ci_low", "total_ci_high",
         "total_min", "total_max",
         "queue_median", "processing_median", "preprocessing_median",
+        "dem_download_median", "total_amortized_median", "amortize_dem_seconds",
         "credits_total", "rmse_median", "mae_median",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -242,23 +269,37 @@ def main():
             print(f"No runs for region '{args.region}'.", file=sys.stderr)
             return 1
 
+    def _amortize_base(runs_subset):
+        """Median dem_download_time of non-cached local_preprocessing runs."""
+        vals = [r["dem_download_time"] for r in runs_subset
+                if (r.get("crs_strategy") or "") == "local_preprocessing"
+                and r.get("dem_download_time") is not None]
+        return statistics.median(vals) if vals else None
+
+    def _summarize_group(runs_subset):
+        amort_base = _amortize_base(runs_subset)
+        by_strategy = defaultdict(list)
+        for r in runs_subset:
+            by_strategy[r["crs_strategy"] or "unknown"].append(r)
+        metrics = {}
+        for strategy, rs in by_strategy.items():
+            amort = amort_base if strategy == "local_pp_cached" else None
+            m = summarize(rs, accuracy_map, amortize_dem_seconds=amort)
+            if m:
+                metrics[strategy] = m
+        return metrics
+
     results = []
 
-    # Overall
-    overall = defaultdict(list)
-    for r in runs:
-        overall[r["crs_strategy"] or "unknown"].append(r)
-    overall_metrics = {s: summarize(rs, accuracy_map) for s, rs in overall.items()}
-    overall_metrics = {s: m for s, m in overall_metrics.items() if m}
+    overall_metrics = _summarize_group(runs)
     results.append(("Overall", overall_metrics))
 
     if args.group_by == "region":
-        by_region = defaultdict(lambda: defaultdict(list))
+        by_region = defaultdict(list)
         for r in runs:
-            by_region[r["region"]][r["crs_strategy"] or "unknown"].append(r)
+            by_region[r["region"]].append(r)
         for region in sorted(by_region.keys()):
-            metrics = {s: summarize(rs, accuracy_map) for s, rs in by_region[region].items()}
-            metrics = {s: m for s, m in metrics.items() if m}
+            metrics = _summarize_group(by_region[region])
             if metrics:
                 results.append((f"Region: {region}", metrics))
 
