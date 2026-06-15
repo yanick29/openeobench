@@ -1,9 +1,17 @@
 import duckdb
 import json
 import os
+import re
+import subprocess
 from datetime import datetime
 
 DB_PATH = "benchmark_results.duckdb"
+
+# nginx default access log: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent ...'
+_NGINX_LOG_RE = re.compile(
+    r'\[(?P<time>[^\]]+)\] "(?P<method>\S+) (?P<path>\S+) [^"]*" '
+    r'(?P<status>\d+) (?P<bytes>\d+)'
+)
 
 def create_database():
     """Erstellt die Datenbank und die Tabellen."""
@@ -75,12 +83,23 @@ def create_database():
         FOREIGN KEY (run_id) REFERENCES runs(run_id)
     )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS nginx_access_log (
+        log_id INTEGER PRIMARY KEY,
+        run_id INTEGER,
+        access_timestamp TEXT,
+        http_method TEXT,
+        http_status INTEGER,
+        bytes_sent BIGINT,
+        request_path TEXT,
+        FOREIGN KEY (run_id) REFERENCES runs(run_id)
+    )''')
+
     # Idempotente Migration für bereits existierende DBs
     existing_cols = {r[1] for r in c.execute("PRAGMA table_info('accuracy')").fetchall()}
     for col in ("mae", "correlation"):
         if col not in existing_cols:
             c.execute(f"ALTER TABLE accuracy ADD COLUMN {col} DOUBLE")
-    
+
     conn.commit()
     conn.close()
     print(f"Datenbank erstellt: {DB_PATH}")
@@ -241,6 +260,72 @@ def import_run(output_directory, crs_strategy=None, run_type=None, preprocessing
     conn.close()
     print(f"Run importiert: {results.get('process_graph')} (run_id={run_id})")
     return run_id
+
+
+def _ensure_nginx_access_log_table(conn):
+    conn.execute('''CREATE TABLE IF NOT EXISTS nginx_access_log (
+        log_id INTEGER PRIMARY KEY,
+        run_id INTEGER,
+        access_timestamp TEXT,
+        http_method TEXT,
+        http_status INTEGER,
+        bytes_sent BIGINT,
+        request_path TEXT,
+        FOREIGN KEY (run_id) REFERENCES runs(run_id)
+    )''')
+
+
+def import_nginx_access_log(run_id, filenames, ssh_host="root@46.224.62.97",
+                            log_path="/var/log/nginx/access.log"):
+    """Holt nginx access-log Eintraege per ssh+grep und speichert sie pro run_id.
+
+    filenames: Iterable von Dateinamen die in den nginx Logs gegrept werden
+               (z.B. TIF und STAC-Item Dateiname).
+    """
+    conn = duckdb.connect(DB_PATH)
+    _ensure_nginx_access_log_table(conn)
+
+    total = 0
+    for fname in filenames:
+        if not fname:
+            continue
+        # Filename darf keine Quotes/Shell-Metas enthalten (kommt aus _ts() + region)
+        cmd = [
+            "ssh", "-o", "StrictHostKeyChecking=no", ssh_host,
+            f"grep '{fname}' {log_path}",
+        ]
+        print(f"  [ssh] grep '{fname}' {log_path}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        # grep: exit 0 = match, 1 = kein match, >1 = fehler
+        if result.returncode > 1:
+            print(f"  WARNUNG: ssh-grep fehlgeschlagen ({result.returncode}): {result.stderr.strip()}")
+            continue
+        if not result.stdout.strip():
+            print(f"  Keine Log-Eintraege fuer {fname}")
+            continue
+
+        for line in result.stdout.splitlines():
+            m = _NGINX_LOG_RE.search(line)
+            if not m:
+                continue
+            try:
+                ts = datetime.strptime(m.group("time"), "%d/%b/%Y:%H:%M:%S %z").isoformat()
+            except ValueError:
+                ts = m.group("time")
+            log_id = get_next_id(conn, "nginx_access_log", "log_id")
+            conn.execute('''INSERT INTO nginx_access_log
+                (log_id, run_id, access_timestamp, http_method, http_status, bytes_sent, request_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)''', (
+                log_id, run_id, ts,
+                m.group("method"), int(m.group("status")), int(m.group("bytes")),
+                m.group("path"),
+            ))
+            total += 1
+
+    conn.commit()
+    conn.close()
+    print(f"  Nginx-Logs gespeichert: {total} Eintraege fuer run_id={run_id}")
+    return total
 
 
 def fix_runs():

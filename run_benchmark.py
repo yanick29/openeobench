@@ -27,7 +27,7 @@ from pathlib import Path
 import rasterio
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 
-from database import import_run
+from database import import_nginx_access_log, import_run
 
 CDSE_URL = "https://openeo.dataspace.copernicus.eu/openeo/1.2"
 
@@ -431,6 +431,16 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             run_type=run_type,
             preprocessing_time=preprocessing_time,
         )
+
+        # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf TIF + STAC)
+        print(f"\n  [Logs] Hole nginx Access-Logs vom Hetzner-Server...")
+        try:
+            import_nginx_access_log(
+                run_id, filenames=[remote_tif_name, remote_stac_name]
+            )
+        except Exception as exc:
+            print(f"  WARNUNG: nginx-Logs konnten nicht geholt werden: {exc}")
+
         return {
             "strategy": strategy_label, "repeat": repeat_idx + 1, "run_type": run_type,
             "status": results_step5.get("status", "unknown"),
