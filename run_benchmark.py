@@ -18,6 +18,8 @@ import argparse
 import copy
 import glob
 import json
+import math
+import statistics
 import subprocess
 import sys
 import time
@@ -32,6 +34,13 @@ from database import import_nginx_access_log, import_run
 CDSE_URL = "https://openeo.dataspace.copernicus.eu/openeo/1.2"
 
 ALL_STRATEGIES = ["onthefly", "local_preprocessing"]
+
+# AOI-Groessen (Kantenlaenge in km) um den Region-Mittelpunkt.
+# 'medium' bleibt Backward-Compat = unveraenderter REGIONS-Extent.
+SIZE_KM = {"small": 5.0, "medium": 10.0, "large": 50.0, "xlarge": 100.0}
+
+# Verfuegbare openEO-Workflows. 'merge_add' = bisheriges Verhalten.
+WORKFLOWS = ("merge_add", "subtract", "mask", "aggregation")
 
 # ---------------------------------------------------------------------------
 # Hetzner-Konfiguration
@@ -157,27 +166,168 @@ def _run_type_for(repeat_idx: int, run_type_arg: str) -> str:
 # Dynamische Szenario-Erzeugung pro Region
 # ---------------------------------------------------------------------------
 
-def _load_bench_template(region: str) -> dict:
+def _compute_extent(region: str, extent_size: str) -> dict:
+    """AOI um den REGIONS[region]-Mittelpunkt fuer die gewuenschte Groesse.
+
+    'medium' liefert den unveraenderten REGIONS-Extent (Backward-Compat).
+    Sonst: Kantenlaenge = SIZE_KM[extent_size]; 1 deg lat ~= 111 km,
+    1 deg lon ~= 111 km * cos(lat).
+    """
+    base = REGIONS[region]["extent"]
+    if extent_size == "medium":
+        return dict(base)
+    if extent_size not in SIZE_KM:
+        raise ValueError(f"Unbekannte extent_size: {extent_size}")
+    half_km = SIZE_KM[extent_size] / 2.0
+    cx = (base["west"] + base["east"]) / 2.0
+    cy = (base["south"] + base["north"]) / 2.0
+    d_lat = half_km / 111.0
+    d_lon = half_km / (111.0 * max(math.cos(math.radians(cy)), 1e-6))
+    return {
+        "west":  cx - d_lon,
+        "south": cy - d_lat,
+        "east":  cx + d_lon,
+        "north": cy + d_lat,
+    }
+
+
+def _apply_extent_to_template(template: dict, new_extent: dict) -> None:
+    """In-place: ersetzt jeden spatial_extent-Dict im Process Graph."""
+    pg = template.get("process_graph", {})
+    if not isinstance(pg, dict):
+        return
+    for node in pg.values():
+        if not isinstance(node, dict):
+            continue
+        args = node.get("arguments")
+        if isinstance(args, dict) and isinstance(args.get("spatial_extent"), dict):
+            args["spatial_extent"] = dict(new_extent)
+
+
+def _load_bench_template(region: str, extent_size: str = "medium") -> dict:
     path = Path("scenarios") / f"bench_onthefly_{region}.json"
     if not path.exists():
         raise FileNotFoundError(
             f"Szenario-Template fuer Region '{region}' nicht gefunden: {path}"
         )
     with open(path) as f:
-        return json.load(f)
+        template = json.load(f)
+    if extent_size != "medium":
+        _apply_extent_to_template(template, _compute_extent(region, extent_size))
+    return template
 
 
-def build_onthefly_scenario(region: str, target_path: Path) -> Path:
-    """Onthefly = bench_onthefly_{region}.json unveraendert kopieren."""
-    template = _load_bench_template(region)
+def _build_workflow_pg(template: dict, workflow: str) -> dict:
+    """Baut den process_graph fuer den gewuenschten Workflow.
+
+    Alle Workflows starten von der merge_add-Baseline (bench_onthefly_{region}.json)
+    und mutieren sie:
+      merge_add   -> Baseline (unveraendert)
+      subtract    -> overlap_resolver wird 'subtract' statt 'add'
+      mask        -> SCL Band laden, Cloud-Mask (SCL not in {4,5}) auf B04 anwenden,
+                     dann merge_add mit DEM
+      aggregation -> merge_add gefolgt von temporalem reduce_dimension(mean)
+    """
+    pg = copy.deepcopy(template["process_graph"])
+    if workflow == "merge_add":
+        return pg
+
+    if workflow == "subtract":
+        pg["merge1"]["arguments"]["overlap_resolver"] = {
+            "process_graph": {
+                "subtract1": {
+                    "arguments": {"x": {"from_parameter": "x"},
+                                  "y": {"from_parameter": "y"}},
+                    "process_id": "subtract",
+                    "result": True,
+                }
+            }
+        }
+        return pg
+
+    if workflow == "mask":
+        # S2 zusaetzlich mit SCL laden
+        pg["loadcollection1"]["arguments"]["bands"] = ["B04", "SCL"]
+        # SCL extrahieren
+        pg["filterbands_scl"] = {
+            "arguments": {"data": {"from_node": "loadcollection1"},
+                          "bands": ["SCL"]},
+            "process_id": "filter_bands",
+        }
+        # Mask-Cube bauen: True wo SCL not in {4, 5}  -> diese Pixel werden maskiert
+        pg["apply_mask_build"] = {
+            "arguments": {
+                "data": {"from_node": "filterbands_scl"},
+                "process": {
+                    "process_graph": {
+                        "eq1": {"arguments": {"x": {"from_parameter": "x"}, "y": 4},
+                                "process_id": "eq"},
+                        "eq2": {"arguments": {"x": {"from_parameter": "x"}, "y": 5},
+                                "process_id": "eq"},
+                        "or1": {"arguments": {"x": {"from_node": "eq1"},
+                                              "y": {"from_node": "eq2"}},
+                                "process_id": "or"},
+                        "not1": {"arguments": {"x": {"from_node": "or1"}},
+                                 "process_id": "not", "result": True},
+                    }
+                },
+            },
+            "process_id": "apply",
+        }
+        # B04 isoliert + Maske anwenden
+        pg["filterbands_b04"] = {
+            "arguments": {"data": {"from_node": "loadcollection1"},
+                          "bands": ["B04"]},
+            "process_id": "filter_bands",
+        }
+        pg["mask1"] = {
+            "arguments": {"data": {"from_node": "filterbands_b04"},
+                          "mask": {"from_node": "apply_mask_build"}},
+            "process_id": "mask",
+        }
+        # merge1.cube1 jetzt vom maskierten B04
+        pg["merge1"]["arguments"]["cube1"] = {"from_node": "mask1"}
+        return pg
+
+    if workflow == "aggregation":
+        # Nach merge_cubes ein temporales reduce_dimension(mean) einhaengen
+        pg["reducedimension1"] = {
+            "arguments": {
+                "data": {"from_node": "merge1"},
+                "dimension": "t",
+                "reducer": {
+                    "process_graph": {
+                        "mean1": {
+                            "arguments": {"data": {"from_parameter": "data"}},
+                            "process_id": "mean",
+                            "result": True,
+                        }
+                    }
+                },
+            },
+            "process_id": "reduce_dimension",
+        }
+        pg["saveresult1"]["arguments"]["data"] = {"from_node": "reducedimension1"}
+        return pg
+
+    raise ValueError(f"Unbekannter Workflow: {workflow}")
+
+
+def build_onthefly_scenario(region: str, target_path: Path,
+                            extent_size: str = "medium",
+                            workflow: str = "merge_add") -> Path:
+    """Onthefly = Workflow-PG aus bench_onthefly_{region}.json gebaut."""
+    template = _load_bench_template(region, extent_size)
+    pg = _build_workflow_pg(template, workflow)
     with open(target_path, "w") as f:
-        json.dump(template, f, indent=2)
+        json.dump({"process_graph": pg}, f, indent=2)
     return target_path
 
 
-def build_dem_download_scenario(region: str, target_path: Path) -> Path:
+def build_dem_download_scenario(region: str, target_path: Path,
+                                extent_size: str = "medium") -> Path:
     """Baut ein Szenario das nur COPERNICUS_30 fuer die Region herunterlaedt."""
-    template = _load_bench_template(region)
+    template = _load_bench_template(region, extent_size)
     dem_args = template["process_graph"]["loadcollection2"]["arguments"]
     scenario = {
         "process_graph": {
@@ -202,14 +352,17 @@ def build_dem_download_scenario(region: str, target_path: Path) -> Path:
 
 
 def build_local_pp_scenario(region: str, stac_item_url: str,
-                            target_path: Path) -> Path:
+                            target_path: Path,
+                            extent_size: str = "medium",
+                            workflow: str = "merge_add") -> Path:
     """
-    Erzeugt das load_stac Szenario aus bench_onthefly_{region}.json:
-    loadcollection2 (DEM) wird durch loadstac1 ersetzt, das auf die
+    Erzeugt das load_stac Szenario fuer den gewuenschten Workflow:
+    Workflow-PG (s. _build_workflow_pg) wird gebaut, dann wird
+    loadcollection2 (DEM) durch loadstac1 ersetzt, das auf die
     Hetzner-STAC-Item-URL zeigt.
     """
-    template = _load_bench_template(region)
-    pg = copy.deepcopy(template["process_graph"])
+    template = _load_bench_template(region, extent_size)
+    pg = _build_workflow_pg(template, workflow)
 
     # loadcollection2 entfernen und durch loadstac1 ersetzen
     pg.pop("loadcollection2", None)
@@ -217,7 +370,7 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
         "arguments": {"url": stac_item_url},
         "process_id": "load_stac",
     }
-    # merge1.cube2 auf loadstac1 umbiegen
+    # merge1.cube2 auf loadstac1 umbiegen (cube1 bleibt vom Workflow gesetzt)
     pg["merge1"]["arguments"]["cube2"] = {"from_node": "loadstac1"}
 
     scenario = {"process_graph": pg}
@@ -227,9 +380,13 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
 
 
 def build_stac_item(region: str, asset_href: str, epsg: int,
-                    item_id: str) -> dict:
-    """STAC Item passend zum reprojizierten DEM-Asset."""
-    ext = REGIONS[region]["extent"]
+                    item_id: str, extent: dict = None) -> dict:
+    """STAC Item passend zum reprojizierten DEM-Asset.
+
+    `extent` ueberschreibt REGIONS[region]['extent'] (z.B. fuer small/large
+    Modi). Default = REGIONS-Extent (medium).
+    """
+    ext = extent if extent is not None else REGIONS[region]["extent"]
     w, s, e, n = ext["west"], ext["south"], ext["east"], ext["north"]
     return {
         "type": "Feature",
@@ -277,16 +434,20 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
     outdir = _make_outdir(args.output_dir, "onthefly")
 
     print(f"\n{'='*60}")
-    print(f"  Strategie: onthefly  |  Region: {args.region}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
+    print(f"  Strategie: onthefly  |  Region: {args.region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
     print(f"  Output: {outdir}")
 
     try:
         scenario_path = build_onthefly_scenario(
-            args.region, outdir / "scenario_onthefly.json"
+            args.region, outdir / "scenario_onthefly.json",
+            extent_size=args.extent_size,
+            workflow=args.workflow,
         )
         results = run_openeo(args.api_url, str(scenario_path), str(outdir))
         total_time = results.get("total_time")
-        run_id = import_run(str(outdir), crs_strategy="onthefly", run_type=run_type)
+        run_id = import_run(str(outdir), crs_strategy="onthefly",
+                            run_type=run_type, extent_size=args.extent_size,
+                            workflow=args.workflow)
         return {
             "strategy": "onthefly", "repeat": repeat_idx + 1, "run_type": run_type,
             "status": results.get("status", "unknown"),
@@ -308,22 +469,25 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
     Liefert (dem_tif_path, t_download). Die Download-Zeit zaehlt bewusst NICHT
     zur preprocessing_time und wird hier nur zu Info-Zwecken zurueckgegeben.
 
-    use_cache=True : DEM einmal pro Region herunterladen + in cache_dir ablegen,
-                     bei weiteren Runs wiederverwenden (t_download=None bei Hit).
-    use_cache=False: DEM bei jedem Run frisch in den run-spezifischen base/step1_dem_download
-                     herunterladen.
+    use_cache=True : DEM einmal pro (Region, extent_size) herunterladen +
+                     in cache_dir ablegen, bei weiteren Runs wiederverwenden
+                     (t_download=None bei Hit).
+    use_cache=False: DEM bei jedem Run frisch in den run-spezifischen
+                     base/step1_dem_download herunterladen.
     """
+    extent_size = getattr(args, "extent_size", "medium")
     if use_cache:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        cached = cache_dir / f"dem_{region}.tif"
+        cached = cache_dir / f"dem_{region}_{extent_size}.tif"
         if cached.exists():
             print(f"  Cache-Hit: {cached}  (Download uebersprungen)")
             return str(cached), None
 
-        dl_dir = cache_dir / f"_dl_{region}_{_ts()}"
+        dl_dir = cache_dir / f"_dl_{region}_{extent_size}_{_ts()}"
         dl_dir.mkdir()
         dem_scenario = build_dem_download_scenario(
-            region, dl_dir / "scenario_dem_download.json"
+            region, dl_dir / "scenario_dem_download.json",
+            extent_size=extent_size,
         )
         results = run_openeo(args.api_url, str(dem_scenario), str(dl_dir))
         t_download = results.get("total_time") or 0.0
@@ -339,7 +503,8 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
     step1_dir = base / "step1_dem_download"
     step1_dir.mkdir()
     dem_scenario = build_dem_download_scenario(
-        region, base / "scenario_dem_download.json"
+        region, base / "scenario_dem_download.json",
+        extent_size=extent_size,
     )
     results = run_openeo(args.api_url, str(dem_scenario), str(step1_dir))
     t_download = results.get("total_time") or 0.0
@@ -371,7 +536,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     strategy_label = "local_pp_cached" if args.dem_cache else "local_preprocessing"
 
     print(f"\n{'='*60}")
-    print(f"  Strategie: {strategy_label}  |  Region: {region}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
+    print(f"  Strategie: {strategy_label}  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
     print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}")
 
     try:
@@ -400,6 +565,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             asset_href=asset_url,
             epsg=epsg,
             item_id=f"dem_reprojected_{region}_{run_ts}",
+            extent=_compute_extent(region, args.extent_size),
         )
         local_stac_path = str(base / remote_stac_name)
         with open(local_stac_path, "w") as f:
@@ -419,7 +585,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         print(f"\n  [Schritt 5/5] load_stac Szenario auf CDSE ausfuehren...")
         scenario_filename = f"{strategy_label}_{region}.json"
         local_pp_scenario = build_local_pp_scenario(
-            region, stac_url, base / scenario_filename
+            region, stac_url, base / scenario_filename,
+            extent_size=args.extent_size,
+            workflow=args.workflow,
         )
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir))
         t_main = results_step5.get("total_time") or 0.0
@@ -431,6 +599,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             run_type=run_type,
             preprocessing_time=preprocessing_time,
             dem_download_time=t_download,
+            extent_size=args.extent_size,
+            workflow=args.workflow,
         )
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf TIF + STAC)
@@ -495,6 +665,226 @@ def print_summary(results: list) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Accuracy-Check (onthefly vs. local_pp)
+# ---------------------------------------------------------------------------
+
+def _pg_extent_matches(pg: dict, target: dict) -> bool:
+    """True wenn ein Knoten ein spatial_extent mit gleichem Mittelpunkt hat.
+
+    Center-basiert (Toleranz ~0.01 deg = ~1 km), damit verschiedene
+    extent_size-Werte (small/medium/large/xlarge) trotzdem zur selben
+    Region matchen.
+    """
+    pg_root = pg.get("process_graph", pg)
+    if not isinstance(pg_root, dict):
+        return False
+    try:
+        tcx = (float(target["west"]) + float(target["east"])) / 2.0
+        tcy = (float(target["south"]) + float(target["north"])) / 2.0
+    except (KeyError, TypeError, ValueError):
+        return False
+    for node in pg_root.values():
+        if not isinstance(node, dict):
+            continue
+        ext = node.get("arguments", {}).get("spatial_extent")
+        if not isinstance(ext, dict):
+            continue
+        try:
+            cx = (float(ext["west"]) + float(ext["east"])) / 2.0
+            cy = (float(ext["south"]) + float(ext["north"])) / 2.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        if abs(cx - tcx) < 0.01 and abs(cy - tcy) < 0.01:
+            return True
+    return False
+
+
+def _detect_folder_region(folder: Path) -> str:
+    """Region eines Run-Ordners bestimmen, oder None."""
+    # 1) local_pp: scenario_file heisst {strategy_label}_{region}.json
+    for j in folder.glob("*.json"):
+        stem = j.stem
+        for region in REGIONS:
+            if stem.endswith(f"_{region}"):
+                return region
+    # 2) Fallback: spatial_extent aus dem Process Graph gegen REGIONS matchen
+    candidates = (
+        folder / "scenario_onthefly.json",
+        folder / "processgraph.json",
+        folder / "step3_main" / "processgraph.json",
+    )
+    for cand in candidates:
+        if not cand.exists():
+            continue
+        try:
+            pg = json.loads(cand.read_text())
+        except Exception:
+            continue
+        for region, info in REGIONS.items():
+            if _pg_extent_matches(pg, info["extent"]):
+                return region
+    return None
+
+
+def _find_latest_run_dir(base: str, suffix: str, region: str):
+    """Neuesten outputs/run_*_{suffix} fuer Region zurueckgeben, oder None."""
+    base_p = Path(base)
+    if not base_p.is_dir():
+        return None
+    candidates = [
+        d for d in base_p.glob(f"run_*_{suffix}")
+        if d.is_dir() and _detect_folder_region(d) == region
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _compare_tif_pair(ref_tif: Path, test_tif: Path):
+    """Pro Band MAE/RMSE, dann gemittelt. Returns (mae, rmse, n_bands)."""
+    try:
+        from accuracy_calculator import align_rasters, calculate_metrics
+        import numpy as np
+    except Exception as exc:
+        print(f"  Import-Fehler fuer accuracy_calculator: {exc}")
+        return (None, None, 0)
+
+    try:
+        ref_data, test_data, _ = align_rasters(str(ref_tif), str(test_tif))
+        results = calculate_metrics(ref_data, test_data)
+    except Exception as exc:
+        print(f"  Vergleich fehlgeschlagen ({ref_tif.name}): {exc}")
+        return (None, None, 0)
+
+    bands = results.get("bands") or []
+    if not bands:
+        return (None, None, 0)
+    mae = float(np.mean([b["MAE"] for b in bands]))
+    rmse = float(np.mean([b["RMSE"] for b in bands]))
+    return (mae, rmse, len(bands))
+
+
+def _lookup_run_id_for_dir(step3_dir: Path):
+    """run_id ueber timestamp aus results.json in der DB nachschlagen."""
+    results_path = step3_dir / "results.json"
+    if not results_path.exists():
+        return None
+    try:
+        with open(results_path) as f:
+            r = json.load(f)
+        ts = r.get("timestamp")
+        if not ts:
+            return None
+        import duckdb
+        from database import DB_PATH
+        conn = duckdb.connect(DB_PATH, read_only=True)
+        row = conn.execute(
+            "SELECT run_id FROM runs WHERE timestamp = ? "
+            "ORDER BY run_id DESC LIMIT 1",
+            (ts,),
+        ).fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception as exc:
+        print(f"  WARNUNG: run_id Lookup fehlgeschlagen: {exc}")
+        return None
+
+
+def _persist_accuracy(run_id: int, mae: float, rmse: float,
+                      reference_file: str) -> None:
+    """MAE/RMSE in die accuracy-Tabelle schreiben."""
+    try:
+        import duckdb
+        from database import DB_PATH
+        conn = duckdb.connect(DB_PATH)
+        next_id = conn.execute(
+            "SELECT COALESCE(MAX(accuracy_id), 0) + 1 FROM accuracy"
+        ).fetchone()[0]
+        conn.execute(
+            '''INSERT INTO accuracy
+               (accuracy_id, run_id, reference_file, rmse, mae)
+               VALUES (?, ?, ?, ?, ?)''',
+            (next_id, run_id, reference_file, rmse, mae),
+        )
+        conn.commit()
+        conn.close()
+        print(f"  Accuracy gespeichert (accuracy_id={next_id}, run_id={run_id})")
+    except Exception as exc:
+        print(f"  WARNUNG: Accuracy nicht in DB geschrieben: {exc}")
+
+
+def run_accuracy_check(output_base: str, region: str,
+                       local_pp_run_id=None):
+    """Neuesten onthefly- und local_pp-Run der Region vergleichen.
+
+    Speichert den Median(MAE)/Median(RMSE) ueber alle gemeinsamen Date-TIFs in
+    die accuracy-Tabelle (run_id des local_pp Runs).
+    """
+    print(f"\n{'='*60}")
+    print(f"  Accuracy-Check  |  Region: {region}")
+
+    onthefly_dir = _find_latest_run_dir(output_base, "onthefly", region)
+    local_pp_dir = _find_latest_run_dir(output_base, "local_pp", region)
+
+    if not onthefly_dir or not local_pp_dir:
+        miss = "onthefly" if not onthefly_dir else "local_pp"
+        print(f"  Skip: kein {miss}-Run fuer Region '{region}' gefunden.")
+        return None
+
+    print(f"  Referenz (onthefly): {onthefly_dir.name}")
+    print(f"  Test (local_pp):     {local_pp_dir.name}")
+
+    onthefly_tifs = {p.name: p for p in onthefly_dir.glob("*.tif")}
+    local_pp_tifs = {p.name: p for p in (local_pp_dir / "step3_main").glob("*.tif")}
+    common = sorted(set(onthefly_tifs) & set(local_pp_tifs))
+    if not common:
+        print(f"  Skip: keine gemeinsamen TIF-Dateien.")
+        print(f"    onthefly TIFs: {sorted(onthefly_tifs)}")
+        print(f"    local_pp TIFs: {sorted(local_pp_tifs)}")
+        return None
+
+    per_mae, per_rmse, n_bands_last = [], [], 0
+    for name in common:
+        mae, rmse, n_bands = _compare_tif_pair(onthefly_tifs[name],
+                                               local_pp_tifs[name])
+        if mae is None:
+            continue
+        per_mae.append(mae)
+        per_rmse.append(rmse)
+        n_bands_last = n_bands
+        print(f"    {name}: MAE={mae:.6f}, RMSE={rmse:.6f} ({n_bands} Bands)")
+
+    if not per_mae:
+        print("  Skip: kein valider Pixel-Vergleich moeglich.")
+        return None
+
+    median_mae = statistics.median(per_mae)
+    median_rmse = statistics.median(per_rmse)
+
+    run_id = local_pp_run_id
+    if run_id is None:
+        run_id = _lookup_run_id_for_dir(local_pp_dir / "step3_main")
+    if run_id is not None:
+        _persist_accuracy(run_id, median_mae, median_rmse, str(onthefly_dir))
+    else:
+        print("  WARNUNG: kein run_id fuer local_pp gefunden, nicht in DB geschrieben.")
+
+    print(f"\n  Accuracy-Check: MAE={median_mae:.6f}, RMSE={median_rmse:.6f} "
+          f"({len(per_mae)} Dates, {n_bands_last} Bands verglichen)")
+
+    return {
+        "region": region,
+        "mae": median_mae,
+        "rmse": median_rmse,
+        "n_dates": len(per_mae),
+        "n_bands": n_bands_last,
+        "run_id": run_id,
+        "onthefly_dir": str(onthefly_dir),
+        "local_pp_dir": str(local_pp_dir),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -522,6 +912,26 @@ def main() -> None:
                              "(outputs/dem_cache/dem_{region}.tif). "
                              "Ohne Flag wird das DEM bei jedem Run neu geladen. "
                              "Download zaehlt in keinem Fall zur preprocessing_time.")
+    parser.add_argument("--accuracy-check", action="store_true",
+                        help="Nach den Runs Accuracy-Vergleich (MAE/RMSE) zwischen "
+                             "dem neuesten onthefly- und local_pp-Output fuer die "
+                             "Region ausfuehren. Mit --repeat 0 auch standalone "
+                             "auf existierenden Outputs verwendbar.")
+    parser.add_argument("--extent-size", default="medium",
+                        choices=("small", "medium", "large", "xlarge"),
+                        help="AOI-Kantenlaenge um das Region-Zentrum: "
+                             "small=5km, medium=10km (Default = bisheriger fester "
+                             "REGIONS-Extent, rueckwaertskompatibel), large=50km, "
+                             "xlarge=100km. Wirkt auf onthefly, DEM-Download und "
+                             "local_pp Szenarien sowie das STAC Item.")
+    parser.add_argument("--workflow", default="merge_add",
+                        choices=WORKFLOWS,
+                        help="openEO Workflow: "
+                             "merge_add (Default, B04+DEM via merge_cubes/add), "
+                             "subtract (B04-DEM via merge_cubes/subtract), "
+                             "mask (B04 mit SCL Cloud-Mask, SCL not in {4,5} "
+                             "wird maskiert, dann B04+DEM/add), "
+                             "aggregation (B04+DEM/add, dann temporal mean).")
 
     args = parser.parse_args()
 
@@ -530,6 +940,8 @@ def main() -> None:
     print(f"\nBenchmark gestartet: {datetime.now().isoformat()}")
     print(f"API-URL:    {args.api_url}")
     print(f"Region:     {args.region}  (EPSG:{REGIONS[args.region]['epsg']})")
+    print(f"Extent:     {args.extent_size}  ({SIZE_KM[args.extent_size]:.0f} km Kantenlaenge)")
+    print(f"Workflow:   {args.workflow}")
     print(f"Strategien: {strategies}")
     print(f"Repeats:    {args.repeat}")
     print(f"Run-Type:   {args.run_type}")
@@ -546,6 +958,15 @@ def main() -> None:
             all_results.append(result)
 
     print_summary(all_results)
+
+    if args.accuracy_check:
+        local_pp_run_id = None
+        for r in all_results:
+            if (r.get("strategy") in ("local_preprocessing", "local_pp_cached")
+                    and r.get("run_id") is not None
+                    and r.get("status") == "success"):
+                local_pp_run_id = r["run_id"]
+        run_accuracy_check(args.output_dir, args.region, local_pp_run_id)
 
 
 if __name__ == "__main__":

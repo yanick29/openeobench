@@ -55,6 +55,10 @@ def fetch_runs(db_path: str):
     select_cols = list(col_names)
     if "dem_download_time" in existing_cols:
         select_cols.append("dem_download_time")
+    if "extent_size" in existing_cols:
+        select_cols.append("extent_size")
+    if "workflow" in existing_cols:
+        select_cols.append("workflow")
     rows = con.execute(
         f"SELECT {','.join(select_cols)} FROM runs WHERE status = 'success'"
     ).fetchall()
@@ -62,6 +66,13 @@ def fetch_runs(db_path: str):
     if "dem_download_time" not in existing_cols:
         for r in out:
             r["dem_download_time"] = None
+    # Backward-Compat: NULL extent_size = "medium" (= bisheriger fester Extent)
+    # Backward-Compat: NULL workflow = "merge_add" (= bisheriges Standard-Szenario)
+    for r in out:
+        if not r.get("extent_size"):
+            r["extent_size"] = "medium"
+        if not r.get("workflow"):
+            r["workflow"] = "merge_add"
     return out
 
 
@@ -247,10 +258,19 @@ def main():
     parser.add_argument("--db", default="benchmark_results.duckdb",
                         help="Path to DuckDB file (default: benchmark_results.duckdb)")
     parser.add_argument("--csv", default=None, help="Optional CSV output path")
-    parser.add_argument("--group-by", choices=("none", "region"), default="none",
-                        help="Group strategies by region (derived from scenario name)")
+    parser.add_argument("--group-by",
+                        choices=("none", "region", "extent", "workflow"),
+                        default="none",
+                        help="Group strategies by region (derived from scenario name), "
+                             "by extent_size (small/medium/large/xlarge), or by "
+                             "workflow (merge_add/subtract/mask/aggregation)")
     parser.add_argument("--region", default=None,
                         help="Filter to a single region (e.g. berlin, hamburg)")
+    parser.add_argument("--extent-size",
+                        choices=("small", "medium", "large", "xlarge"),
+                        default=None,
+                        help="Filter to a single extent size. Runs without recorded "
+                             "extent_size are treated as 'medium'.")
     args = parser.parse_args()
 
     runs = fetch_runs(args.db)
@@ -267,6 +287,12 @@ def main():
         runs = [r for r in runs if r["region"] == args.region.lower()]
         if not runs:
             print(f"No runs for region '{args.region}'.", file=sys.stderr)
+            return 1
+
+    if args.extent_size:
+        runs = [r for r in runs if r.get("extent_size") == args.extent_size]
+        if not runs:
+            print(f"No runs for extent-size '{args.extent_size}'.", file=sys.stderr)
             return 1
 
     def _amortize_base(runs_subset):
@@ -302,6 +328,26 @@ def main():
             metrics = _summarize_group(by_region[region])
             if metrics:
                 results.append((f"Region: {region}", metrics))
+    elif args.group_by == "extent":
+        EXTENT_ORDER = ("small", "medium", "large", "xlarge")
+        by_extent = defaultdict(list)
+        for r in runs:
+            by_extent[r.get("extent_size") or "medium"].append(r)
+        for ext in sorted(by_extent.keys(),
+                          key=lambda e: EXTENT_ORDER.index(e) if e in EXTENT_ORDER else 99):
+            metrics = _summarize_group(by_extent[ext])
+            if metrics:
+                results.append((f"Extent: {ext}", metrics))
+    elif args.group_by == "workflow":
+        WORKFLOW_ORDER = ("merge_add", "subtract", "mask", "aggregation")
+        by_wf = defaultdict(list)
+        for r in runs:
+            by_wf[r.get("workflow") or "merge_add"].append(r)
+        for wf in sorted(by_wf.keys(),
+                         key=lambda w: WORKFLOW_ORDER.index(w) if w in WORKFLOW_ORDER else 99):
+            metrics = _summarize_group(by_wf[wf])
+            if metrics:
+                results.append((f"Workflow: {wf}", metrics))
 
     for label, metrics in results:
         print_table(label, metrics)

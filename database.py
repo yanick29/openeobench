@@ -50,6 +50,7 @@ def create_database():
         preprocessing_time DOUBLE,
         dem_download_time DOUBLE,
         extent_size TEXT,
+        workflow TEXT,
         
         -- Extra
         credits DOUBLE,
@@ -104,6 +105,8 @@ def create_database():
     existing_run_cols = {r[1] for r in c.execute("PRAGMA table_info('runs')").fetchall()}
     if "dem_download_time" not in existing_run_cols:
         c.execute("ALTER TABLE runs ADD COLUMN dem_download_time DOUBLE")
+    if "workflow" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN workflow TEXT")
 
     conn.commit()
     conn.close()
@@ -117,7 +120,8 @@ def get_next_id(conn, table, id_column):
 
 
 def import_run(output_directory, crs_strategy=None, run_type=None,
-               preprocessing_time=None, extent_size=None, dem_download_time=None):
+               preprocessing_time=None, extent_size=None, dem_download_time=None,
+               workflow=None):
     """Importiert einen Run aus results.json und job-results.json in die DB."""
     conn = duckdb.connect(DB_PATH)
     
@@ -213,8 +217,9 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         download_time, total_time, timestamp, error, job_status_history,
         output_crs, pixel_shape, bounding_box, num_output_files, backend_version,
         crs_strategy, run_type, preprocessing_time, dem_download_time, extent_size,
+        workflow,
         credits, cpu_seconds, duration_backend, input_pixels_mp, max_memory_gb
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
         run_id,
         results.get("backend_url"),
         results.get("backend_name"),
@@ -240,6 +245,7 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         preprocessing_time,
         dem_download_time,
         extent_size,
+        workflow,
         results.get("credits"),
         results.get("cpu_seconds"),
         results.get("duration_backend"),
@@ -393,7 +399,9 @@ if __name__ == "__main__":
         print("  --strategy baseline|preprocessing|onthefly")
         print("  --run-type cold|hot")
         print("  --preprocessing-time <sekunden>")
-        print("  --extent-size <groesse>")
+        print("  --dem-download-time <sekunden>")
+        print("  --extent-size small|medium|large|xlarge")
+        print("  --workflow merge_add|subtract|mask|aggregation")
         sys.exit(1)
     
     command = sys.argv[1]
@@ -413,6 +421,7 @@ if __name__ == "__main__":
         preproc_time = None
         extent = None
         dem_dl_time = None
+        workflow = None
 
         i = 3
         while i < len(sys.argv):
@@ -431,11 +440,14 @@ if __name__ == "__main__":
             elif sys.argv[i] == "--extent-size" and i + 1 < len(sys.argv):
                 extent = sys.argv[i + 1]
                 i += 2
+            elif sys.argv[i] == "--workflow" and i + 1 < len(sys.argv):
+                workflow = sys.argv[i + 1]
+                i += 2
             else:
                 i += 1
 
         import_run(output_dir, strategy, run_type, preproc_time, extent,
-                   dem_download_time=dem_dl_time)
+                   dem_download_time=dem_dl_time, workflow=workflow)
     
     elif command == "show":
         show_runs()
