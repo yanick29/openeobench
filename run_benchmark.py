@@ -110,7 +110,10 @@ def _make_outdir(base: str, strategy: str) -> Path:
 
 def reproject_dem_local(input_tif: str, output_tif: str,
                         dst_crs: str = "EPSG:32633") -> float:
-    """Reprojiziert ein GeoTIFF lokal (bilinear). Gibt Laufzeit in Sekunden zurueck."""
+    """Reprojiziert ein GeoTIFF lokal (NearestNeighbor, konsistent mit CDSE).
+
+    Gibt Laufzeit in Sekunden zurueck.
+    """
     t0 = time.time()
     with rasterio.open(input_tif) as src:
         transform, width, height = calculate_default_transform(
@@ -128,7 +131,7 @@ def reproject_dem_local(input_tif: str, output_tif: str,
                     src_crs=src.crs,
                     dst_transform=transform,
                     dst_crs=dst_crs,
-                    resampling=Resampling.bilinear,
+                    resampling=Resampling.nearest,
                 )
     return time.time() - t0
 

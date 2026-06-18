@@ -56,13 +56,20 @@ def align_rasters(ref_path, test_path):
     
     with rasterio.open(test_path) as test_src:
         test_crs = test_src.crs
-        
+
+        ref_count = ref_data.shape[0]
+        n_bands = min(ref_count, test_src.count)
+        if ref_count != test_src.count:
+            print(f"Warning: Bandanzahl unterschiedlich "
+                  f"(reference={ref_count}, test={test_src.count}). "
+                  f"Vergleiche nur die ersten {n_bands} Band(s).")
+
         # If CRS matches, reproject test to reference grid
         if test_crs == ref_crs:
             # Same CRS - just need to align grids
-            test_aligned = np.zeros_like(ref_data)
+            test_aligned = np.zeros(ref_data.shape, dtype=np.float64)
             
-            for band_idx in range(test_src.count):
+            for band_idx in range(n_bands):
                 reproject(
                     source=rasterio.band(test_src, band_idx + 1),
                     destination=test_aligned[band_idx],
@@ -74,9 +81,9 @@ def align_rasters(ref_path, test_path):
                 )
         else:
             # Different CRS - need full reprojection
-            test_aligned = np.zeros_like(ref_data)
+            test_aligned = np.zeros(ref_data.shape, dtype=np.float64)
             
-            for band_idx in range(test_src.count):
+            for band_idx in range(n_bands):
                 reproject(
                     source=rasterio.band(test_src, band_idx + 1),
                     destination=test_aligned[band_idx],
@@ -90,10 +97,13 @@ def align_rasters(ref_path, test_path):
     return ref_data, test_aligned, ref_profile
 
 
-def calculate_metrics(reference, test, nodata=None):
+def calculate_metrics(reference, test, nodata=None, exclude_zeros=False):
     """
     Calculate accuracy metrics between reference and test arrays.
-    
+
+    `exclude_zeros=True` behandelt zusaetzlich Pixel mit Wert 0 als nodata
+    (typisch fuer Sentinel-2). Default False -> 0-Pixel zaehlen mit.
+
     Returns:
         dict with RMSE, MAE, and other statistics per band
     """
@@ -114,8 +124,9 @@ def calculate_metrics(reference, test, nodata=None):
         else:
             valid_mask = np.isfinite(ref_band) & np.isfinite(test_band)
         
-        # Also exclude zero values (often nodata in Sentinel-2)
-        valid_mask = valid_mask & (ref_band != 0) & (test_band != 0)
+        # Optional: zero values als nodata behandeln (typisch fuer Sentinel-2)
+        if exclude_zeros:
+            valid_mask = valid_mask & (ref_band != 0) & (test_band != 0)
         
         if valid_mask.sum() == 0:
             print(f"Warning: Band {band_idx + 1} has no valid pixels for comparison")
@@ -278,6 +289,9 @@ def main():
     parser.add_argument("test", help="Path to test raster (roundtrip transformed)")
     parser.add_argument("--output", "-o", help="Output JSON file for results")
     parser.add_argument("--nodata", type=float, help="NoData value to exclude")
+    parser.add_argument("--exclude-zeros", action="store_true",
+                        help="Pixel mit Wert 0 als nodata behandeln "
+                             "(typisch fuer Sentinel-2). Default: False.")
     parser.add_argument("--run-id", type=int, default=None,
                         help="Run-ID in der benchmark DB (Pflicht bei --save-db)")
     parser.add_argument("--save-db", action="store_true",
@@ -312,7 +326,8 @@ def main():
     
     # Calculate metrics
     print("Calculating accuracy metrics...")
-    results = calculate_metrics(ref_data, test_data, args.nodata)
+    results = calculate_metrics(ref_data, test_data, args.nodata,
+                                exclude_zeros=args.exclude_zeros)
     
     # Add metadata
     results["metadata"] = {
