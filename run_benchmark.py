@@ -26,6 +26,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import re
+
 import rasterio
 from rasterio.transform import Affine
 from rasterio.warp import Resampling, calculate_default_transform, reproject
@@ -35,6 +37,9 @@ from database import import_nginx_access_log, import_run
 CDSE_URL = "https://openeo.dataspace.copernicus.eu/openeo/1.2"
 
 ALL_STRATEGIES = ["onthefly", "local_preprocessing"]
+# full_preprocessing wird bewusst NICHT in "all" einbezogen, weil es deutlich
+# laenger dauert (zwei volle Downloads + N Uploads + STAC Collection).
+EXTRA_STRATEGIES = ["full_preprocessing"]
 
 # AOI-Groessen (Kantenlaenge in km) um den Region-Mittelpunkt.
 # 'medium' bleibt Backward-Compat = unveraenderter REGIONS-Extent.
@@ -454,6 +459,264 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     return target_path
 
 
+# ---------------------------------------------------------------------------
+# full_preprocessing: S2 + DEM komplett von Hetzner laden
+# ---------------------------------------------------------------------------
+
+# Beispiel-Dateiname: "openEO_2024-07-14Z.tif" -> date "2024-07-14"
+_S2_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+def _extract_date_from_filename(filename: str) -> str | None:
+    """ISO-Datum aus einem S2-Output-Dateinamen extrahieren oder None."""
+    m = _S2_DATE_RE.search(filename)
+    return m.group(1) if m else None
+
+
+def build_s2_download_scenario(region: str, target_path: Path,
+                               extent_size: str = "medium",
+                               workflow: str = "merge_add") -> Path:
+    """
+    Baut ein Szenario das NUR die S2-Daten herunterlaedt (kein DEM, kein merge).
+    Verwendet die loadcollection1-Args (inkl. Cloud-Cover-Filter, bands,
+    spatial_extent, temporal_extent) aus dem Region-Template; bei workflow=mask
+    werden zusaetzlich SCL-Bands geladen.
+    """
+    template = _load_bench_template(region, extent_size)
+    s2_args = copy.deepcopy(template["process_graph"]["loadcollection1"]["arguments"])
+    if workflow == "mask":
+        s2_args["bands"] = ["B04", "SCL"]
+    scenario = {
+        "process_graph": {
+            "loadcollection1": {
+                "arguments": s2_args,
+                "process_id": "load_collection",
+            },
+            "saveresult1": {
+                "arguments": {
+                    "data": {"from_node": "loadcollection1"},
+                    "format": "GTiff",
+                    "options": {},
+                },
+                "process_id": "save_result",
+                "result": True,
+            },
+        }
+    }
+    with open(target_path, "w") as f:
+        json.dump(scenario, f, indent=2)
+    return target_path
+
+
+def read_s2_grid(s2_tif: str) -> dict:
+    """
+    Liest Transform, CRS, Shape und Bounds eines S2-TIFs aus.
+    Wird genutzt um das DEM EXAKT auf das gleiche Grid zu reprojizieren.
+    """
+    with rasterio.open(s2_tif) as src:
+        return {
+            "transform": src.transform,
+            "crs": src.crs.to_string() if src.crs else None,
+            "epsg": src.crs.to_epsg() if src.crs else None,
+            "width": src.width,
+            "height": src.height,
+            "bounds": src.bounds,
+            "shape": (src.height, src.width),
+        }
+
+
+def reproject_dem_to_grid(input_tif: str, output_tif: str, grid: dict,
+                          resampling: str = "nearest") -> float:
+    """
+    Reprojiziert ein DEM-GeoTIFF auf EXAKT das gegebene Grid (Transform, CRS,
+    Width, Height). Gibt Laufzeit in Sekunden zurueck.
+    """
+    if resampling not in LOCAL_RESAMPLING:
+        raise ValueError(f"Unbekannte Resampling-Methode: {resampling}")
+    method = LOCAL_RESAMPLING[resampling]
+    dst_crs = grid["crs"]
+    dst_transform = grid["transform"]
+    dst_width = grid["width"]
+    dst_height = grid["height"]
+
+    t0 = time.time()
+    with rasterio.open(input_tif) as src:
+        meta = src.meta.copy()
+        meta.update({"crs": dst_crs, "transform": dst_transform,
+                     "width": dst_width, "height": dst_height})
+        with rasterio.open(output_tif, "w", **meta) as dst:
+            for i in range(1, src.count + 1):
+                reproject(
+                    source=rasterio.band(src, i),
+                    destination=rasterio.band(dst, i),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=method,
+                )
+    return time.time() - t0
+
+
+def reproject_s2_local(input_tif: str, output_tif: str,
+                       dst_crs: str, resampling: str = "nearest") -> float:
+    """Reprojiziert ein S2-TIF lokal nach dst_crs (Szenario 3: BEIDE Raster
+    in Nicht-UTM-CRS). Default-Aufloesung aus calculate_default_transform.
+    """
+    method = LOCAL_RESAMPLING.get(resampling, Resampling.nearest)
+    t0 = time.time()
+    with rasterio.open(input_tif) as src:
+        transform, width, height = calculate_default_transform(
+            src.crs, dst_crs, src.width, src.height, *src.bounds,
+        )
+        meta = src.meta.copy()
+        meta.update({"crs": dst_crs, "transform": transform,
+                     "width": width, "height": height})
+        with rasterio.open(output_tif, "w", **meta) as dst:
+            for i in range(1, src.count + 1):
+                reproject(
+                    source=rasterio.band(src, i),
+                    destination=rasterio.band(dst, i),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=dst_crs,
+                    resampling=method,
+                )
+    return time.time() - t0
+
+
+def build_s2_stac_item(item_id: str, asset_href: str, datetime_iso: str,
+                       grid: dict, bbox_geo: list) -> dict:
+    """Ein STAC Item pro S2-Date. bbox_geo = [w, s, e, n] in WGS84 (aus dem
+    Region-Extent), grid liefert proj:epsg / proj:shape / proj:bbox.
+    """
+    w, s, e, n = bbox_geo
+    left, bottom, right, top = grid["bounds"]
+    return {
+        "type": "Feature",
+        "stac_version": "1.0.0",
+        "stac_extensions": [
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json"
+        ],
+        "id": item_id,
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]],
+        },
+        "bbox": [w, s, e, n],
+        "properties": {
+            "datetime": datetime_iso,
+            "proj:epsg": grid["epsg"],
+            "proj:shape": [grid["height"], grid["width"]],
+            "proj:bbox": [left, bottom, right, top],
+        },
+        "assets": {
+            "data": {
+                "href": asset_href,
+                "type": "image/tiff; application=geotiff",
+                "roles": ["data"],
+                "proj:epsg": grid["epsg"],
+                "proj:shape": [grid["height"], grid["width"]],
+                "proj:bbox": [left, bottom, right, top],
+            }
+        },
+        "links": [],
+    }
+
+
+def build_s2_stac_collection(collection_id: str,
+                             collection_self_url: str,
+                             item_links: list,
+                             item_dates: list,
+                             bbox_geo: list) -> dict:
+    """STAC Collection fuer N S2-Items.
+
+    item_links: Liste von (item_id, item_url, item_path_on_remote).
+    item_dates: Liste der ISO-Datetime-Strings (zur Berechnung des temporal
+    extent).
+    """
+    if item_dates:
+        sorted_dates = sorted(item_dates)
+        temporal_interval = [[sorted_dates[0], sorted_dates[-1]]]
+    else:
+        temporal_interval = [[None, None]]
+    links = [{"rel": "self", "href": collection_self_url, "type": "application/json"},
+             {"rel": "root", "href": collection_self_url, "type": "application/json"}]
+    for _item_id, item_url, _ in item_links:
+        links.append({"rel": "item", "href": item_url,
+                      "type": "application/json"})
+    return {
+        "type": "Collection",
+        "stac_version": "1.0.0",
+        "id": collection_id,
+        "description": "S2 L2A subset, locally preprocessed and hosted on Hetzner for openEO load_stac.",
+        "license": "proprietary",
+        "extent": {
+            "spatial": {"bbox": [bbox_geo]},
+            "temporal": {"interval": temporal_interval},
+        },
+        "links": links,
+    }
+
+
+def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
+                           target_path: Path,
+                           extent_size: str = "medium",
+                           workflow: str = "merge_add") -> Path:
+    """
+    Process Graph fuer full_preprocessing: ZWEI load_stac Aufrufe
+    (loadstac1=S2, loadstac2=DEM) + Workflow-Verknuepfung.
+
+    Wir starten von der Workflow-PG und ersetzen
+    - loadcollection1 (S2)  -> loadstac1
+    - loadcollection2 (DEM) -> loadstac2
+    sowie biegen merge1.cube1/cube2 und (workflow=mask) filterbands_b04/_scl
+    auf den S2 STAC um.
+    """
+    template = _load_bench_template(region, extent_size)
+    pg = _build_workflow_pg(template, workflow)
+
+    pg.pop("loadcollection1", None)
+    pg.pop("loadcollection2", None)
+    pg["loadstac1"] = {
+        "arguments": {"url": s2_stac_url},
+        "process_id": "load_stac",
+    }
+    pg["loadstac2"] = {
+        "arguments": {"url": dem_stac_url},
+        "process_id": "load_stac",
+    }
+
+    # Alle Knoten umbiegen die noch auf loadcollection1/2 zeigen.
+    def _retarget(node_args):
+        for k, v in list(node_args.items()):
+            if isinstance(v, dict):
+                if v.get("from_node") == "loadcollection1":
+                    node_args[k] = {"from_node": "loadstac1"}
+                elif v.get("from_node") == "loadcollection2":
+                    node_args[k] = {"from_node": "loadstac2"}
+                else:
+                    _retarget(v)
+    for node in pg.values():
+        if isinstance(node, dict) and isinstance(node.get("arguments"), dict):
+            _retarget(node["arguments"])
+
+    # Sicherstellen, dass merge1 die richtigen Cubes bekommt (cube1=S2, cube2=DEM).
+    if "merge1" in pg:
+        merge_args = pg["merge1"]["arguments"]
+        # cube2 = DEM (frueher loadcollection2 -> jetzt loadstac2)
+        merge_args["cube2"] = {"from_node": "loadstac2"}
+        # cube1: bei workflow=mask kommt es aus mask1; sonst direkt loadstac1.
+        if workflow != "mask":
+            merge_args["cube1"] = {"from_node": "loadstac1"}
+
+    scenario = {"process_graph": pg}
+    with open(target_path, "w") as f:
+        json.dump(scenario, f, indent=2)
+    return target_path
+
+
 def build_stac_item(region: str, asset_href: str, epsg: int,
                     item_id: str, extent: dict = None) -> dict:
     """STAC Item passend zum reprojizierten DEM-Asset.
@@ -707,6 +970,255 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         print(f"  FEHLER: {exc}")
         return {
             "strategy": strategy_label, "repeat": repeat_idx + 1, "run_type": run_type,
+            "status": "error", "preprocessing_time": None, "total_time": None,
+            "run_id": None, "outdir": str(base),
+        }
+
+
+def run_strategy_full_pp(args, repeat_idx: int) -> dict:
+    """
+    full_preprocessing: BEIDE Raster (S2 + DEM) extern.
+      1. S2 von CDSE runterladen (load_collection + save_result).
+      2. DEM von CDSE runterladen (wie local_preprocessing).
+      3. DEM lokal reprojizieren (Default: exakt auf S2-Grid).
+      4. Optional: S2 lokal nach target_crs reprojizieren (--reproject-s2).
+      5. Alles per scp auf Hetzner hochladen.
+      6. STAC Collection (S2, mehrere Items) + STAC Item (DEM) bauen+hochladen.
+      7. Prozessgraph mit zwei load_stac Aufrufen, Job auf CDSE.
+    """
+    run_type = _run_type_for(repeat_idx, args.run_type)
+    base = _make_outdir(args.output_dir, "full_preprocessing")
+    s2_dl_dir = base / "step1_s2_download"
+    s2_dl_dir.mkdir()
+    dem_dl_dir = base / "step2_dem_download"
+    dem_dl_dir.mkdir()
+    dem_repro_tif = str(base / "step3_dem_reprojected.tif")
+    s2_repro_dir = base / "step3b_s2_reprojected"
+    main_dir = base / "step5_main"
+    main_dir.mkdir()
+
+    region = args.region
+    region_epsg = REGIONS[region]["epsg"]
+    if getattr(args, "target_crs", None):
+        target_crs_str = _normalize_crs(args.target_crs)
+        target_epsg = _parse_epsg(target_crs_str)
+    else:
+        target_crs_str = None
+        target_epsg = None
+    reproject_s2 = bool(getattr(args, "reproject_s2", False))
+    run_ts = _ts()
+    geo_extent = _compute_extent(region, args.extent_size)
+    bbox_geo = [geo_extent["west"], geo_extent["south"],
+                geo_extent["east"], geo_extent["north"]]
+
+    print(f"\n{'='*60}")
+    target_info = f"target_crs={target_crs_str or 'EPSG:{}'.format(region_epsg)}"
+    if reproject_s2 and target_crs_str:
+        target_info += " (DEM+S2 reprojiziert)"
+    elif target_crs_str:
+        target_info += " (nur DEM reprojiziert)"
+    else:
+        target_info += " (DEM auf S2-Grid gesnapped)"
+    print(f"  Strategie: full_preprocessing  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
+    print(f"  Output: {base}  |  {target_info}")
+
+    try:
+        # Schritt 1: S2 von CDSE
+        print(f"\n  [Schritt 1/7] S2 von CDSE herunterladen ({region}, {args.extent_size})...")
+        s2_scenario = build_s2_download_scenario(
+            region, base / "scenario_s2_download.json",
+            extent_size=args.extent_size, workflow=args.workflow,
+        )
+        t_s2_dl_start = time.time()
+        s2_results = run_openeo(args.api_url, str(s2_scenario), str(s2_dl_dir))
+        # CDSE total_time fuer S2 separat festhalten (waere genauer als wall-time,
+        # aber wall-time deckt auch Submit/Queue ab. Beides ist 'extern'.)
+        t_s2_download = s2_results.get("total_time") or (time.time() - t_s2_dl_start)
+        s2_tifs = sorted(Path(p) for p in glob.glob(str(s2_dl_dir / "*.tif")))
+        if not s2_tifs:
+            raise RuntimeError(f"Keine S2-TIFs heruntergeladen in {s2_dl_dir}")
+        print(f"  {len(s2_tifs)} S2-TIFs heruntergeladen  ({t_s2_download:.1f} s CDSE-Zeit)")
+
+        # Schritt 2: DEM von CDSE (separate Messung, NICHT in preprocessing_time)
+        print(f"\n  [Schritt 2/7] DEM von CDSE herunterladen ({region}, {args.extent_size})...")
+        dem_scenario = build_dem_download_scenario(
+            region, base / "scenario_dem_download.json",
+            extent_size=args.extent_size,
+        )
+        dem_results = run_openeo(args.api_url, str(dem_scenario), str(dem_dl_dir))
+        t_dem_download = dem_results.get("total_time") or 0.0
+        dem_tifs = glob.glob(str(dem_dl_dir / "*.tif"))
+        if not dem_tifs:
+            raise RuntimeError(f"Kein DEM-TIF heruntergeladen in {dem_dl_dir}")
+        dem_tif = dem_tifs[0]
+        print(f"  DEM heruntergeladen: {dem_tif}  ({t_dem_download:.1f} s CDSE-Zeit)")
+
+        # Schritt 3: Lokale Reprojektion(en)
+        # Default: DEM exakt auf S2-Grid (kein target_crs).
+        # target_crs ohne reproject_s2: DEM nach target_crs (S2 unveraendert).
+        # target_crs + reproject_s2: BEIDE nach target_crs.
+        if target_crs_str is None:
+            print(f"\n  [Schritt 3/7] DEM auf S2-Grid reprojizieren (lese Grid aus {s2_tifs[0].name})...")
+            s2_grid = read_s2_grid(str(s2_tifs[0]))
+            print(f"    S2-Grid: EPSG:{s2_grid['epsg']}, shape={s2_grid['shape']}, transform={s2_grid['transform']}")
+            t_dem_reproject = reproject_dem_to_grid(
+                dem_tif, dem_repro_tif, s2_grid,
+                resampling=args.local_resampling,
+            )
+            dem_epsg = s2_grid["epsg"]
+        else:
+            print(f"\n  [Schritt 3/7] DEM nach {target_crs_str} reprojizieren ({args.local_resampling})...")
+            t_dem_reproject = reproject_dem_local(
+                dem_tif, dem_repro_tif, dst_crs=target_crs_str,
+                resampling=args.local_resampling,
+            )
+            dem_epsg = target_epsg
+        print(f"  DEM Reprojektion fertig: {dem_repro_tif}  ({t_dem_reproject:.2f} s)")
+
+        # S2 ggf. reprojizieren (Szenario 3): jedes TIF einzeln nach target_crs.
+        t_s2_reproject = 0.0
+        s2_for_upload = list(s2_tifs)
+        if target_crs_str is not None and reproject_s2:
+            s2_repro_dir.mkdir(exist_ok=True)
+            print(f"\n  [Schritt 3b/7] S2 nach {target_crs_str} reprojizieren ({len(s2_tifs)} TIFs)...")
+            new_tifs = []
+            for stif in s2_tifs:
+                out = s2_repro_dir / stif.name
+                t_s2_reproject += reproject_s2_local(
+                    str(stif), str(out), dst_crs=target_crs_str,
+                    resampling=args.local_resampling,
+                )
+                new_tifs.append(out)
+            s2_for_upload = new_tifs
+            print(f"  S2 Reprojektion fertig  ({t_s2_reproject:.2f} s)")
+
+        # Schritt 4: Alle TIFs auf Hetzner hochladen
+        print(f"\n  [Schritt 4/7] {len(s2_for_upload)} S2 + 1 DEM TIF auf Hetzner hochladen...")
+        s2_remote_names = []
+        t_tif_uploads = 0.0
+        for stif in s2_for_upload:
+            remote_name = f"s2_{region}_{run_ts}_{stif.name}"
+            t_tif_uploads += scp_upload(str(stif), remote_name)
+            s2_remote_names.append((stif, remote_name))
+        dem_remote_tif_name = f"full_pp_dem_{region}_{run_ts}.tif"
+        t_tif_uploads += scp_upload(dem_repro_tif, dem_remote_tif_name)
+        print(f"  TIF Uploads fertig  ({t_tif_uploads:.2f} s)")
+
+        # Schritt 5: STAC Collection + DEM STAC Item bauen und hochladen
+        print(f"\n  [Schritt 5/7] STAC Collection (S2) + STAC Item (DEM) generieren...")
+        t_stac_build_start = time.time()
+        collection_id = f"s2_{region}_{run_ts}"
+        collection_remote_name = f"s2_collection_{region}_{run_ts}.json"
+        collection_url = f"{HETZNER_URL_BASE}{collection_remote_name}"
+
+        # Pro S2-TIF ein eigenes STAC Item (mit datetime) erzeugen.
+        item_links = []
+        item_dates = []
+        s2_item_local_paths = []
+        s2_item_remote_names = []
+        for stif, remote_name in s2_remote_names:
+            date_str = _extract_date_from_filename(stif.name)
+            if not date_str:
+                print(f"  WARNUNG: konnte kein Datum aus {stif.name} extrahieren, ueberspringe")
+                continue
+            dt_iso = f"{date_str}T00:00:00Z"
+            item_dates.append(dt_iso)
+            item_id = f"s2_{region}_{run_ts}_{date_str}"
+            item_remote_name = f"s2_item_{region}_{run_ts}_{date_str}.json"
+            item_url = f"{HETZNER_URL_BASE}{item_remote_name}"
+            asset_url = f"{HETZNER_URL_BASE}{remote_name}"
+            grid = read_s2_grid(str(stif))
+            item = build_s2_stac_item(item_id, asset_url, dt_iso, grid, bbox_geo)
+            local_item = str(base / item_remote_name)
+            with open(local_item, "w") as f:
+                json.dump(item, f, indent=2)
+            s2_item_local_paths.append((local_item, item_remote_name))
+            s2_item_remote_names.append(item_remote_name)
+            item_links.append((item_id, item_url, item_remote_name))
+
+        collection = build_s2_stac_collection(
+            collection_id, collection_url, item_links, item_dates, bbox_geo,
+        )
+        local_collection = str(base / collection_remote_name)
+        with open(local_collection, "w") as f:
+            json.dump(collection, f, indent=2)
+
+        # DEM STAC Item (single)
+        dem_stac_remote_name = f"full_pp_dem_stac_{region}_{run_ts}.json"
+        dem_stac_url = f"{HETZNER_URL_BASE}{dem_stac_remote_name}"
+        dem_asset_url = f"{HETZNER_URL_BASE}{dem_remote_tif_name}"
+        dem_item = build_stac_item(
+            region=region, asset_href=dem_asset_url, epsg=dem_epsg,
+            item_id=f"full_pp_dem_{region}_{run_ts}", extent=geo_extent,
+        )
+        local_dem_stac = str(base / dem_stac_remote_name)
+        with open(local_dem_stac, "w") as f:
+            json.dump(dem_item, f, indent=2)
+        t_stac_build = time.time() - t_stac_build_start
+
+        # STAC-Dateien hochladen (separat von TIF-Uploads gemessen)
+        t_stac_uploads = 0.0
+        for local_item, item_remote_name in s2_item_local_paths:
+            t_stac_uploads += scp_upload(local_item, item_remote_name)
+        t_stac_uploads += scp_upload(local_collection, collection_remote_name)
+        t_stac_uploads += scp_upload(local_dem_stac, dem_stac_remote_name)
+        t_stac = t_stac_build + t_stac_uploads
+        print(f"  STAC fertig: {collection_url}  +  {dem_stac_url}  ({t_stac:.2f} s)")
+
+        # preprocessing_time = DEM-Reproject + S2-Reproject + alle Uploads + STAC-Build
+        # (S2/DEM Downloads zaehlen separat, wie bei local_preprocessing)
+        preprocessing_time = (t_dem_reproject + t_s2_reproject + t_tif_uploads
+                              + t_stac_build + t_stac_uploads)
+        print(f"  Pre-Processing-Zeit (ohne CDSE-Downloads): {preprocessing_time:.2f} s")
+        print(f"  (S2 Download {t_s2_download:.1f} s + DEM Download {t_dem_download:.1f} s separat)")
+
+        # Schritt 6: full_pp Szenario bauen + ausfuehren
+        print(f"\n  [Schritt 6/7] full_pp Szenario (2x load_stac) auf CDSE ausfuehren...")
+        scenario_path = build_full_pp_scenario(
+            region, collection_url, dem_stac_url,
+            base / f"full_preprocessing_{region}.json",
+            extent_size=args.extent_size, workflow=args.workflow,
+        )
+        results_main = run_openeo(args.api_url, str(scenario_path), str(main_dir))
+        t_main = results_main.get("total_time") or 0.0
+        total_time = preprocessing_time + t_main
+
+        # Schritt 7: persistieren
+        run_id = import_run(
+            str(main_dir),
+            crs_strategy="full_preprocessing",
+            run_type=run_type,
+            preprocessing_time=preprocessing_time,
+            dem_download_time=t_dem_download,
+            s2_download_time=t_s2_download,
+            extent_size=args.extent_size,
+            workflow=args.workflow,
+            local_resampling=args.local_resampling,
+            target_crs=target_crs_str,
+        )
+
+        # Nginx-Logs fuer ALLE relevanten Dateien (TIFs + STAC Items + Collection + DEM)
+        print(f"\n  [Logs] Hole nginx Access-Logs vom Hetzner-Server...")
+        try:
+            log_filenames = [n for _, n in s2_remote_names] + s2_item_remote_names + [
+                collection_remote_name, dem_remote_tif_name, dem_stac_remote_name,
+            ]
+            import_nginx_access_log(run_id, filenames=log_filenames)
+        except Exception as exc:
+            print(f"  WARNUNG: nginx-Logs konnten nicht geholt werden: {exc}")
+
+        return {
+            "strategy": "full_preprocessing", "repeat": repeat_idx + 1,
+            "run_type": run_type,
+            "status": results_main.get("status", "unknown"),
+            "preprocessing_time": preprocessing_time, "total_time": total_time,
+            "run_id": run_id, "outdir": str(base),
+        }
+    except Exception as exc:
+        print(f"  FEHLER: {exc}")
+        return {
+            "strategy": "full_preprocessing", "repeat": repeat_idx + 1,
+            "run_type": run_type,
             "status": "error", "preprocessing_time": None, "total_time": None,
             "run_id": None, "outdir": str(base),
         }
@@ -1023,8 +1535,10 @@ def main() -> None:
     parser.add_argument("--api-url", default=CDSE_URL,
                         help=f"OpenEO Backend URL (Standard: {CDSE_URL})")
     parser.add_argument("--strategy", default="all",
-                        choices=ALL_STRATEGIES + ["all"],
-                        help="Strategie(n) ausfuehren")
+                        choices=ALL_STRATEGIES + EXTRA_STRATEGIES + ["all"],
+                        help="Strategie(n) ausfuehren. 'all' = onthefly + "
+                             "local_preprocessing (full_preprocessing nur "
+                             "separat, weil deutlich laenger).")
     parser.add_argument("--region", default="berlin",
                         choices=sorted(REGIONS.keys()),
                         help="Region (waehlt extent + Ziel-UTM-CRS)")
@@ -1069,12 +1583,18 @@ def main() -> None:
                              "CDSE-Output ab und machen den Accuracy-Check "
                              "aussagekraeftig.")
     parser.add_argument("--target-crs", default=None,
-                        help="Ziel-CRS fuer die lokale DEM-Reprojektion "
-                             "(nur local_preprocessing). Default = UTM-EPSG der "
-                             "Region (z.B. EPSG:32633 fuer Berlin) + 10 m S2-Grid-"
-                             "Snap. Override z.B. mit EPSG:3035 (LAEA) oder "
-                             "EPSG:4326 (WGS84) erzwingt eine echte CRS-"
-                             "Transformation CDSE-seitig beim merge_cubes.")
+                        help="Ziel-CRS fuer die lokale DEM-Reprojektion. "
+                             "local_preprocessing: Default = UTM-EPSG der Region "
+                             "+ 10 m S2-Grid-Snap. full_preprocessing: Default "
+                             "= DEM wird exakt auf das S2-Grid (UTM) gesnapped. "
+                             "Override z.B. EPSG:3035 (LAEA) oder EPSG:4326 "
+                             "(WGS84) erzwingt eine echte CRS-Transformation "
+                             "CDSE-seitig beim merge_cubes.")
+    parser.add_argument("--reproject-s2", action="store_true",
+                        help="Nur fuer full_preprocessing + --target-crs: "
+                             "Auch die S2-Raster lokal nach --target-crs "
+                             "reprojizieren (Szenario 3: BEIDE Raster im "
+                             "Nicht-UTM-Ziel-CRS).")
 
     args = parser.parse_args()
 
@@ -1098,6 +1618,7 @@ def main() -> None:
     runners = {
         "onthefly": run_strategy_onthefly,
         "local_preprocessing": run_strategy_local_pp,
+        "full_preprocessing": run_strategy_full_pp,
     }
 
     for strategy in strategies:
