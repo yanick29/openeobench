@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat \"C:/Users/Yanic/.claude/projects/C--Users-Yanic-Documents-openEO-openeobench/memory/MEMORY.md\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

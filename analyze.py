@@ -59,6 +59,8 @@ def fetch_runs(db_path: str):
         select_cols.append("extent_size")
     if "workflow" in existing_cols:
         select_cols.append("workflow")
+    if "local_resampling" in existing_cols:
+        select_cols.append("local_resampling")
     rows = con.execute(
         f"SELECT {','.join(select_cols)} FROM runs WHERE status = 'success'"
     ).fetchall()
@@ -66,13 +68,17 @@ def fetch_runs(db_path: str):
     if "dem_download_time" not in existing_cols:
         for r in out:
             r["dem_download_time"] = None
-    # Backward-Compat: NULL extent_size = "medium" (= bisheriger fester Extent)
-    # Backward-Compat: NULL workflow = "merge_add" (= bisheriges Standard-Szenario)
+    # Backward-Compat:
+    #   NULL extent_size      -> "medium"   (bisheriger fester Extent)
+    #   NULL workflow         -> "merge_add" (bisheriges Standard-Szenario)
+    #   NULL local_resampling -> "nearest"   (bisheriges Verhalten in reproject_dem_local)
     for r in out:
         if not r.get("extent_size"):
             r["extent_size"] = "medium"
         if not r.get("workflow"):
             r["workflow"] = "merge_add"
+        if not r.get("local_resampling"):
+            r["local_resampling"] = "nearest"
     return out
 
 
@@ -167,6 +173,10 @@ def summarize(runs, accuracy_map=None, amortize_dem_seconds=None):
         amortized = [t + amortize_dem_seconds for t in total_times]
         total_amortized_median = statistics.median(amortized)
 
+    resampling_vals = sorted({r["local_resampling"] for r in clean
+                              if r.get("local_resampling")})
+    local_resampling_label = ",".join(resampling_vals) if resampling_vals else None
+
     return {
         "n": n,
         "n_cold": cold,
@@ -185,6 +195,7 @@ def summarize(runs, accuracy_map=None, amortize_dem_seconds=None):
         "credits_total": credits,
         "rmse_median": rmse_median,
         "mae_median": mae_median,
+        "local_resampling": local_resampling_label,
     }
 
 
@@ -217,6 +228,7 @@ def print_table(group_label, strategy_metrics):
         ("credits (sum)",         lambda m: fmt(m["credits_total"], 2)),
         ("RMSE median",           lambda m: fmt(m.get("rmse_median"), 4) if m.get("rmse_median") is not None else "-"),
         ("MAE median",            lambda m: fmt(m.get("mae_median"), 4) if m.get("mae_median") is not None else "-"),
+        ("local_resampling",      lambda m: m.get("local_resampling") or "-"),
     ]
 
     label_w = max(len(r[0]) for r in rows) + 2
@@ -240,7 +252,7 @@ def write_csv(path, all_results):
         "total_min", "total_max",
         "queue_median", "processing_median", "preprocessing_median",
         "dem_download_median", "total_amortized_median", "amortize_dem_seconds",
-        "credits_total", "rmse_median", "mae_median",
+        "credits_total", "rmse_median", "mae_median", "local_resampling",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)

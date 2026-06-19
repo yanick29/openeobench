@@ -42,6 +42,14 @@ SIZE_KM = {"small": 5.0, "medium": 10.0, "large": 50.0, "xlarge": 100.0}
 # Verfuegbare openEO-Workflows. 'merge_add' = bisheriges Verhalten.
 WORKFLOWS = ("merge_add", "subtract", "mask", "aggregation")
 
+# Lokale DEM-Resampling-Methoden. CDSE intern nutzt immer NearestNeighbor;
+# bilinear/cubic lokal erzeugen messbare Abweichungen zum onthefly-Output.
+LOCAL_RESAMPLING = {
+    "nearest":  Resampling.nearest,
+    "bilinear": Resampling.bilinear,
+    "cubic":    Resampling.cubic,
+}
+
 # ---------------------------------------------------------------------------
 # Hetzner-Konfiguration
 # ---------------------------------------------------------------------------
@@ -109,11 +117,19 @@ def _make_outdir(base: str, strategy: str) -> Path:
 
 
 def reproject_dem_local(input_tif: str, output_tif: str,
-                        dst_crs: str = "EPSG:32633") -> float:
-    """Reprojiziert ein GeoTIFF lokal (NearestNeighbor, konsistent mit CDSE).
+                        dst_crs: str = "EPSG:32633",
+                        resampling: str = "nearest") -> float:
+    """Reprojiziert ein GeoTIFF lokal.
+
+    resampling: 'nearest' (Default, pixelidentisch zu CDSE), 'bilinear' oder
+    'cubic'. Letztere weichen vom CDSE-Output ab und machen den
+    Accuracy-Check aussagekraeftig.
 
     Gibt Laufzeit in Sekunden zurueck.
     """
+    if resampling not in LOCAL_RESAMPLING:
+        raise ValueError(f"Unbekannte Resampling-Methode: {resampling}")
+    method = LOCAL_RESAMPLING[resampling]
     t0 = time.time()
     with rasterio.open(input_tif) as src:
         transform, width, height = calculate_default_transform(
@@ -131,7 +147,7 @@ def reproject_dem_local(input_tif: str, output_tif: str,
                     src_crs=src.crs,
                     dst_transform=transform,
                     dst_crs=dst_crs,
-                    resampling=Resampling.nearest,
+                    resampling=method,
                 )
     return time.time() - t0
 
@@ -551,8 +567,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         )
 
         # Schritt 2: Lokal reprojizieren
-        print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs}...")
-        t_reproject = reproject_dem_local(dem_tif, step2_tif, dst_crs=dst_crs)
+        print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs} ({args.local_resampling})...")
+        t_reproject = reproject_dem_local(dem_tif, step2_tif, dst_crs=dst_crs,
+                                          resampling=args.local_resampling)
         print(f"  Reprojektion abgeschlossen: {step2_tif}  ({t_reproject:.2f} s)")
 
         # Schritt 3: TIF nach Hetzner hochladen
@@ -604,6 +621,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             dem_download_time=t_download,
             extent_size=args.extent_size,
             workflow=args.workflow,
+            local_resampling=args.local_resampling,
         )
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf TIF + STAC)
@@ -671,21 +689,25 @@ def print_summary(results: list) -> None:
 # Accuracy-Check (onthefly vs. local_pp)
 # ---------------------------------------------------------------------------
 
-def _pg_extent_matches(pg: dict, target: dict) -> bool:
+def _pg_extent_matches(pg: dict, target: dict, exact: bool = False) -> bool:
     """True wenn ein Knoten ein spatial_extent mit gleichem Mittelpunkt hat.
 
-    Center-basiert (Toleranz ~0.01 deg = ~1 km), damit verschiedene
-    extent_size-Werte (small/medium/large/xlarge) trotzdem zur selben
-    Region matchen.
+    exact=False: Center-basiert (Toleranz ~0.01 deg = ~1 km), damit
+    verschiedene extent_size-Werte (small/medium/large/xlarge) trotzdem
+    zur selben Region matchen.
+
+    exact=True: zusaetzlich muessen alle 4 Bounds uebereinstimmen
+    (Toleranz 1e-4 deg ~ 10 m), so dass auch die extent_size passen muss.
     """
     pg_root = pg.get("process_graph", pg)
     if not isinstance(pg_root, dict):
         return False
     try:
-        tcx = (float(target["west"]) + float(target["east"])) / 2.0
-        tcy = (float(target["south"]) + float(target["north"])) / 2.0
+        tw, te = float(target["west"]), float(target["east"])
+        ts, tn = float(target["south"]), float(target["north"])
     except (KeyError, TypeError, ValueError):
         return False
+    tcx, tcy = (tw + te) / 2.0, (ts + tn) / 2.0
     for node in pg_root.values():
         if not isinstance(node, dict):
             continue
@@ -693,11 +715,29 @@ def _pg_extent_matches(pg: dict, target: dict) -> bool:
         if not isinstance(ext, dict):
             continue
         try:
-            cx = (float(ext["west"]) + float(ext["east"])) / 2.0
-            cy = (float(ext["south"]) + float(ext["north"])) / 2.0
+            ew, ee = float(ext["west"]), float(ext["east"])
+            es, en = float(ext["south"]), float(ext["north"])
         except (KeyError, TypeError, ValueError):
             continue
-        if abs(cx - tcx) < 0.01 and abs(cy - tcy) < 0.01:
+        cx, cy = (ew + ee) / 2.0, (es + en) / 2.0
+        if abs(cx - tcx) >= 0.01 or abs(cy - tcy) >= 0.01:
+            continue
+        if not exact:
+            return True
+        if (abs(ew - tw) < 1e-4 and abs(ee - te) < 1e-4
+                and abs(es - ts) < 1e-4 and abs(en - tn) < 1e-4):
+            return True
+    return False
+
+
+def _folder_matches_extent(folder: Path, target_extent: dict) -> bool:
+    """True wenn eine Scenario-JSON im Ordner exakt diesen extent enthaelt."""
+    for cand in folder.glob("*.json"):
+        try:
+            pg = json.loads(cand.read_text())
+        except Exception:
+            continue
+        if _pg_extent_matches(pg, target_extent, exact=True):
             return True
     return False
 
@@ -729,15 +769,31 @@ def _detect_folder_region(folder: Path) -> str:
     return None
 
 
-def _find_latest_run_dir(base: str, suffix: str, region: str):
-    """Neuesten outputs/run_*_{suffix} fuer Region zurueckgeben, oder None."""
+def _find_latest_run_dir(base: str, suffix: str, region: str,
+                          extent_size: str = None):
+    """Neuesten outputs/run_*_{suffix} fuer Region zurueckgeben, oder None.
+
+    Wenn extent_size gesetzt ist, werden nur Ordner beruecksichtigt, deren
+    Scenario-JSON exakt diesen Extent enthaelt (Bounding-Box-Vergleich).
+    """
     base_p = Path(base)
     if not base_p.is_dir():
         return None
-    candidates = [
-        d for d in base_p.glob(f"run_*_{suffix}")
-        if d.is_dir() and _detect_folder_region(d) == region
-    ]
+    target_extent = None
+    if extent_size is not None:
+        try:
+            target_extent = _compute_extent(region, extent_size)
+        except (KeyError, ValueError):
+            target_extent = None
+    candidates = []
+    for d in base_p.glob(f"run_*_{suffix}"):
+        if not d.is_dir():
+            continue
+        if _detect_folder_region(d) != region:
+            continue
+        if target_extent is not None and not _folder_matches_extent(d, target_extent):
+            continue
+        candidates.append(d)
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
@@ -817,21 +873,26 @@ def _persist_accuracy(run_id: int, mae: float, rmse: float,
 
 
 def run_accuracy_check(output_base: str, region: str,
-                       local_pp_run_id=None):
+                       local_pp_run_id=None, extent_size: str = None):
     """Neuesten onthefly- und local_pp-Run der Region vergleichen.
+
+    Wenn extent_size gesetzt ist, werden nur Runs mit passendem Extent
+    beruecksichtigt (verhindert das Vergleichen unterschiedlich grosser AOIs).
 
     Speichert den Median(MAE)/Median(RMSE) ueber alle gemeinsamen Date-TIFs in
     die accuracy-Tabelle (run_id des local_pp Runs).
     """
     print(f"\n{'='*60}")
-    print(f"  Accuracy-Check  |  Region: {region}")
+    extent_info = f"  |  Extent: {extent_size}" if extent_size else ""
+    print(f"  Accuracy-Check  |  Region: {region}{extent_info}")
 
-    onthefly_dir = _find_latest_run_dir(output_base, "onthefly", region)
-    local_pp_dir = _find_latest_run_dir(output_base, "local_pp", region)
+    onthefly_dir = _find_latest_run_dir(output_base, "onthefly", region, extent_size)
+    local_pp_dir = _find_latest_run_dir(output_base, "local_pp", region, extent_size)
 
     if not onthefly_dir or not local_pp_dir:
         miss = "onthefly" if not onthefly_dir else "local_pp"
-        print(f"  Skip: kein {miss}-Run fuer Region '{region}' gefunden.")
+        extent_msg = f" mit extent_size='{extent_size}'" if extent_size else ""
+        print(f"  Skip: kein {miss}-Run fuer Region '{region}'{extent_msg} gefunden.")
         return None
 
     print(f"  Referenz (onthefly): {onthefly_dir.name}")
@@ -935,6 +996,14 @@ def main() -> None:
                              "mask (B04 mit SCL Cloud-Mask, SCL not in {4,5} "
                              "wird maskiert, dann B04+DEM/add), "
                              "aggregation (B04+DEM/add, dann temporal mean).")
+    parser.add_argument("--local-resampling", default="nearest",
+                        choices=tuple(LOCAL_RESAMPLING.keys()),
+                        help="Resampling-Methode fuer die lokale DEM-Reprojektion "
+                             "(nur local_preprocessing). nearest (Default) ist "
+                             "pixelidentisch zu CDSE - der Accuracy-Check liefert "
+                             "dann MAE=RMSE=0. bilinear/cubic weichen vom "
+                             "CDSE-Output ab und machen den Accuracy-Check "
+                             "aussagekraeftig.")
 
     args = parser.parse_args()
 
@@ -945,6 +1014,7 @@ def main() -> None:
     print(f"Region:     {args.region}  (EPSG:{REGIONS[args.region]['epsg']})")
     print(f"Extent:     {args.extent_size}  ({SIZE_KM[args.extent_size]:.0f} km Kantenlaenge)")
     print(f"Workflow:   {args.workflow}")
+    print(f"Local-Resampling: {args.local_resampling}")
     print(f"Strategien: {strategies}")
     print(f"Repeats:    {args.repeat}")
     print(f"Run-Type:   {args.run_type}")
@@ -969,7 +1039,8 @@ def main() -> None:
                     and r.get("run_id") is not None
                     and r.get("status") == "success"):
                 local_pp_run_id = r["run_id"]
-        run_accuracy_check(args.output_dir, args.region, local_pp_run_id)
+        run_accuracy_check(args.output_dir, args.region, local_pp_run_id,
+                           extent_size=args.extent_size)
 
 
 if __name__ == "__main__":
