@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 import rasterio
+from rasterio.transform import Affine
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 
 from database import import_nginx_access_log, import_run
@@ -130,6 +131,10 @@ def reproject_dem_local(input_tif: str, output_tif: str,
     Sentinel-2 B04). So muss CDSE das geladene STAC-Asset nicht mehr selbst
     auf 10 m hochskalieren - die lokale Resampling-Methode bleibt erhalten.
 
+    Der Pixel-Origin wird zusaetzlich auf das Vielfache von target_resolution
+    gesnappt (outward), damit das Grid exakt mit dem Sentinel-2-Grid
+    uebereinstimmt und CDSE auch nicht mehr per align_to_grid resampeln muss.
+
     Gibt Laufzeit in Sekunden zurueck.
     """
     if resampling not in LOCAL_RESAMPLING:
@@ -141,6 +146,19 @@ def reproject_dem_local(input_tif: str, output_tif: str,
             src.crs, dst_crs, src.width, src.height, *src.bounds,
             resolution=target_resolution,
         )
+        # Origin auf target_resolution-Grid snappen (S2-aligned).
+        # Outward auf allen Seiten -> Original-Extent bleibt vollstaendig abgedeckt.
+        res = target_resolution
+        left, top = transform.c, transform.f
+        right = left + width * res
+        bottom = top - height * res
+        snapped_left   = math.floor(left   / res) * res
+        snapped_top    = math.ceil(top     / res) * res
+        snapped_right  = math.ceil(right   / res) * res
+        snapped_bottom = math.floor(bottom / res) * res
+        width  = int(round((snapped_right - snapped_left) / res))
+        height = int(round((snapped_top - snapped_bottom) / res))
+        transform = Affine(res, 0, snapped_left, 0, -res, snapped_top)
         meta = src.meta.copy()
         meta.update({"crs": dst_crs, "transform": transform,
                      "width": width, "height": height})
