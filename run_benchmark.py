@@ -118,12 +118,17 @@ def _make_outdir(base: str, strategy: str) -> Path:
 
 def reproject_dem_local(input_tif: str, output_tif: str,
                         dst_crs: str = "EPSG:32633",
-                        resampling: str = "nearest") -> float:
-    """Reprojiziert ein GeoTIFF lokal.
+                        resampling: str = "nearest",
+                        target_resolution: float = 10.0) -> float:
+    """Reprojiziert ein GeoTIFF lokal und resampelt auf target_resolution.
 
     resampling: 'nearest' (Default, pixelidentisch zu CDSE), 'bilinear' oder
     'cubic'. Letztere weichen vom CDSE-Output ab und machen den
     Accuracy-Check aussagekraeftig.
+
+    target_resolution: Pixelgroesse im Ziel-CRS (Default 10 m, gleich wie
+    Sentinel-2 B04). So muss CDSE das geladene STAC-Asset nicht mehr selbst
+    auf 10 m hochskalieren - die lokale Resampling-Methode bleibt erhalten.
 
     Gibt Laufzeit in Sekunden zurueck.
     """
@@ -133,7 +138,8 @@ def reproject_dem_local(input_tif: str, output_tif: str,
     t0 = time.time()
     with rasterio.open(input_tif) as src:
         transform, width, height = calculate_default_transform(
-            src.crs, dst_crs, src.width, src.height, *src.bounds
+            src.crs, dst_crs, src.width, src.height, *src.bounds,
+            resolution=target_resolution,
         )
         meta = src.meta.copy()
         meta.update({"crs": dst_crs, "transform": transform,
@@ -566,8 +572,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             args, region, base, cache_dir, use_cache=args.dem_cache
         )
 
-        # Schritt 2: Lokal reprojizieren
-        print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs} ({args.local_resampling})...")
+        # Schritt 2: Lokal reprojizieren + auf 10 m resampeln
+        print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs} ({args.local_resampling}, 10 m)...")
         t_reproject = reproject_dem_local(dem_tif, step2_tif, dst_crs=dst_crs,
                                           resampling=args.local_resampling)
         print(f"  Reprojektion abgeschlossen: {step2_tif}  ({t_reproject:.2f} s)")
