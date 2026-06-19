@@ -26,6 +26,15 @@ TIMING_FIELDS = ("total_time", "queue_time", "processing_time", "preprocessing_t
 BOOTSTRAP_ITERS = 2000
 NON_REGION_TOKENS = {"laea", "test"}
 
+# Default Ziel-UTM-EPSG pro Region (Spiegel von REGIONS in run_benchmark.py).
+# Wird als Backward-Compat-Fallback fuer Runs benutzt die noch kein
+# target_crs in der DB haben.
+REGION_DEFAULT_EPSG = {
+    "amsterdam": 32631, "berlin":   32633, "hamburg":  32632,
+    "kapstadt":  32734, "newyork":  32618, "rom":      32633,
+    "tokio":     32654, "wien":     32633, "zuerich":  32632,
+}
+
 
 def detect_region(scenario: str) -> str:
     """Derive region from the last underscore-separated token of the scenario name."""
@@ -61,6 +70,8 @@ def fetch_runs(db_path: str):
         select_cols.append("workflow")
     if "local_resampling" in existing_cols:
         select_cols.append("local_resampling")
+    if "target_crs" in existing_cols:
+        select_cols.append("target_crs")
     rows = con.execute(
         f"SELECT {','.join(select_cols)} FROM runs WHERE status = 'success'"
     ).fetchall()
@@ -177,6 +188,10 @@ def summarize(runs, accuracy_map=None, amortize_dem_seconds=None):
                               if r.get("local_resampling")})
     local_resampling_label = ",".join(resampling_vals) if resampling_vals else None
 
+    target_crs_vals = sorted({r["target_crs"] for r in clean
+                              if r.get("target_crs")})
+    target_crs_label = ",".join(target_crs_vals) if target_crs_vals else None
+
     return {
         "n": n,
         "n_cold": cold,
@@ -196,6 +211,7 @@ def summarize(runs, accuracy_map=None, amortize_dem_seconds=None):
         "rmse_median": rmse_median,
         "mae_median": mae_median,
         "local_resampling": local_resampling_label,
+        "target_crs": target_crs_label,
     }
 
 
@@ -229,6 +245,7 @@ def print_table(group_label, strategy_metrics):
         ("RMSE median",           lambda m: fmt(m.get("rmse_median"), 4) if m.get("rmse_median") is not None else "-"),
         ("MAE median",            lambda m: fmt(m.get("mae_median"), 4) if m.get("mae_median") is not None else "-"),
         ("local_resampling",      lambda m: m.get("local_resampling") or "-"),
+        ("target_crs",            lambda m: m.get("target_crs") or "-"),
     ]
 
     label_w = max(len(r[0]) for r in rows) + 2
@@ -253,6 +270,7 @@ def write_csv(path, all_results):
         "queue_median", "processing_median", "preprocessing_median",
         "dem_download_median", "total_amortized_median", "amortize_dem_seconds",
         "credits_total", "rmse_median", "mae_median", "local_resampling",
+        "target_crs",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
@@ -294,6 +312,11 @@ def main():
 
     for r in runs:
         r["region"] = detect_region(r["scenario"])
+        # Backward-Compat: NULL target_crs -> UTM-EPSG der Region
+        if not r.get("target_crs"):
+            default_epsg = REGION_DEFAULT_EPSG.get(r["region"])
+            if default_epsg:
+                r["target_crs"] = f"EPSG:{default_epsg}"
 
     if args.region:
         runs = [r for r in runs if r["region"] == args.region.lower()]

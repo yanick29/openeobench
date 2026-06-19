@@ -52,6 +52,7 @@ def create_database():
         extent_size TEXT,
         workflow TEXT,
         local_resampling TEXT,
+        target_crs TEXT,
         
         -- Extra
         credits DOUBLE,
@@ -110,6 +111,8 @@ def create_database():
         c.execute("ALTER TABLE runs ADD COLUMN workflow TEXT")
     if "local_resampling" not in existing_run_cols:
         c.execute("ALTER TABLE runs ADD COLUMN local_resampling TEXT")
+    if "target_crs" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN target_crs TEXT")
 
     conn.commit()
     conn.close()
@@ -124,7 +127,7 @@ def get_next_id(conn, table, id_column):
 
 def import_run(output_directory, crs_strategy=None, run_type=None,
                preprocessing_time=None, extent_size=None, dem_download_time=None,
-               workflow=None, local_resampling=None):
+               workflow=None, local_resampling=None, target_crs=None):
     """Importiert einen Run aus results.json und job-results.json in die DB."""
     conn = duckdb.connect(DB_PATH)
     
@@ -220,9 +223,9 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         download_time, total_time, timestamp, error, job_status_history,
         output_crs, pixel_shape, bounding_box, num_output_files, backend_version,
         crs_strategy, run_type, preprocessing_time, dem_download_time, extent_size,
-        workflow, local_resampling,
+        workflow, local_resampling, target_crs,
         credits, cpu_seconds, duration_backend, input_pixels_mp, max_memory_gb
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
         run_id,
         results.get("backend_url"),
         results.get("backend_name"),
@@ -250,6 +253,7 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         extent_size,
         workflow,
         local_resampling,
+        target_crs,
         results.get("credits"),
         results.get("cpu_seconds"),
         results.get("duration_backend"),
@@ -407,6 +411,7 @@ if __name__ == "__main__":
         print("  --extent-size small|medium|large|xlarge")
         print("  --workflow merge_add|subtract|mask|aggregation")
         print("  --local-resampling nearest|bilinear|cubic")
+        print("  --target-crs EPSG:32633|EPSG:3035|EPSG:4326|...")
         sys.exit(1)
     
     command = sys.argv[1]
@@ -428,6 +433,7 @@ if __name__ == "__main__":
         dem_dl_time = None
         workflow = None
         local_resampling = None
+        target_crs = None
 
         i = 3
         while i < len(sys.argv):
@@ -452,12 +458,15 @@ if __name__ == "__main__":
             elif sys.argv[i] == "--local-resampling" and i + 1 < len(sys.argv):
                 local_resampling = sys.argv[i + 1]
                 i += 2
+            elif sys.argv[i] == "--target-crs" and i + 1 < len(sys.argv):
+                target_crs = sys.argv[i + 1]
+                i += 2
             else:
                 i += 1
 
         import_run(output_dir, strategy, run_type, preproc_time, extent,
                    dem_download_time=dem_dl_time, workflow=workflow,
-                   local_resampling=local_resampling)
+                   local_resampling=local_resampling, target_crs=target_crs)
     
     elif command == "show":
         show_runs()

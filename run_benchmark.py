@@ -51,6 +51,24 @@ LOCAL_RESAMPLING = {
     "cubic":    Resampling.cubic,
 }
 
+
+def _normalize_crs(crs_str: str) -> str:
+    """Normalisiert 'epsg:3035' / '3035' / 'EPSG:3035' -> 'EPSG:3035'."""
+    s = crs_str.strip().upper()
+    if s.startswith("EPSG:"):
+        s = s[5:]
+    return f"EPSG:{int(s)}"
+
+
+def _parse_epsg(crs_str: str) -> int:
+    """EPSG-Code als int aus 'EPSG:3035' oder '3035'."""
+    return int(_normalize_crs(crs_str).split(":", 1)[1])
+
+
+def _is_utm_epsg(epsg: int) -> bool:
+    """True wenn EPSG ein UTM-CRS ist (32601-32660 N, 32701-32760 S)."""
+    return (32601 <= epsg <= 32660) or (32701 <= epsg <= 32760)
+
 # ---------------------------------------------------------------------------
 # Hetzner-Konfiguration
 # ---------------------------------------------------------------------------
@@ -128,37 +146,51 @@ def reproject_dem_local(input_tif: str, output_tif: str,
     Accuracy-Check aussagekraeftig.
 
     target_resolution: Pixelgroesse im Ziel-CRS (Default 10 m, gleich wie
-    Sentinel-2 B04). So muss CDSE das geladene STAC-Asset nicht mehr selbst
-    auf 10 m hochskalieren - die lokale Resampling-Methode bleibt erhalten.
-
-    Der Pixel-Origin wird zusaetzlich auf das Vielfache von target_resolution
-    gesnappt (outward), damit das Grid exakt mit dem Sentinel-2-Grid
-    uebereinstimmt und CDSE auch nicht mehr per align_to_grid resampeln muss.
+    Sentinel-2 B04). Wird nur bei UTM-Ziel-CRS erzwungen + S2-Grid-Snap.
+    Bei Nicht-UTM-Zielen (LAEA, WGS84, ...) wird die native Aufloesung der
+    Reprojektion uebernommen, ohne Grid-Snap - dort hat 10 m / S2-Snap
+    keine sinnvolle Semantik.
 
     Gibt Laufzeit in Sekunden zurueck.
     """
     if resampling not in LOCAL_RESAMPLING:
         raise ValueError(f"Unbekannte Resampling-Methode: {resampling}")
     method = LOCAL_RESAMPLING[resampling]
+
+    # UTM-Detection: nur dann 10 m erzwingen + auf S2-Grid snappen.
+    is_utm = False
+    try:
+        is_utm = _is_utm_epsg(_parse_epsg(dst_crs))
+    except (ValueError, AttributeError):
+        pass
+
     t0 = time.time()
     with rasterio.open(input_tif) as src:
-        transform, width, height = calculate_default_transform(
-            src.crs, dst_crs, src.width, src.height, *src.bounds,
-            resolution=target_resolution,
-        )
-        # Origin auf target_resolution-Grid snappen (S2-aligned).
-        # Outward auf allen Seiten -> Original-Extent bleibt vollstaendig abgedeckt.
-        res = target_resolution
-        left, top = transform.c, transform.f
-        right = left + width * res
-        bottom = top - height * res
-        snapped_left   = math.floor(left   / res) * res
-        snapped_top    = math.ceil(top     / res) * res
-        snapped_right  = math.ceil(right   / res) * res
-        snapped_bottom = math.floor(bottom / res) * res
-        width  = int(round((snapped_right - snapped_left) / res))
-        height = int(round((snapped_top - snapped_bottom) / res))
-        transform = Affine(res, 0, snapped_left, 0, -res, snapped_top)
+        if is_utm:
+            transform, width, height = calculate_default_transform(
+                src.crs, dst_crs, src.width, src.height, *src.bounds,
+                resolution=target_resolution,
+            )
+            # Origin auf target_resolution-Grid snappen (S2-aligned).
+            # Outward auf allen Seiten -> Original-Extent bleibt vollstaendig abgedeckt.
+            res = target_resolution
+            left, top = transform.c, transform.f
+            right = left + width * res
+            bottom = top - height * res
+            snapped_left   = math.floor(left   / res) * res
+            snapped_top    = math.ceil(top     / res) * res
+            snapped_right  = math.ceil(right   / res) * res
+            snapped_bottom = math.floor(bottom / res) * res
+            width  = int(round((snapped_right - snapped_left) / res))
+            height = int(round((snapped_top - snapped_bottom) / res))
+            transform = Affine(res, 0, snapped_left, 0, -res, snapped_top)
+        else:
+            # Nicht-UTM (LAEA, WGS84, Web Mercator, ...): native Reprojektions-
+            # Aufloesung, kein S2-Snap. CDSE bekommt damit ein "echtes"
+            # cross-CRS Resampling-Problem zu loesen.
+            transform, width, height = calculate_default_transform(
+                src.crs, dst_crs, src.width, src.height, *src.bounds,
+            )
         meta = src.meta.copy()
         meta.update({"crs": dst_crs, "transform": transform,
                      "width": width, "height": height})
@@ -568,8 +600,14 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     step3_dir.mkdir()
 
     region = args.region
-    epsg = REGIONS[region]["epsg"]
-    dst_crs = f"EPSG:{epsg}"
+    region_epsg = REGIONS[region]["epsg"]
+    if getattr(args, "target_crs", None):
+        target_crs_str = _normalize_crs(args.target_crs)
+        target_epsg = _parse_epsg(target_crs_str)
+    else:
+        target_epsg = region_epsg
+        target_crs_str = f"EPSG:{region_epsg}"
+    dst_crs = target_crs_str
     run_ts = _ts()
     remote_tif_name = f"dem_reprojected_{region}_{run_ts}.tif"
     remote_stac_name = f"stac_item_{region}_{run_ts}.json"
@@ -590,8 +628,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             args, region, base, cache_dir, use_cache=args.dem_cache
         )
 
-        # Schritt 2: Lokal reprojizieren + auf 10 m resampeln
-        print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs} ({args.local_resampling}, 10 m)...")
+        # Schritt 2: Lokal reprojizieren (bei UTM auch auf 10 m S2-Grid snappen)
+        grid_info = "10 m, S2-snap" if _is_utm_epsg(target_epsg) else "native res"
+        print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs} ({args.local_resampling}, {grid_info})...")
         t_reproject = reproject_dem_local(dem_tif, step2_tif, dst_crs=dst_crs,
                                           resampling=args.local_resampling)
         print(f"  Reprojektion abgeschlossen: {step2_tif}  ({t_reproject:.2f} s)")
@@ -607,7 +646,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         stac_item = build_stac_item(
             region=region,
             asset_href=asset_url,
-            epsg=epsg,
+            epsg=target_epsg,
             item_id=f"dem_reprojected_{region}_{run_ts}",
             extent=_compute_extent(region, args.extent_size),
         )
@@ -646,6 +685,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             extent_size=args.extent_size,
             workflow=args.workflow,
             local_resampling=args.local_resampling,
+            target_crs=target_crs_str,
         )
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf TIF + STAC)
@@ -1028,6 +1068,13 @@ def main() -> None:
                              "dann MAE=RMSE=0. bilinear/cubic weichen vom "
                              "CDSE-Output ab und machen den Accuracy-Check "
                              "aussagekraeftig.")
+    parser.add_argument("--target-crs", default=None,
+                        help="Ziel-CRS fuer die lokale DEM-Reprojektion "
+                             "(nur local_preprocessing). Default = UTM-EPSG der "
+                             "Region (z.B. EPSG:32633 fuer Berlin) + 10 m S2-Grid-"
+                             "Snap. Override z.B. mit EPSG:3035 (LAEA) oder "
+                             "EPSG:4326 (WGS84) erzwingt eine echte CRS-"
+                             "Transformation CDSE-seitig beim merge_cubes.")
 
     args = parser.parse_args()
 
@@ -1039,6 +1086,10 @@ def main() -> None:
     print(f"Extent:     {args.extent_size}  ({SIZE_KM[args.extent_size]:.0f} km Kantenlaenge)")
     print(f"Workflow:   {args.workflow}")
     print(f"Local-Resampling: {args.local_resampling}")
+    if args.target_crs:
+        print(f"Target-CRS: {_normalize_crs(args.target_crs)}  (Override)")
+    else:
+        print(f"Target-CRS: EPSG:{REGIONS[args.region]['epsg']}  (Region-Default UTM)")
     print(f"Strategien: {strategies}")
     print(f"Repeats:    {args.repeat}")
     print(f"Run-Type:   {args.run_type}")
