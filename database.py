@@ -215,11 +215,19 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
     run_id = get_next_id(conn, "runs", "run_id")
 
     cdse_total_time = results.get("total_time")
-    total_time = (
-        preprocessing_time + cdse_total_time
-        if preprocessing_time is not None and cdse_total_time is not None
-        else cdse_total_time
-    )
+    # Vier Faelle:
+    #   beide None -> None
+    #   nur cdse_total_time -> cdse_total_time (klassisches Verhalten, z.B. onthefly)
+    #   nur preprocessing_time -> preprocessing_time (local_reference - kein CDSE-Job)
+    #   beide -> Summe (local_pp / full_pp)
+    if preprocessing_time is None and cdse_total_time is None:
+        total_time = None
+    elif preprocessing_time is None:
+        total_time = cdse_total_time
+    elif cdse_total_time is None:
+        total_time = preprocessing_time
+    else:
+        total_time = preprocessing_time + cdse_total_time
 
     conn.execute('''INSERT INTO runs (
         run_id, backend_url, backend_name, scenario, job_id, status,

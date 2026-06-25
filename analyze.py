@@ -215,6 +215,64 @@ def summarize(runs, accuracy_map=None, amortize_dem_seconds=None):
     }
 
 
+def _try_import_mannwhitneyu():
+    """Importiere scipy.stats.mannwhitneyu lazy; gib None zurueck wenn nicht
+    installiert. Damit funktioniert analyze.py auch ohne scipy, nur die
+    Signifikanz-Tests sind dann deaktiviert."""
+    try:
+        from scipy.stats import mannwhitneyu  # type: ignore
+        return mannwhitneyu
+    except ImportError:
+        return None
+
+
+_SCIPY_HINT_PRINTED = False
+
+
+def print_significance_tests(group_label, runs_subset):
+    """Paarweiser Mann-Whitney-U-Test auf total_time fuer alle crs_strategies
+    in runs_subset. Gibt eine kompakte Tabelle aus. Bei n<3 pro Gruppe wird
+    der Test uebersprungen (zu wenige Datenpunkte fuer U)."""
+    global _SCIPY_HINT_PRINTED
+    mwu = _try_import_mannwhitneyu()
+    if mwu is None:
+        if not _SCIPY_HINT_PRINTED:
+            print("\n[--significance] scipy nicht installiert. "
+                  "Installation: pip install scipy")
+            _SCIPY_HINT_PRINTED = True
+        return
+
+    by_strategy = defaultdict(list)
+    for r in runs_subset:
+        v = r.get("total_time")
+        if v is None:
+            continue
+        by_strategy[r.get("crs_strategy") or "unknown"].append(v)
+    strategies = sorted(by_strategy.keys())
+    if len(strategies) < 2:
+        return
+    pairs = [(strategies[i], strategies[j])
+             for i in range(len(strategies))
+             for j in range(i + 1, len(strategies))]
+    print(f"\n--- {group_label} | Mann-Whitney-U (paarweise, total_time) ---")
+    for a, b in pairs:
+        va, vb = by_strategy[a], by_strategy[b]
+        if len(va) < 3 or len(vb) < 3:
+            print(f"  {a} vs {b}: zu wenige Datenpunkte "
+                  f"(n_a={len(va)}, n_b={len(vb)}, brauche >=3 pro Gruppe)")
+            continue
+        try:
+            stat, pval = mwu(va, vb, alternative="two-sided")
+        except Exception as exc:
+            print(f"  {a} vs {b}: Test fehlgeschlagen ({exc})")
+            continue
+        med_diff = statistics.median(va) - statistics.median(vb)
+        sig = "signifikant" if pval < 0.05 else "nicht signifikant"
+        print(f"  {a} vs {b}: Median-Diff = {med_diff:+.2f}s "
+              f"(n_a={len(va)}, n_b={len(vb)}), "
+              f"U = {stat:.1f}, p = {pval:.4f} ({sig})")
+
+
 def fmt(v, prec=2):
     if v is None:
         return "—"
@@ -306,6 +364,13 @@ def main():
                              "und hot Runs (statt sie zu mischen). Wichtig "
                              "weil cold-Runs (z.B. erster Run mit DEM-Cache-"
                              "Miss) andere Laufzeiten haben als hot-Runs.")
+    parser.add_argument("--significance", action="store_true",
+                        help="Pro Gruppe paarweise Mann-Whitney-U-Tests "
+                             "(scipy.stats.mannwhitneyu) zwischen den "
+                             "crs_strategies auf total_time. Zeigt Median-"
+                             "Diff, U-Statistik und p-Wert sowie ob der "
+                             "Unterschied signifikant (p<0.05) ist. "
+                             "Benoetigt scipy: pip install scipy.")
     args = parser.parse_args()
 
     runs = fetch_runs(args.db)
@@ -357,10 +422,12 @@ def main():
 
     def _append_group(results, label, runs_subset):
         """Append summary for runs_subset; with --split-run-type zusaetzlich
-        getrennte cold/hot Sub-Tabellen."""
+        getrennte cold/hot Sub-Tabellen. Sammelt zugleich die Runs-Listen
+        fuer eine spaetere Signifikanz-Auswertung pro Gruppe."""
         metrics = _summarize_group(runs_subset)
         if metrics:
             results.append((label, metrics))
+            sig_groups.append((label, list(runs_subset)))
         if args.split_run_type:
             cold_runs = [r for r in runs_subset
                          if (r.get("run_type") or "").lower() == "cold"]
@@ -370,10 +437,14 @@ def main():
                 m_cold = _summarize_group(cold_runs)
                 if m_cold:
                     results.append((f"{label}  [cold]", m_cold))
+                    sig_groups.append((f"{label}  [cold]", cold_runs))
             if hot_runs:
                 m_hot = _summarize_group(hot_runs)
                 if m_hot:
                     results.append((f"{label}  [hot]", m_hot))
+                    sig_groups.append((f"{label}  [hot]", hot_runs))
+
+    sig_groups = []
 
     results = []
 
@@ -405,6 +476,13 @@ def main():
 
     for label, metrics in results:
         print_table(label, metrics)
+
+    if args.significance:
+        print(f"\n{'='*60}")
+        print(" Signifikanz-Tests (Mann-Whitney-U, alpha=0.05)")
+        print(f"{'='*60}")
+        for label, runs_subset in sig_groups:
+            print_significance_tests(label, runs_subset)
 
     if args.csv:
         write_csv(args.csv, results)

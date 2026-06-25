@@ -39,7 +39,10 @@ CDSE_URL = "https://openeo.dataspace.copernicus.eu/openeo/1.2"
 ALL_STRATEGIES = ["onthefly", "local_preprocessing"]
 # full_preprocessing wird bewusst NICHT in "all" einbezogen, weil es deutlich
 # laenger dauert (zwei volle Downloads + N Uploads + STAC Collection).
-EXTRA_STRATEGIES = ["full_preprocessing"]
+# local_reference ist die unabhaengige lokale Ground-Truth-Pipeline ohne
+# CDSE-Workflow-Job - separat opt-in, weil sie nicht direkt mit CDSE-Strategien
+# vergleichbar ist (wird per --reference-check als REFERENZ benutzt).
+EXTRA_STRATEGIES = ["full_preprocessing", "local_reference"]
 
 # AOI-Groessen (Kantenlaenge in km) um den Region-Mittelpunkt.
 # 'medium' bleibt Backward-Compat = unveraenderter REGIONS-Extent.
@@ -1333,6 +1336,318 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# local_reference: vollstaendig lokale Ground-Truth-Pipeline
+# ---------------------------------------------------------------------------
+
+def _box3_mean(arr):
+    """3x3 Mittelwert-Filter mit Edge-Padding.
+
+    Aequivalent zu apply_kernel mit kernel=[[1/9]*3]*3 + replicate-padding.
+    Reine numpy-Implementierung, keine zusaetzliche Dependency.
+    """
+    import numpy as np
+    a = arr.astype(np.float64, copy=False)
+    pad = np.pad(a, 1, mode="edge")
+    s = (pad[:-2, :-2] + pad[:-2, 1:-1] + pad[:-2, 2:] +
+         pad[1:-1, :-2] + pad[1:-1, 1:-1] + pad[1:-1, 2:] +
+         pad[2:, :-2] + pad[2:, 1:-1] + pad[2:, 2:])
+    return s / 9.0
+
+
+def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
+                          out_dir: Path) -> list:
+    """Wende den Workflow lokal mit rasterio+numpy an. Alle Eingaben muessen
+    bereits auf dasselbe Grid (CRS, Aufloesung, Transform, Shape) reprojiziert
+    sein.
+
+    workflow:
+      merge_add / resample -> S2[B04] + DEM
+      subtract             -> S2[B04] - DEM
+      mask                 -> S2 mit SCL not in {4,5} maskiert, dann + DEM
+      focal                -> (S2[B04] + DEM) -> 3x3 Mittelwert-Kernel
+      aggregation          -> mean_t(S2[B04] + DEM) ueber alle Dates
+      filter_bbox          -> (S2[B04] + DEM) -> mittlere 50% des Extents
+
+    Schreibt openEO_*.tif unter denselben Dateinamen wie die S2-Eingaben in
+    out_dir und gibt deren Pfade zurueck.
+    """
+    import numpy as np
+
+    with rasterio.open(str(dem_tif)) as dem_src:
+        dem_data = dem_src.read(1).astype(np.float64)
+        ref_meta = dem_src.meta.copy()
+        ref_transform = dem_src.transform
+
+    def _write_single(out_path: Path, data, meta=None):
+        m = (meta if meta is not None else ref_meta).copy()
+        m.update({"count": 1, "dtype": "float32"})
+        with rasterio.open(out_path, "w", **m) as dst:
+            dst.write(data.astype(np.float32), 1)
+
+    output_tifs = []
+    per_date_results = []
+
+    for s2_tif in s2_tifs:
+        with rasterio.open(str(s2_tif)) as s2_src:
+            s2_data = s2_src.read().astype(np.float64)
+
+        if workflow in ("merge_add", "resample"):
+            result = s2_data[0] + dem_data
+            _write_single(out_dir / s2_tif.name, result)
+            output_tifs.append(out_dir / s2_tif.name)
+
+        elif workflow == "subtract":
+            result = s2_data[0] - dem_data
+            _write_single(out_dir / s2_tif.name, result)
+            output_tifs.append(out_dir / s2_tif.name)
+
+        elif workflow == "mask":
+            if s2_data.shape[0] < 2:
+                raise RuntimeError(
+                    f"workflow=mask erwartet 2 Baender (B04+SCL), "
+                    f"in {s2_tif.name} sind nur {s2_data.shape[0]}"
+                )
+            b04 = s2_data[0]
+            scl = s2_data[1].astype(int)
+            keep = np.isin(scl, (4, 5))
+            b04_masked = np.where(keep, b04, np.nan)
+            result = b04_masked + dem_data
+            _write_single(out_dir / s2_tif.name, result)
+            output_tifs.append(out_dir / s2_tif.name)
+
+        elif workflow == "focal":
+            combined = s2_data[0] + dem_data
+            result = _box3_mean(combined)
+            _write_single(out_dir / s2_tif.name, result)
+            output_tifs.append(out_dir / s2_tif.name)
+
+        elif workflow == "filter_bbox":
+            combined = s2_data[0] + dem_data
+            h, w = combined.shape
+            i0, i1 = h // 4, h - h // 4
+            j0, j1 = w // 4, w - w // 4
+            result = combined[i0:i1, j0:j1]
+            crop_meta = ref_meta.copy()
+            crop_meta.update({
+                "count":  1,
+                "dtype":  "float32",
+                "height": result.shape[0],
+                "width":  result.shape[1],
+                "transform": Affine(
+                    ref_transform.a, 0,
+                    ref_transform.c + j0 * ref_transform.a,
+                    0, ref_transform.e,
+                    ref_transform.f + i0 * ref_transform.e,
+                ),
+            })
+            _write_single(out_dir / s2_tif.name, result, meta=crop_meta)
+            output_tifs.append(out_dir / s2_tif.name)
+
+        elif workflow == "aggregation":
+            per_date_results.append(s2_data[0] + dem_data)
+
+        else:
+            raise ValueError(f"workflow={workflow} ist lokal nicht implementiert.")
+
+    if workflow == "aggregation" and per_date_results:
+        # Temporal mean. CDSE-Output-Dateiname fuer aggregation ist nicht
+        # garantiert; wir schreiben das mean-Ergebnis unter JEDER Date-
+        # Dateinamen, damit der Accuracy-Check den match auf die tatsaechliche
+        # CDSE-Datei zuverlaessig findet, unabhaengig von der Naming-
+        # Konvention des Backends.
+        import numpy as np
+        stacked = np.stack(per_date_results, axis=0)
+        mean = np.nanmean(stacked, axis=0)
+        for s2_tif in s2_tifs:
+            _write_single(out_dir / s2_tif.name, mean)
+            output_tifs.append(out_dir / s2_tif.name)
+
+    return output_tifs
+
+
+def run_strategy_local_reference(args, repeat_idx: int) -> dict:
+    """
+    local_reference: KOMPLETT lokale Berechnung (S2 + DEM) als unabhaengige
+    Ground-Truth gegen die alle CDSE-Strategien per --reference-check
+    verglichen werden koennen. Kein CDSE-Workflow-Job - nur die beiden
+    Downloads sind CDSE.
+
+    Schritte:
+      1. S2 von CDSE herunterladen (load_collection + save_result)
+      2. DEM von CDSE herunterladen
+      3. Beide lokal mit rasterio auf Ziel-CRS / 10 m / --local-resampling
+         reprojizieren (definierte, dokumentierte Reprojektions-Settings)
+      4. Workflow-Operation lokal mit numpy ausfuehren
+      5. Ergebnis-TIFs schreiben (gleiche Dateinamen wie CDSE-S2 -> direkter
+         Filename-Match im Accuracy-Check)
+
+    preprocessing_time = s2_download + dem_download + reprojection + operation.
+    total_time = preprocessing_time (kein CDSE-Job hier).
+    """
+    run_type = _run_type_for(repeat_idx, args.run_type)
+    base = _make_outdir(args.output_dir, "local_reference")
+    region = args.region
+    region_epsg = REGIONS[region]["epsg"]
+
+    if getattr(args, "target_crs", None):
+        target_crs_str = _normalize_crs(args.target_crs)
+    else:
+        target_crs_str = f"EPSG:{region_epsg}"
+
+    # Marker-Scenario-JSON: enthaelt den equivalenten onthefly-Process-Graph
+    # plus ein _local_reference-Metadaten-Objekt. Wird von
+    # _detect_folder_region / _detect_folder_workflow gefunden, ohne dass das
+    # Backend ihn ausgefuehrt hat.
+    marker_scenario_path = base / f"local_reference_{region}.json"
+    template = _load_bench_template(region, args.extent_size)
+    marker_pg = _build_workflow_pg(template, args.workflow, region=region)
+    with open(marker_scenario_path, "w") as f:
+        json.dump({
+            "process_graph": marker_pg,
+            "_local_reference": {
+                "target_crs": target_crs_str,
+                "resampling": args.local_resampling,
+                "target_resolution_m": 10.0,
+                "workflow": args.workflow,
+            },
+        }, f, indent=2)
+
+    print(f"\n{'='*60}")
+    print(f"  Strategie: local_reference  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
+    print(f"  Output: {base}  |  Target-CRS: {target_crs_str}  |  Resampling: {args.local_resampling}")
+
+    try:
+        # Schritt 1: S2 von CDSE
+        print(f"\n  [Schritt 1/4] S2 von CDSE herunterladen ({region}, {args.extent_size})...")
+        s2_dl_dir = base / "step1_s2_download"
+        s2_dl_dir.mkdir()
+        s2_scenario = build_s2_download_scenario(
+            region, base / "scenario_s2_download.json",
+            extent_size=args.extent_size, workflow=args.workflow,
+        )
+        s2_results = run_openeo(args.api_url, str(s2_scenario), str(s2_dl_dir),
+                                job_timeout=args.job_timeout)
+        s2_download_time = s2_results.get("total_time") or 0.0
+        s2_tifs = sorted(Path(p) for p in glob.glob(str(s2_dl_dir / "*.tif")))
+        if not s2_tifs:
+            raise RuntimeError(f"Keine S2-TIFs heruntergeladen in {s2_dl_dir}")
+        print(f"  {len(s2_tifs)} S2-TIFs heruntergeladen ({s2_download_time:.1f} s)")
+
+        # Schritt 2: DEM von CDSE
+        print(f"\n  [Schritt 2/4] DEM von CDSE herunterladen ({region}, {args.extent_size})...")
+        dem_dl_dir = base / "step2_dem_download"
+        dem_dl_dir.mkdir()
+        dem_scenario = build_dem_download_scenario(
+            region, base / "scenario_dem_download.json",
+            extent_size=args.extent_size,
+        )
+        dem_results = run_openeo(args.api_url, str(dem_scenario), str(dem_dl_dir),
+                                 job_timeout=args.job_timeout)
+        dem_download_time = dem_results.get("total_time") or 0.0
+        dem_tifs = glob.glob(str(dem_dl_dir / "*.tif"))
+        if not dem_tifs:
+            raise RuntimeError(f"Kein DEM-TIF heruntergeladen in {dem_dl_dir}")
+        dem_tif_raw = dem_tifs[0]
+        print(f"  DEM heruntergeladen ({dem_download_time:.1f} s)")
+
+        # Schritt 3: lokale Reprojektion - DEFINIERTE Settings
+        print(f"\n  [Schritt 3/4] Lokale Reprojektion (rasterio, "
+              f"{args.local_resampling}, 10 m, {target_crs_str})...")
+        repro_dir = base / "step3_reprojected"
+        repro_dir.mkdir()
+        dem_repro = repro_dir / "dem.tif"
+        t_repro_start = time.time()
+        reproject_dem_local(
+            dem_tif_raw, str(dem_repro),
+            dst_crs=target_crs_str, resampling=args.local_resampling,
+            target_resolution=10.0,
+        )
+        s2_repro_tifs = []
+        for s2_tif in s2_tifs:
+            out = repro_dir / s2_tif.name
+            reproject_dem_local(
+                str(s2_tif), str(out),
+                dst_crs=target_crs_str, resampling=args.local_resampling,
+                target_resolution=10.0,
+            )
+            s2_repro_tifs.append(out)
+        t_reproject = time.time() - t_repro_start
+        print(f"  {len(s2_repro_tifs)} S2 + 1 DEM reprojiziert ({t_reproject:.1f} s)")
+
+        # Schritt 4: lokale Workflow-Operation
+        print(f"\n  [Schritt 4/4] Lokale Workflow-Operation ({args.workflow})...")
+        t_op_start = time.time()
+        output_tifs = _apply_local_workflow(
+            args.workflow, s2_repro_tifs, dem_repro, base,
+        )
+        t_operation = time.time() - t_op_start
+        print(f"  {len(output_tifs)} Output-TIF(s) geschrieben ({t_operation:.1f} s)")
+
+        preprocessing_time = (
+            s2_download_time + dem_download_time + t_reproject + t_operation
+        )
+        total_time = preprocessing_time  # kein CDSE-Job
+
+        # Minimale results.json fuer import_run().
+        results_payload = {
+            "backend_url":         "local",
+            "backend_name":        "local_rasterio",
+            "process_graph":       f"local_reference_{region}",
+            "status":              "success",
+            "job_id":              None,
+            "submit_time":         None,
+            "queue_time":          None,
+            "processing_time":     None,
+            "job_execution_time":  None,
+            "download_time":       None,
+            "total_time":          None,
+            "timestamp":           datetime.now().isoformat(),
+            "error":               None,
+            "job_status_history":  {},
+        }
+        with open(base / "results.json", "w") as f:
+            json.dump(results_payload, f, indent=2)
+
+        run_id = import_run(
+            str(base),
+            crs_strategy="local_reference",
+            run_type=run_type,
+            preprocessing_time=preprocessing_time,
+            dem_download_time=dem_download_time,
+            s2_download_time=s2_download_time,
+            extent_size=args.extent_size,
+            workflow=args.workflow,
+            local_resampling=args.local_resampling,
+            target_crs=target_crs_str,
+        )
+
+        return {
+            "strategy":            "local_reference",
+            "repeat":              repeat_idx + 1,
+            "run_type":            run_type,
+            "status":              "success",
+            "preprocessing_time":  preprocessing_time,
+            "total_time":          total_time,
+            "run_id":              run_id,
+            "outdir":              str(base),
+        }
+    except Exception as exc:
+        print(f"  FEHLER: {exc}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "strategy":            "local_reference",
+            "repeat":              repeat_idx + 1,
+            "run_type":            run_type,
+            "status":              "error",
+            "preprocessing_time":  None,
+            "total_time":          None,
+            "run_id":              None,
+            "outdir":              str(base),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Zusammenfassung
 # ---------------------------------------------------------------------------
 
@@ -1641,24 +1956,41 @@ def _persist_accuracy(run_id: int, mae: float, rmse: float,
         print(f"  WARNUNG: Accuracy nicht in DB geschrieben: {exc}")
 
 
-# Mapping: test-Strategie -> (suffix in run_*_{suffix}, Unterordner mit den TIFs)
-_ACCURACY_TEST_LAYOUT = {
-    "local_preprocessing": ("local_pp", "step3_main"),
-    "full_preprocessing":  ("full_pp",  "step5_main"),
+# Mapping: Strategie -> (suffix in run_*_{suffix}, Unterordner mit den TIFs).
+# Wird sowohl fuer test_strategy als auch fuer reference_strategy genutzt.
+_ACCURACY_LAYOUT = {
+    "onthefly":            ("onthefly",        ""),
+    "local_preprocessing": ("local_pp",        "step3_main"),
+    "full_preprocessing":  ("full_pp",         "step5_main"),
+    "local_reference":     ("local_reference", ""),
 }
+# Backward-Compat-Alias (alter Name, falls extern referenziert).
+_ACCURACY_TEST_LAYOUT = _ACCURACY_LAYOUT
+
+
+def _tif_dir(run_dir: Path, strategy: str) -> Path:
+    """Verzeichnis mit den finalen Workflow-TIFs eines Run-Ordners."""
+    sub = _ACCURACY_LAYOUT[strategy][1]
+    return run_dir / sub if sub else run_dir
 
 
 def run_accuracy_check(output_base: str, region: str,
                        test_strategy: str = None,
                        test_run_id=None, extent_size: str = None,
                        workflow: str = None,
-                       resampling_method: str = "nearest"):
-    """Neuesten onthefly-Run (Referenz) vs neuesten {test_strategy}-Run vergleichen.
+                       resampling_method: str = "nearest",
+                       reference_strategy: str = "onthefly"):
+    """Neuesten {reference_strategy}-Run vs neuesten {test_strategy}-Run vergleichen.
 
-    test_strategy: "local_preprocessing" oder "full_preprocessing". Wenn None,
-    wird automatisch ermittelt: Bevorzugt wird full_preprocessing, falls
-    sowohl ein passender full_pp- als auch ein local_pp-Run existiert (full_pp
-    erfordert explizites Opt-in vom User).
+    reference_strategy: "onthefly" (Default) oder "local_reference" (lokale
+    Ground-Truth). Bei "local_reference" werden alle CDSE-Strategien
+    (onthefly, local_preprocessing, full_preprocessing) als gueltige
+    test_strategy akzeptiert.
+
+    test_strategy: explizit gesetzt oder per Auto-Detect aus dem
+    Filesystem. Auto-Detect-Reihenfolge: full_preprocessing >
+    local_preprocessing > (bei reference=local_reference) onthefly.
+    test_strategy darf NIE gleich reference_strategy sein.
 
     Es werden nur Runs verglichen, deren Region, extent_size UND Workflow
     uebereinstimmen - damit nicht versehentlich ein alter Run einer anderen
@@ -1671,61 +2003,83 @@ def run_accuracy_check(output_base: str, region: str,
     Speichert den Median(MAE)/Median(RMSE) ueber alle gemeinsamen Date-TIFs in
     die accuracy-Tabelle (run_id des Test-Runs).
     """
+    if reference_strategy not in _ACCURACY_LAYOUT:
+        raise ValueError(
+            f"reference_strategy='{reference_strategy}' nicht bekannt. "
+            f"Erlaubt: {sorted(_ACCURACY_LAYOUT)}"
+        )
+
     print(f"\n{'='*60}")
     extent_info = f"  |  Extent: {extent_size}" if extent_size else ""
     workflow_info = f"  |  Workflow: {workflow}" if workflow else ""
-    print(f"  Accuracy-Check  |  Region: {region}{extent_info}{workflow_info}")
+    print(f"  Accuracy-Check vs '{reference_strategy}'"
+          f"  |  Region: {region}{extent_info}{workflow_info}")
 
-    onthefly_dir = _find_latest_run_dir(output_base, "onthefly", region,
-                                        extent_size=extent_size,
-                                        workflow=workflow)
+    ref_suffix, _ = _ACCURACY_LAYOUT[reference_strategy]
+    reference_dir = _find_latest_run_dir(output_base, ref_suffix, region,
+                                         extent_size=extent_size,
+                                         workflow=workflow)
 
-    # test_strategy auto-detecten: bevorzugt full_pp, sonst local_pp.
+    # test_strategy auto-detecten: bevorzugt full_pp, dann local_pp, dann
+    # (wenn reference != onthefly) auch onthefly. reference selbst ist
+    # ausgeschlossen.
     if test_strategy is None:
-        for cand in ("full_preprocessing", "local_preprocessing"):
-            suf, _ = _ACCURACY_TEST_LAYOUT[cand]
+        if reference_strategy == "onthefly":
+            candidates = ("full_preprocessing", "local_preprocessing")
+        else:
+            candidates = ("full_preprocessing", "local_preprocessing", "onthefly")
+        for cand in candidates:
+            if cand == reference_strategy:
+                continue
+            suf, _ = _ACCURACY_LAYOUT[cand]
             if _find_latest_run_dir(output_base, suf, region,
                                     extent_size=extent_size,
                                     workflow=workflow) is not None:
                 test_strategy = cand
                 break
 
-    if test_strategy not in _ACCURACY_TEST_LAYOUT:
-        print(f"  Skip: keine passende Test-Strategie gefunden "
-              f"(brauche local_preprocessing oder full_preprocessing).")
+    if test_strategy not in _ACCURACY_LAYOUT:
+        print(f"  Skip: keine passende Test-Strategie gefunden.")
+        return None
+    if test_strategy == reference_strategy:
+        print(f"  Skip: test_strategy == reference_strategy "
+              f"('{test_strategy}').")
         return None
 
-    test_suffix, test_tif_subdir = _ACCURACY_TEST_LAYOUT[test_strategy]
+    test_suffix, _ = _ACCURACY_LAYOUT[test_strategy]
     test_dir = _find_latest_run_dir(output_base, test_suffix, region,
                                     extent_size=extent_size,
                                     workflow=workflow)
 
-    if not onthefly_dir or not test_dir:
-        miss = "onthefly" if not onthefly_dir else test_strategy
+    if not reference_dir or not test_dir:
+        miss = reference_strategy if not reference_dir else test_strategy
         extent_msg = f" mit extent_size='{extent_size}'" if extent_size else ""
         wf_msg = f" und workflow='{workflow}'" if workflow else ""
         print(f"  Skip: kein {miss}-Run fuer Region '{region}'"
               f"{extent_msg}{wf_msg} gefunden.")
         return None
 
-    print(f"  Referenz (onthefly):      {onthefly_dir.name}")
+    reference_tif_dir = _tif_dir(reference_dir, reference_strategy)
+    test_tif_dir     = _tif_dir(test_dir, test_strategy)
+
+    print(f"  Referenz ({reference_strategy}): {reference_dir.name}")
     print(f"  Test ({test_strategy}): {test_dir.name}")
     print(f"  Resampling-Methode:       {resampling_method}")
 
-    onthefly_tifs = {p.name: p for p in onthefly_dir.glob("*.tif")}
-    test_tifs = {p.name: p for p in (test_dir / test_tif_subdir).glob("*.tif")}
-    common = sorted(set(onthefly_tifs) & set(test_tifs))
+    reference_tifs = {p.name: p for p in reference_tif_dir.glob("*.tif")}
+    test_tifs      = {p.name: p for p in test_tif_dir.glob("*.tif")}
+    common = sorted(set(reference_tifs) & set(test_tifs))
     if not common:
         print(f"  Skip: keine gemeinsamen TIF-Dateien.")
-        print(f"    onthefly TIFs: {sorted(onthefly_tifs)}")
-        print(f"    {test_strategy} TIFs ({test_tif_subdir}): {sorted(test_tifs)}")
+        print(f"    {reference_strategy} TIFs: {sorted(reference_tifs)}")
+        print(f"    {test_strategy} TIFs: {sorted(test_tifs)}")
         return None
 
     per_mae, per_rmse, n_bands_last = [], [], 0
     per_valid, per_total = [], []
     for name in common:
         mae, rmse, n_bands, valid_px, total_px = _compare_tif_pair(
-            onthefly_tifs[name], test_tifs[name],
+            reference_tifs[name], test_tifs[name],
             resampling_method=resampling_method,
         )
         if mae is None:
@@ -1751,9 +2105,9 @@ def run_accuracy_check(output_base: str, region: str,
 
     run_id = test_run_id
     if run_id is None:
-        run_id = _lookup_run_id_for_dir(test_dir / test_tif_subdir)
+        run_id = _lookup_run_id_for_dir(test_tif_dir)
     if run_id is not None:
-        _persist_accuracy(run_id, median_mae, median_rmse, str(onthefly_dir))
+        _persist_accuracy(run_id, median_mae, median_rmse, str(reference_dir))
     else:
         print(f"  WARNUNG: kein run_id fuer {test_strategy} gefunden, "
               f"nicht in DB geschrieben.")
@@ -1766,6 +2120,7 @@ def run_accuracy_check(output_base: str, region: str,
 
     return {
         "region": region,
+        "reference_strategy": reference_strategy,
         "test_strategy": test_strategy,
         "resampling_method": resampling_method,
         "mae": median_mae,
@@ -1776,7 +2131,7 @@ def run_accuracy_check(output_base: str, region: str,
         "total_pixels": total_total,
         "coverage_percent": coverage_pct,
         "run_id": run_id,
-        "onthefly_dir": str(onthefly_dir),
+        "reference_dir": str(reference_dir),
         "test_dir": str(test_dir),
     }
 
@@ -1813,9 +2168,20 @@ def main() -> None:
                              "Download zaehlt in keinem Fall zur preprocessing_time.")
     parser.add_argument("--accuracy-check", action="store_true",
                         help="Nach den Runs Accuracy-Vergleich (MAE/RMSE) zwischen "
-                             "dem neuesten onthefly- und local_pp-Output fuer die "
-                             "Region ausfuehren. Mit --repeat 0 auch standalone "
-                             "auf existierenden Outputs verwendbar.")
+                             "dem neuesten onthefly- und local_pp/full_pp-Output "
+                             "fuer die Region ausfuehren. Mit --repeat 0 auch "
+                             "standalone auf existierenden Outputs verwendbar.")
+    parser.add_argument("--reference-check", action="store_true",
+                        help="Vergleicht JEDE in dieser Session gelaufene CDSE-"
+                             "Strategie (onthefly, local_preprocessing, "
+                             "full_preprocessing) gegen den neuesten "
+                             "local_reference-Run der gleichen Region/Workflow/"
+                             "Extent. Setzt voraus dass ein local_reference-Run "
+                             "existiert (entweder in dieser Session via "
+                             "--strategy local_reference oder ein frueherer). "
+                             "Unterscheidet sich von --accuracy-check dadurch, "
+                             "dass die unabhaengige lokale Pipeline als "
+                             "Ground-Truth dient statt onthefly.")
     parser.add_argument("--extent-size", default="medium",
                         choices=("small", "medium", "large", "xlarge", "xxlarge"),
                         help="AOI-Kantenlaenge um das Region-Zentrum: "
@@ -1889,6 +2255,7 @@ def main() -> None:
         "onthefly": run_strategy_onthefly,
         "local_preprocessing": run_strategy_local_pp,
         "full_preprocessing": run_strategy_full_pp,
+        "local_reference": run_strategy_local_reference,
     }
 
     for strategy in strategies:
@@ -1915,7 +2282,46 @@ def main() -> None:
                            test_run_id=test_run_id,
                            extent_size=args.extent_size,
                            workflow=args.workflow,
-                           resampling_method=args.local_resampling)
+                           resampling_method=args.local_resampling,
+                           reference_strategy="onthefly")
+
+    if args.reference_check:
+        # Pro CDSE-Strategie (onthefly, local_pp, full_pp) einen Vergleich
+        # gegen den neuesten local_reference-Run derselben Region/Workflow/
+        # Extent. test_run_ids werden aus all_results bezogen, falls die
+        # Strategie in dieser Session lief; sonst per Disk-Lookup.
+        test_run_ids = {}
+        for r in all_results:
+            if r.get("status") != "success" or r.get("run_id") is None:
+                continue
+            s = r.get("strategy")
+            if s in ("local_pp_cached",):
+                s = "local_preprocessing"
+            if s in ("onthefly", "local_preprocessing", "full_preprocessing"):
+                test_run_ids[s] = r["run_id"]
+
+        candidate_strategies = ("onthefly", "local_preprocessing",
+                                "full_preprocessing")
+        any_run = False
+        for s in candidate_strategies:
+            suf, _ = _ACCURACY_LAYOUT[s]
+            if _find_latest_run_dir(args.output_dir, suf, args.region,
+                                    extent_size=args.extent_size,
+                                    workflow=args.workflow) is None:
+                continue
+            any_run = True
+            run_accuracy_check(
+                args.output_dir, args.region,
+                test_strategy=s,
+                test_run_id=test_run_ids.get(s),
+                extent_size=args.extent_size,
+                workflow=args.workflow,
+                resampling_method=args.local_resampling,
+                reference_strategy="local_reference",
+            )
+        if not any_run:
+            print("\n[--reference-check] Keine CDSE-Strategie-Runs gefunden "
+                  "die gegen local_reference verglichen werden koennten.")
 
 
 if __name__ == "__main__":
