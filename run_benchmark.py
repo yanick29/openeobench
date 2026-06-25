@@ -1101,6 +1101,97 @@ def scp_upload(local_path: str, remote_filename: str) -> float:
     return elapsed
 
 
+def _rewrite_tif_clean(input_tif: str, output_tif: str,
+                       blocksize: int = 256,
+                       compress: str = "deflate") -> float:
+    """Schreibt ein GeoTIFF neu mit einem robusten, einfachen GTiff-Profil.
+
+    Hintergrund: CDSE liefert S2 als COG mit getilten/komprimierten Bloecken.
+    Beim Roundtrip (Download -> scp -> nginx -> load_stac) bricht das Tile-
+    Profil regelmaessig - rasterio meldet dann "TIFFReadEncodedTile() failed,
+    IReadBlock failed" auf der Empfaengerseite. Wir re-encoden hier mit
+    einem konservativen Profil: driver=GTiff, tiled, 256x256 Bloecke,
+    deflate.
+
+    CRS, Transform, Dtype, Nodata und Band-Beschreibungen werden 1:1
+    uebernommen, sodass STAC-Geometrie und Pixel-Werte unveraendert bleiben.
+    Idempotent - mehrfaches Rewriting aendert das Profil weiter nicht.
+    """
+    t0 = time.time()
+    with rasterio.open(input_tif) as src:
+        profile = src.profile.copy()
+        profile.update({
+            "driver":     "GTiff",
+            "tiled":      True,
+            "blockxsize": blocksize,
+            "blockysize": blocksize,
+            "compress":   compress,
+            "interleave": "band",
+            "BIGTIFF":    "IF_SAFER",
+        })
+        with rasterio.open(output_tif, "w", **profile) as dst:
+            for i in range(1, src.count + 1):
+                dst.write(src.read(i), i)
+            if src.descriptions and any(src.descriptions):
+                dst.descriptions = src.descriptions
+            if src.nodata is not None:
+                dst.nodata = src.nodata
+    return time.time() - t0
+
+
+def _remote_file_size(host: str, remote_path: str,
+                      timeout: int = SCP_SSH_TIMEOUT) -> int:
+    """Liest die Dateigroesse per ssh+stat. Wirft RuntimeError bei Fehler.
+
+    stat -c '%s' ist GNU coreutils (Linux/Hetzner). Auf BSD/macOS waere
+    'stat -f %z' noetig; das ssh-Target ist hier aber immer der Linux-
+    Webserver, daher reicht die GNU-Variante.
+    """
+    connect_timeout = min(int(timeout), 30)
+    cmd = ["ssh", "-o", "StrictHostKeyChecking=no",
+           "-o", f"ConnectTimeout={connect_timeout}",
+           host, f"stat -c %s {remote_path}"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"ssh stat Timeout nach {timeout}s fuer {remote_path}"
+        ) from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ssh stat fehlgeschlagen ({result.returncode}) fuer "
+            f"{remote_path}: {result.stderr.strip()}"
+        )
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        raise RuntimeError(
+            f"Unerwartete stat Ausgabe fuer {remote_path}: {result.stdout!r}"
+        )
+
+
+def scp_upload_verified(local_path: str, remote_filename: str) -> float:
+    """scp_upload + anschliessende Groessen-Verifikation per ssh stat.
+
+    Faengt stille Abbrueche der scp-Verbindung ab, die sonst zu einem
+    truncated TIFF auf dem Server fuehren. Bei Groessen-Mismatch wird
+    geworfen statt mit korrupten Daten weiterzulaufen.
+    """
+    elapsed = scp_upload(local_path, remote_filename)
+    local_size = Path(local_path).stat().st_size
+    remote_path = f"{HETZNER_WEB_PATH}{remote_filename}"
+    remote_size = _remote_file_size(HETZNER_HOST, remote_path)
+    if remote_size != local_size:
+        raise RuntimeError(
+            f"Upload-Integritaet verletzt fuer {remote_filename}: "
+            f"lokal={local_size} Bytes, remote={remote_size} Bytes "
+            f"(Differenz {local_size - remote_size:+d}). "
+            f"Wahrscheinlich Verbindung waehrend scp abgebrochen."
+        )
+    return elapsed
+
+
 # ---------------------------------------------------------------------------
 # Strategie-Runner
 # ---------------------------------------------------------------------------
@@ -1437,16 +1528,38 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             s2_for_upload = new_tifs
             print(f"  S2 Reprojektion fertig  ({t_s2_reproject:.2f} s)")
 
-        # Schritt 4: Alle TIFs auf Hetzner hochladen
-        print(f"\n  [Schritt 4/7] {len(s2_for_upload)} S2 + 1 DEM TIF auf Hetzner hochladen...")
+        # Schritt 3c: ALLE TIFs mit robustem Tile-Profil neu schreiben (S2 + DEM).
+        # Verhindert "TIFFReadEncodedTile() failed, IReadBlock failed" beim
+        # Roundtrip durch Hetzner+CDSE. Gilt fuer beide S2-Pfade (original vs
+        # reprojiziert) und auch fuer das DEM, damit das Upload-Profil
+        # konsistent ist.
+        clean_dir = base / "step3c_clean"
+        clean_dir.mkdir(exist_ok=True)
+        print(f"\n  [Schritt 3c/7] S2 + DEM mit robustem GTiff-Profil neu "
+              f"schreiben (tiled 256x256, deflate)...")
+        t_clean_start = time.time()
+        clean_s2 = []
+        for stif in s2_for_upload:
+            out = clean_dir / stif.name
+            _rewrite_tif_clean(str(stif), str(out))
+            clean_s2.append(out)
+        s2_for_upload = clean_s2
+        clean_dem_tif = str(clean_dir / "dem.tif")
+        _rewrite_tif_clean(dem_repro_tif, clean_dem_tif)
+        dem_for_upload = clean_dem_tif
+        t_clean = time.time() - t_clean_start
+        print(f"  {len(clean_s2)} S2 + 1 DEM clean rewritten  ({t_clean:.2f} s)")
+
+        # Schritt 4: Alle TIFs auf Hetzner hochladen (mit Groessen-Verifikation).
+        print(f"\n  [Schritt 4/7] {len(s2_for_upload)} S2 + 1 DEM TIF auf Hetzner hochladen (verified)...")
         s2_remote_names = []
         t_tif_uploads = 0.0
         for stif in s2_for_upload:
             remote_name = f"s2_{region}_{run_ts}_{stif.name}"
-            t_tif_uploads += scp_upload(str(stif), remote_name)
+            t_tif_uploads += scp_upload_verified(str(stif), remote_name)
             s2_remote_names.append((stif, remote_name))
         dem_remote_tif_name = f"full_pp_dem_{region}_{run_ts}.tif"
-        t_tif_uploads += scp_upload(dem_repro_tif, dem_remote_tif_name)
+        t_tif_uploads += scp_upload_verified(dem_for_upload, dem_remote_tif_name)
         print(f"  TIF Uploads fertig  ({t_tif_uploads:.2f} s)")
 
         # Schritt 5: STAC Collection + DEM STAC Item bauen und hochladen
@@ -1510,10 +1623,11 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         t_stac = t_stac_build + t_stac_uploads
         print(f"  STAC fertig: {collection_url}  +  {dem_stac_url}  ({t_stac:.2f} s)")
 
-        # preprocessing_time = DEM-Reproject + S2-Reproject + alle Uploads + STAC-Build
-        # (S2/DEM Downloads zaehlen separat, wie bei local_preprocessing)
-        preprocessing_time = (t_dem_reproject + t_s2_reproject + t_tif_uploads
-                              + t_stac_build + t_stac_uploads)
+        # preprocessing_time = DEM-Reproject + S2-Reproject + Clean-Rewrite +
+        # alle Uploads + STAC-Build (S2/DEM Downloads zaehlen separat, wie bei
+        # local_preprocessing).
+        preprocessing_time = (t_dem_reproject + t_s2_reproject + t_clean
+                              + t_tif_uploads + t_stac_build + t_stac_uploads)
         print(f"  Pre-Processing-Zeit (ohne CDSE-Downloads): {preprocessing_time:.2f} s")
         print(f"  (S2 Download {t_s2_download:.1f} s + DEM Download {t_dem_download:.1f} s separat)")
 
