@@ -1574,14 +1574,25 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
         t_reproject = time.time() - t_repro_start
         print(f"  {len(s2_repro_tifs)} S2 + 1 DEM reprojiziert ({t_reproject:.1f} s)")
 
-        # Schritt 4: lokale Workflow-Operation
+        # Schritt 4: lokale Workflow-Operation. Der finale, gemergte Output
+        # liegt in step4_result/ - getrennt von den reprojizierten
+        # Zwischenrastern in step3_reprojected/, die zufaellig die gleichen
+        # openEO_DATE.tif Dateinamen haben.
         print(f"\n  [Schritt 4/4] Lokale Workflow-Operation ({args.workflow})...")
+        result_dir = base / "step4_result"
+        result_dir.mkdir()
         t_op_start = time.time()
         output_tifs = _apply_local_workflow(
-            args.workflow, s2_repro_tifs, dem_repro, base,
+            args.workflow, s2_repro_tifs, dem_repro, result_dir,
         )
         t_operation = time.time() - t_op_start
-        print(f"  {len(output_tifs)} Output-TIF(s) geschrieben ({t_operation:.1f} s)")
+        if not output_tifs:
+            raise RuntimeError(
+                f"_apply_local_workflow lieferte 0 Output-TIFs - die "
+                f"Workflow-Operation hat nichts geschrieben."
+            )
+        print(f"  {len(output_tifs)} Output-TIF(s) in {result_dir.name}/ "
+              f"geschrieben ({t_operation:.1f} s)")
 
         preprocessing_time = (
             s2_download_time + dem_download_time + t_reproject + t_operation
@@ -1958,11 +1969,15 @@ def _persist_accuracy(run_id: int, mae: float, rmse: float,
 
 # Mapping: Strategie -> (suffix in run_*_{suffix}, Unterordner mit den TIFs).
 # Wird sowohl fuer test_strategy als auch fuer reference_strategy genutzt.
+# Achtung: local_reference legt seine Zwischenraster (reprojiziertes S2 / DEM)
+# in step3_reprojected ab - die haben dieselben openEO_DATE.tif Dateinamen wie
+# die finalen Outputs und wuerden den Accuracy-Match verfaelschen. Deshalb
+# liegt der FINAL gemergte Output in einem eigenen step4_result/ Ordner.
 _ACCURACY_LAYOUT = {
     "onthefly":            ("onthefly",        ""),
     "local_preprocessing": ("local_pp",        "step3_main"),
     "full_preprocessing":  ("full_pp",         "step5_main"),
-    "local_reference":     ("local_reference", ""),
+    "local_reference":     ("local_reference", "step4_result"),
 }
 # Backward-Compat-Alias (alter Name, falls extern referenziert).
 _ACCURACY_TEST_LAYOUT = _ACCURACY_LAYOUT
@@ -1972,6 +1987,21 @@ def _tif_dir(run_dir: Path, strategy: str) -> Path:
     """Verzeichnis mit den finalen Workflow-TIFs eines Run-Ordners."""
     sub = _ACCURACY_LAYOUT[strategy][1]
     return run_dir / sub if sub else run_dir
+
+
+# Strikt: nur openEO_YYYY-MM-DD*.tif (CDSE-Output und local_reference-Output
+# folgen diesem Pattern). dem.tif aus step3_reprojected oder andere
+# Hilfsdateien werden so zuverlaessig ausgefiltert.
+_ACCURACY_TIF_RE = re.compile(r"^openEO_\d{4}-\d{2}-\d{2}.*\.tif$",
+                              re.IGNORECASE)
+
+
+def _collect_workflow_tifs(tif_dir: Path) -> dict:
+    """Sammle finale Workflow-TIFs aus einem Verzeichnis als {name: Path}.
+    Filtert auf das openEO_YYYY-MM-DD*.tif Pattern, damit weder dem.tif noch
+    sonstige Zwischenraster matchen."""
+    return {p.name: p for p in tif_dir.glob("*.tif")
+            if _ACCURACY_TIF_RE.match(p.name)}
 
 
 def run_accuracy_check(output_base: str, region: str,
@@ -2066,8 +2096,8 @@ def run_accuracy_check(output_base: str, region: str,
     print(f"  Test ({test_strategy}): {test_dir.name}")
     print(f"  Resampling-Methode:       {resampling_method}")
 
-    reference_tifs = {p.name: p for p in reference_tif_dir.glob("*.tif")}
-    test_tifs      = {p.name: p for p in test_tif_dir.glob("*.tif")}
+    reference_tifs = _collect_workflow_tifs(reference_tif_dir)
+    test_tifs      = _collect_workflow_tifs(test_tif_dir)
     common = sorted(set(reference_tifs) & set(test_tifs))
     if not common:
         print(f"  Skip: keine gemeinsamen TIF-Dateien.")
