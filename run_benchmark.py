@@ -19,6 +19,7 @@ import copy
 import glob
 import json
 import math
+import os
 import statistics
 import subprocess
 import sys
@@ -79,11 +80,17 @@ def _is_utm_epsg(epsg: int) -> bool:
     return (32601 <= epsg <= 32660) or (32701 <= epsg <= 32760)
 
 # ---------------------------------------------------------------------------
-# Hetzner-Konfiguration
+# Hetzner-Konfiguration (per ENV ueberschreibbar; CLI-Flags --host / --web-path
+# / --url-base ueberschreiben die ENV). Trailing slash am Pfad ist erwartet
+# fuer die String-Konkatenation in scp_upload / asset URLs.
 # ---------------------------------------------------------------------------
-HETZNER_HOST = "root@46.224.62.97"
-HETZNER_WEB_PATH = "/var/www/benchmark-data/"
-HETZNER_URL_BASE = "http://46.224.62.97/benchmark-data/"
+HETZNER_HOST = os.environ.get("BENCHMARK_HOST", "root@46.224.62.97")
+HETZNER_WEB_PATH = os.environ.get("BENCHMARK_WEB_PATH", "/var/www/benchmark-data/")
+HETZNER_URL_BASE = os.environ.get("BENCHMARK_URL_BASE", "http://46.224.62.97/benchmark-data/")
+
+
+def _ensure_trailing_slash(s: str) -> str:
+    return s if s.endswith("/") else s + "/"
 
 # ---------------------------------------------------------------------------
 # Regionen: extent + Ziel-UTM-CRS
@@ -221,7 +228,11 @@ def run_openeo(api_url: str, scenario: str, output_dir: str,
                job_timeout: int = 3600) -> dict:
     """
     Fuehrt openeotest.py run aus. Gibt den Inhalt von results.json zurueck.
-    Wirft RuntimeError wenn results.json nicht geschrieben wurde.
+    Wirft RuntimeError wenn results.json nicht geschrieben wurde oder der
+    Subprozess mit Returncode != 0 endet ohne erkennbares Result.
+
+    stdout flowt live (Progress des Backends), stderr wird gecaptured und
+    bei non-zero Returncode komplett ausgegeben.
     """
     cmd = [
         sys.executable, "openeotest.py", "run",
@@ -231,15 +242,50 @@ def run_openeo(api_url: str, scenario: str, output_dir: str,
         "--job-timeout", str(job_timeout),
     ]
     print(f"\n  [openeotest] {' '.join(cmd)}")
-    subprocess.run(cmd, check=False)
+    proc = subprocess.run(cmd, check=False, stderr=subprocess.PIPE, text=True)
+
+    if proc.returncode != 0:
+        stderr_text = (proc.stderr or "").strip()
+        print(f"\n  [openeotest] Returncode {proc.returncode} (nicht 0).")
+        if stderr_text:
+            print("  ---- openeotest.py stderr ----")
+            for line in stderr_text.splitlines():
+                print(f"  {line}")
+            print("  ------------------------------")
+        else:
+            print("  (kein stderr-Output)")
 
     results_path = Path(output_dir) / "results.json"
     if not results_path.exists():
-        raise RuntimeError(
-            f"results.json nicht gefunden in {output_dir} – openeotest.py ist moeglicherweise abgestuerzt."
-        )
+        msg = (f"results.json nicht gefunden in {output_dir} - "
+               f"openeotest.py mit Returncode {proc.returncode} beendet.")
+        if proc.stderr:
+            msg += f" stderr: {proc.stderr.strip()[:500]}"
+        raise RuntimeError(msg)
+
     with open(results_path) as f:
-        return json.load(f)
+        results = json.load(f)
+
+    if proc.returncode != 0 and not results.get("error"):
+        results["error"] = (
+            f"openeotest.py exit {proc.returncode}; "
+            f"stderr: {(proc.stderr or '').strip()[:500]}"
+        )
+        if results.get("status") not in ("error", "failed"):
+            results["status"] = "error"
+        try:
+            with open(results_path, "w") as f:
+                json.dump(results, f, indent=2)
+        except OSError as exc:
+            print(f"  WARNUNG: results.json konnte nicht zurueckgeschrieben werden: {exc}")
+
+    # environment-Block (git_commit, openeo/rasterio/numpy/proj Versionen)
+    # idempotent ergaenzen - egal ob Erfolg oder Fehler.
+    _augment_results_json(results_path)
+    if "environment" not in results:
+        results["environment"] = _collect_environment()
+
+    return results
 
 
 def _run_type_for(repeat_idx: int, run_type_arg: str) -> str:
@@ -320,8 +366,35 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
       filter_bbox -> nach merge_add ein filter_bbox auf die mittleren 50%
                      des Original-Extents (raeumliche Filteroperation aus
                      dem Proposal).
+
+    BANDNAMEN-FIX: COPERNICUS_30 liefert ein Band "DEM", S2 ein Band "B04".
+    Bei verschiedenen Namen konkateniert merge_cubes die Cubes statt sie
+    pixelweise zu addieren (verifiziert: ohne Rename ist der GTiff-Output
+    median=2742, also reines S2; mit Rename = 2788 = S2+DEM). Daher wird
+    nach loadcollection2 ein rename_labels Knoten eingefuegt der das DEM-
+    Band auf "B04" umbenennt, damit merge_cubes die Bands als ueberlappend
+    erkennt und der overlap_resolver (add/subtract) greift.
     """
     pg = copy.deepcopy(template["process_graph"])
+
+    # rename_labels nach loadcollection2 einbauen, damit cube1.B04 und
+    # cube2.B04 in merge1 ueberlappen. source=["DEM"] ist der COPERNICUS_30
+    # Bandname; bei load_stac (local_pp / full_pp) wird das von den Buildern
+    # nachtraeglich auf source=[] gesetzt, weil der vom Backend vergebene
+    # Bandname nicht garantiert "DEM" ist.
+    pg["renamelabels1"] = {
+        "arguments": {
+            "data": {"from_node": "loadcollection2"},
+            "dimension": "bands",
+            "target": ["B04"],
+            "source": ["DEM"],
+        },
+        "process_id": "rename_labels",
+    }
+    # merge1.cube2 zeigt jetzt auf das umbenannte DEM statt direkt auf
+    # loadcollection2.
+    pg["merge1"]["arguments"]["cube2"] = {"from_node": "renamelabels1"}
+
     if workflow == "merge_add":
         return pg
 
@@ -421,11 +494,12 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
         if region is None:
             raise ValueError("workflow=resample benoetigt 'region' fuer das Ziel-UTM.")
         target_epsg = REGIONS[region]["epsg"]
-        # DEM nach EPSG:3035 @ 30m und zurueck nach UTM @ 10m resamplen.
-        # Reine CDSE-Operation - testet das interne Resampling.
+        # DEM (bereits umbenannt auf B04 in renamelabels1) nach EPSG:3035 @ 30m
+        # und zurueck nach UTM @ 10m resamplen. Reine CDSE-Operation - testet
+        # das interne Resampling.
         pg["resamplespatial1"] = {
             "arguments": {
-                "data": {"from_node": "loadcollection2"},
+                "data": {"from_node": "renamelabels1"},
                 "projection": 3035,
                 "resolution": 30,
                 "method": "near",
@@ -542,7 +616,7 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
         "process_id": "load_stac",
     }
     # Alle Knoten umbiegen die noch auf loadcollection2 zeigen
-    # (merge1.cube2, oder bei workflow=resample auch resamplespatial1.data).
+    # (renamelabels1.data, oder bei workflow=resample auch resamplespatial1.data).
     def _retarget_dem(node_args):
         for k, v in list(node_args.items()):
             if isinstance(v, dict):
@@ -553,6 +627,14 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     for node in pg.values():
         if isinstance(node, dict) and isinstance(node.get("arguments"), dict):
             _retarget_dem(node["arguments"])
+
+    # Beim Wechsel von load_collection(COPERNICUS_30) auf load_stac ist der
+    # Quellen-Bandname nicht garantiert "DEM" (haengt von der STAC-Item-
+    # Metadata und vom Backend ab). source=[] (Default) heisst "rename alle
+    # vorhandenen Labels in Reihenfolge" - bei einem Single-Band-DEM also
+    # genau das was wir wollen: das eine Band heisst danach "B04".
+    if "renamelabels1" in pg:
+        pg["renamelabels1"]["arguments"]["source"] = []
 
     scenario = {"process_graph": pg}
     with open(target_path, "w") as f:
@@ -804,16 +886,23 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
             _retarget(node["arguments"])
 
     # Sicherstellen, dass merge1 die richtigen Cubes bekommt (cube1=S2, cube2=DEM).
+    # cube2 muss durch renamelabels1 laufen, damit S2.B04 + DEM.B04 in merge_cubes
+    # ueberlappen und der overlap_resolver (add/subtract) greift. _retarget hat
+    # renamelabels1.data bereits von loadcollection2 auf loadstac2 umgebogen.
     if "merge1" in pg:
         merge_args = pg["merge1"]["arguments"]
-        # cube2 = DEM (frueher loadcollection2 -> jetzt loadstac2). Bei
-        # workflow=resample bleibt der Resample-Pfad (resamplespatial2) erhalten,
-        # da der bereits durch _retarget korrekt auf loadstac2 zeigt.
-        if workflow != "resample":
-            merge_args["cube2"] = {"from_node": "loadstac2"}
+        # cube2 zeigt auf renamelabels1 (oder bei resample auf resamplespatial2,
+        # was wiederum auf renamelabels1 zeigt) - in beiden Faellen liefert
+        # _build_workflow_pg merge1.cube2 schon korrekt.
         # cube1: bei workflow=mask kommt es aus mask1; sonst direkt loadstac1.
         if workflow != "mask":
             merge_args["cube1"] = {"from_node": "loadstac1"}
+
+    # load_stac auf den Hetzner-DEM-STAC liefert nicht garantiert einen Band
+    # mit Name "DEM". source=[] -> rename alle vorhandenen Labels in Reihenfolge
+    # (Single-Band-DEM -> wird zu "B04").
+    if "renamelabels1" in pg:
+        pg["renamelabels1"]["arguments"]["source"] = []
 
     scenario = {"process_graph": pg}
     with open(target_path, "w") as f:
@@ -852,13 +941,129 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     }
 
 
+SCP_SSH_TIMEOUT = 120  # Sekunden - haengende Uploads/Logs hart abbrechen
+
+
+_ENVIRONMENT_CACHE = None
+
+
+def _collect_environment() -> dict:
+    """Sammelt Versionen + git-State fuer Reproduzierbarkeit.
+
+    Wird einmal pro Prozess gecacht weil nichts davon zur Laufzeit kippt.
+    Felder die nicht ermittelt werden koennen sind None - der Benchmark
+    bricht nie wegen Environment-Capture ab.
+
+    Plattform-Hinweis: ueberall subprocess+importlib statt platformspezifischer
+    Pfade, damit das auf Linux + Windows + macOS funktioniert.
+    """
+    global _ENVIRONMENT_CACHE
+    if _ENVIRONMENT_CACHE is not None:
+        return _ENVIRONMENT_CACHE
+
+    env = {
+        "git_commit": None,
+        "git_dirty": None,
+        "openeo_version": None,
+        "rasterio_version": None,
+        "numpy_version": None,
+        "proj_version": None,
+        "gdal_version": None,
+        "python_version": sys.version.split()[0],
+        "platform": sys.platform,
+    }
+
+    repo_dir = str(Path(__file__).resolve().parent)
+    try:
+        commit = subprocess.run(
+            ["git", "-C", repo_dir, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if commit.returncode == 0:
+            env["git_commit"] = commit.stdout.strip() or None
+        status = subprocess.run(
+            ["git", "-C", repo_dir, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if status.returncode == 0:
+            env["git_dirty"] = bool(status.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    try:
+        import openeo  # type: ignore
+        env["openeo_version"] = getattr(openeo, "__version__", None)
+    except Exception:
+        pass
+
+    try:
+        env["rasterio_version"] = getattr(rasterio, "__version__", None)
+        # rasterio __gdal_version__ / __proj_version__ sind die einfachsten
+        # Quellen (vermeiden zusaetzliche pyproj-Abhaengigkeit).
+        env["gdal_version"] = getattr(rasterio, "__gdal_version__", None)
+        env["proj_version"] = getattr(rasterio, "__proj_version__", None)
+    except Exception:
+        pass
+
+    try:
+        import numpy  # type: ignore
+        env["numpy_version"] = getattr(numpy, "__version__", None)
+    except Exception:
+        pass
+
+    if env["proj_version"] is None:
+        try:
+            import pyproj  # type: ignore
+            env["proj_version"] = pyproj.proj_version_str
+        except Exception:
+            pass
+
+    _ENVIRONMENT_CACHE = env
+    return env
+
+
+def _augment_results_json(results_path: Path) -> None:
+    """Schreibt den `environment` Block in eine existierende results.json.
+    Idempotent - vorhandene Felder werden nicht ueberschrieben.
+    """
+    if not results_path.exists():
+        return
+    try:
+        with open(results_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"  WARNUNG: results.json fuer Environment-Augment nicht lesbar: {exc}")
+        return
+    if "environment" in data and isinstance(data["environment"], dict):
+        return
+    data["environment"] = _collect_environment()
+    try:
+        with open(results_path, "w") as f:
+            json.dump(data, f, indent=2)
+    except OSError as exc:
+        print(f"  WARNUNG: results.json fuer Environment-Augment nicht schreibbar: {exc}")
+
+
 def scp_upload(local_path: str, remote_filename: str) -> float:
-    """scp eine Datei auf Hetzner. Gibt die Upload-Dauer in Sekunden zurueck."""
+    """scp eine Datei auf Hetzner. Gibt die Upload-Dauer in Sekunden zurueck.
+
+    Bricht nach SCP_SSH_TIMEOUT s ab statt unbegrenzt zu haengen (Default 120 s).
+    """
     remote = f"{HETZNER_HOST}:{HETZNER_WEB_PATH}{remote_filename}"
-    cmd = ["scp", "-o", "StrictHostKeyChecking=no", local_path, remote]
+    cmd = ["scp", "-o", "StrictHostKeyChecking=no",
+           "-o", f"ConnectTimeout={min(SCP_SSH_TIMEOUT, 30)}",
+           local_path, remote]
     print(f"  [scp] {' '.join(cmd)}")
     t0 = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=SCP_SSH_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.time() - t0
+        raise RuntimeError(
+            f"scp Timeout nach {elapsed:.1f}s (Limit {SCP_SSH_TIMEOUT}s) "
+            f"fuer {local_path} -> {remote}"
+        ) from exc
     elapsed = time.time() - t0
     if result.returncode != 0:
         raise RuntimeError(
@@ -1063,7 +1268,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         print(f"\n  [Logs] Hole nginx Access-Logs vom Hetzner-Server...")
         try:
             import_nginx_access_log(
-                run_id, filenames=[remote_tif_name, remote_stac_name]
+                run_id, filenames=[remote_tif_name, remote_stac_name],
+                ssh_host=HETZNER_HOST,
             )
         except Exception as exc:
             print(f"  WARNUNG: nginx-Logs konnten nicht geholt werden: {exc}")
@@ -1314,7 +1520,8 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             log_filenames = [n for _, n in s2_remote_names] + s2_item_remote_names + [
                 collection_remote_name, dem_remote_tif_name, dem_stac_remote_name,
             ]
-            import_nginx_access_log(run_id, filenames=log_filenames)
+            import_nginx_access_log(run_id, filenames=log_filenames,
+                                     ssh_host=HETZNER_HOST)
         except Exception as exc:
             print(f"  WARNUNG: nginx-Logs konnten nicht geholt werden: {exc}")
 
@@ -1668,6 +1875,7 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
             "timestamp":           datetime.now().isoformat(),
             "error":               None,
             "job_status_history":  {},
+            "environment":         _collect_environment(),
         }
         with open(base / "results.json", "w") as f:
             json.dump(results_payload, f, indent=2)
@@ -2317,8 +2525,29 @@ def main() -> None:
                              "CDSE-Job (Default: 3600 = 1h). Bei xxlarge "
                              "(200km) oder grossen Workflows ggf. hoeher "
                              "setzen, z.B. --job-timeout 7200.")
+    parser.add_argument("--host", default=None,
+                        help="ssh/scp Ziel fuer Asset-Uploads (z.B. "
+                             "root@dima-prox.dima.tu-berlin.de). Default: "
+                             "ENV BENCHMARK_HOST oder root@46.224.62.97.")
+    parser.add_argument("--web-path", default=None,
+                        help="Remote-Pfad fuer das Web-Verzeichnis "
+                             "(trailing slash). Default: ENV "
+                             "BENCHMARK_WEB_PATH oder /var/www/benchmark-data/.")
+    parser.add_argument("--url-base", default=None,
+                        help="Oeffentliche URL-Basis fuer Assets/STAC "
+                             "(trailing slash). Default: ENV "
+                             "BENCHMARK_URL_BASE oder "
+                             "http://46.224.62.97/benchmark-data/.")
 
     args = parser.parse_args()
+
+    global HETZNER_HOST, HETZNER_WEB_PATH, HETZNER_URL_BASE
+    if args.host:
+        HETZNER_HOST = args.host
+    if args.web_path:
+        HETZNER_WEB_PATH = _ensure_trailing_slash(args.web_path)
+    if args.url_base:
+        HETZNER_URL_BASE = _ensure_trailing_slash(args.url_base)
 
     strategies = ALL_STRATEGIES if args.strategy == "all" else [args.strategy]
 

@@ -319,6 +319,112 @@ def print_table(group_label, strategy_metrics):
         print(line)
 
 
+def print_nginx_stats(db_path: str):
+    """Auswertung der nginx_access_log Tabelle pro Strategie/Region/Extent.
+
+    Pro Run werden zunaechst (request_count, bytes_total, n_206, n_200, n_other)
+    bestimmt; daraus dann pro Gruppe Median(count), Sum(bytes_total),
+    Anteil 206 vs 200. Das macht den Zusammenhang zwischen Extent-Groesse
+    und Anzahl Range Requests sichtbar (xlarge-Timeout-Finding).
+    """
+    con = duckdb.connect(db_path, read_only=True)
+    tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+    if "nginx_access_log" not in tables:
+        print("\n[--nginx-stats] Tabelle 'nginx_access_log' existiert nicht. "
+              "Wurden Runs mit nginx-Logging gefahren (local_pp/full_pp)?")
+        return
+    n_logs = con.execute("SELECT COUNT(*) FROM nginx_access_log").fetchone()[0]
+    if n_logs == 0:
+        print("\n[--nginx-stats] nginx_access_log ist leer.")
+        return
+
+    # Per-run-Aggregate; dann gegen runs joinen um Strategie/Scenario/Extent
+    # mit reinzuziehen. Backward-Compat: extent_size NULL -> 'medium'.
+    rows = con.execute(
+        """
+        WITH per_run AS (
+            SELECT
+                run_id,
+                COUNT(*)                                          AS n_req,
+                COALESCE(SUM(bytes_sent), 0)                      AS bytes_total,
+                SUM(CASE WHEN http_status = 200 THEN 1 ELSE 0 END) AS n_200,
+                SUM(CASE WHEN http_status = 206 THEN 1 ELSE 0 END) AS n_206,
+                SUM(CASE WHEN http_status NOT IN (200, 206)
+                         THEN 1 ELSE 0 END)                       AS n_other
+            FROM nginx_access_log
+            GROUP BY run_id
+        )
+        SELECT
+            r.crs_strategy,
+            r.scenario,
+            COALESCE(r.extent_size, 'medium') AS extent_size,
+            pr.run_id,
+            pr.n_req, pr.bytes_total, pr.n_200, pr.n_206, pr.n_other
+        FROM per_run pr
+        LEFT JOIN runs r ON r.run_id = pr.run_id
+        """
+    ).fetchall()
+    con.close()
+
+    if not rows:
+        print("\n[--nginx-stats] Keine matchenden runs.")
+        return
+
+    grouped = defaultdict(list)
+    for crs_strategy, scenario, extent_size, run_id, n_req, btot, n200, n206, nother in rows:
+        region = detect_region(scenario)
+        key = (crs_strategy or "unknown", region, extent_size or "medium")
+        grouped[key].append({
+            "run_id": run_id,
+            "n_req":  int(n_req or 0),
+            "bytes":  int(btot or 0),
+            "n_200":  int(n200 or 0),
+            "n_206":  int(n206 or 0),
+            "n_other": int(nother or 0),
+        })
+
+    def _fmt_bytes(n):
+        if n < 1024:
+            return f"{n} B"
+        for unit in ("KB", "MB", "GB", "TB"):
+            n /= 1024.0
+            if n < 1024:
+                return f"{n:.1f} {unit}"
+        return f"{n:.1f} PB"
+
+    print(f"\n{'='*92}")
+    print(" nginx Access-Log Stats (pro Strategie / Region / Extent)")
+    print(f"{'='*92}")
+    header = (f"{'Strategy':<22} {'Region':<10} {'Extent':<8} "
+              f"{'n':>3} {'req_median':>11} {'bytes_sum':>11} "
+              f"{'%206':>6} {'%200':>6} {'%other':>7}")
+    print(header)
+    print("-" * len(header))
+
+    EXTENT_ORDER = ("small", "medium", "large", "xlarge", "xxlarge")
+    for key in sorted(grouped.keys(),
+                      key=lambda k: (k[0], k[1],
+                                     EXTENT_ORDER.index(k[2])
+                                     if k[2] in EXTENT_ORDER else 99)):
+        strat, region, extent = key
+        runs = grouped[key]
+        n = len(runs)
+        req_counts = [r["n_req"] for r in runs]
+        bytes_sum = sum(r["bytes"] for r in runs)
+        total_reqs = sum(r["n_req"] for r in runs)
+        total_206 = sum(r["n_206"] for r in runs)
+        total_200 = sum(r["n_200"] for r in runs)
+        total_other = sum(r["n_other"] for r in runs)
+        pct_206 = (100.0 * total_206 / total_reqs) if total_reqs else 0.0
+        pct_200 = (100.0 * total_200 / total_reqs) if total_reqs else 0.0
+        pct_other = (100.0 * total_other / total_reqs) if total_reqs else 0.0
+        print(f"{strat[:22]:<22} {region[:10]:<10} {extent[:8]:<8} "
+              f"{n:>3} {statistics.median(req_counts):>11.1f} "
+              f"{_fmt_bytes(bytes_sum):>11} "
+              f"{pct_206:>5.1f}% {pct_200:>5.1f}% {pct_other:>6.1f}%")
+    print("=" * 92)
+
+
 def write_csv(path, all_results):
     """Write per-group, per-strategy rows to CSV."""
     fields = [
@@ -371,7 +477,17 @@ def main():
                              "Diff, U-Statistik und p-Wert sowie ob der "
                              "Unterschied signifikant (p<0.05) ist. "
                              "Benoetigt scipy: pip install scipy.")
+    parser.add_argument("--nginx-stats", action="store_true",
+                        help="Auswertung der nginx_access_log Tabelle (CDSE "
+                             "Zugriffe auf Hetzner-Assets). Pro Strategie/"
+                             "Region/Extent: Median Anzahl Requests, Summe "
+                             "bytes_sent, Anteil HTTP 206 (Range) vs 200. "
+                             "Zeigt den Zusammenhang zwischen Extent-Groesse "
+                             "und Anzahl Range Requests.")
     args = parser.parse_args()
+
+    if args.nginx_stats:
+        print_nginx_stats(args.db)
 
     runs = fetch_runs(args.db)
     if not runs:

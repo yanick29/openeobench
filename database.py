@@ -60,7 +60,11 @@ def create_database():
         cpu_seconds DOUBLE,
         duration_backend DOUBLE,
         input_pixels_mp DOUBLE,
-        max_memory_gb DOUBLE
+        max_memory_gb DOUBLE,
+
+        -- Reproduzierbarkeit: results.json["environment"] (P2.15)
+        git_commit TEXT,
+        environment_json TEXT
     )''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS band_statistics (
@@ -116,6 +120,10 @@ def create_database():
         c.execute("ALTER TABLE runs ADD COLUMN local_resampling TEXT")
     if "target_crs" not in existing_run_cols:
         c.execute("ALTER TABLE runs ADD COLUMN target_crs TEXT")
+    if "git_commit" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN git_commit TEXT")
+    if "environment_json" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN environment_json TEXT")
 
     conn.commit()
     conn.close()
@@ -128,17 +136,36 @@ def get_next_id(conn, table, id_column):
     return result[0]
 
 
+def _ensure_run_extra_columns(conn):
+    """Idempotente Migration fuer Spalten die in aelteren DBs fehlen koennen.
+    Wird vor jedem INSERT aus import_run aufgerufen damit die Insert-Liste
+    stabil bleibt, selbst wenn create_database() nie aufgerufen wurde.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info('runs')").fetchall()}
+    if "git_commit" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN git_commit TEXT")
+    if "environment_json" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN environment_json TEXT")
+
+
 def import_run(output_directory, crs_strategy=None, run_type=None,
                preprocessing_time=None, extent_size=None, dem_download_time=None,
                s2_download_time=None, workflow=None, local_resampling=None,
                target_crs=None):
     """Importiert einen Run aus results.json und job-results.json in die DB."""
     conn = duckdb.connect(DB_PATH)
-    
+    _ensure_run_extra_columns(conn)
+
     # results.json lesen
     results_path = os.path.join(output_directory, "results.json")
     with open(results_path, 'r') as f:
         results = json.load(f)
+
+    # Environment-Block (P2.15): git_commit als eigene Spalte fuer einfache
+    # Filter, kompletter Dict als JSON in environment_json.
+    env_block = results.get("environment") or {}
+    git_commit = env_block.get("git_commit") if isinstance(env_block, dict) else None
+    environment_json = json.dumps(env_block) if env_block else None
     
     # queue_time und processing_time berechnen falls null
     queue_time = results.get("queue_time")
@@ -237,8 +264,9 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         crs_strategy, run_type, preprocessing_time, dem_download_time,
         s2_download_time, extent_size,
         workflow, local_resampling, target_crs,
-        credits, cpu_seconds, duration_backend, input_pixels_mp, max_memory_gb
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+        credits, cpu_seconds, duration_backend, input_pixels_mp, max_memory_gb,
+        git_commit, environment_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
         run_id,
         results.get("backend_url"),
         results.get("backend_name"),
@@ -272,7 +300,9 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         results.get("cpu_seconds"),
         results.get("duration_backend"),
         results.get("input_pixels_mp"),
-        results.get("max_memory_gb")
+        results.get("max_memory_gb"),
+        git_commit,
+        environment_json,
     ))
     
     for stat in band_stats_list:
@@ -310,12 +340,18 @@ def _ensure_nginx_access_log_table(conn):
     )''')
 
 
+SSH_TIMEOUT = 120  # Sekunden - haengende ssh/grep Calls hart abbrechen
+
+
 def import_nginx_access_log(run_id, filenames, ssh_host="root@46.224.62.97",
-                            log_path="/var/log/nginx/access.log"):
+                            log_path="/var/log/nginx/access.log",
+                            timeout=SSH_TIMEOUT):
     """Holt nginx access-log Eintraege per ssh+grep und speichert sie pro run_id.
 
     filenames: Iterable von Dateinamen die in den nginx Logs gegrept werden
                (z.B. TIF und STAC-Item Dateiname).
+    timeout:   Pro ssh-Call (Default 120 s). Bei Timeout wird die Datei
+               uebersprungen mit klarer Warnung statt unbegrenzt zu haengen.
     """
     conn = duckdb.connect(DB_PATH)
     _ensure_nginx_access_log_table(conn)
@@ -325,12 +361,21 @@ def import_nginx_access_log(run_id, filenames, ssh_host="root@46.224.62.97",
         if not fname:
             continue
         # Filename darf keine Quotes/Shell-Metas enthalten (kommt aus _ts() + region)
+        connect_timeout = min(int(timeout), 30)
         cmd = [
-            "ssh", "-o", "StrictHostKeyChecking=no", ssh_host,
+            "ssh", "-o", "StrictHostKeyChecking=no",
+            "-o", f"ConnectTimeout={connect_timeout}",
+            ssh_host,
             f"grep '{fname}' {log_path}",
         ]
         print(f"  [ssh] grep '{fname}' {log_path}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print(f"  WARNUNG: ssh-grep Timeout nach {timeout}s fuer '{fname}' - "
+                  f"uebersprungen.")
+            continue
         # grep: exit 0 = match, 1 = kein match, >1 = fehler
         if result.returncode > 1:
             print(f"  WARNUNG: ssh-grep fehlgeschlagen ({result.returncode}): {result.stderr.strip()}")
