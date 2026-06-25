@@ -1,3 +1,43 @@
-requests
+# =============================================================================
+# WICHTIG - numpy / scipy Pinning
+# =============================================================================
+# Die CPU des TU-Servers unterstuetzt KEINE x86_v2 Instruktionen (Haswell+).
+# numpy 2.x wheels sind aber gegen x86_v2 gebaut (`-march=x86-64-v2`) und
+# crashen auf der Maschine sofort mit "Illegal instruction (core dumped)",
+# bevor der erste Python-Code laeuft.
+# Daher MUSS numpy auf 1.26.x bleiben. Die letzte 1.26-Release ist 1.26.4.
+#
+# scipy >= 1.12 verlangt numpy >= 2.0; deshalb ist scipy bei 1.11.4 gecappt
+# (letzte 1.11.x). Auch hier nicht auf 1.12+ heben.
+#
+# Wenn das Backend auf einen Rechner mit x86_v2-Support umzieht, koennen
+# beide Pins gleichzeitig gelockert werden - nie nur einer von beiden.
+# =============================================================================
+
+numpy==1.26.4
+scipy==1.11.4
+rasterio==1.3.11
+
+# "aktuelle Version" laut Server-Setup - nicht gepinnt, damit Bugfixes
+# automatisch mitkommen. Falls Reproduzierbarkeit kritisch wird, hier
+# auf die im git_commit erfasste Version pinnen (siehe environment_json
+# in der runs-Tabelle).
+duckdb
 openeo
+
+# Direkte Imports der Benchmark/Analyse-Tools
+requests
 pyjson5
+
+# openeotest.py: optional importierte Visualisierungs- und Raster-Libs.
+# Werden mit try/except geladen, aber ohne sie sind die Visualisierungs-
+# Features (Plots, Image-Output) deaktiviert.
+rioxarray
+xarray
+matplotlib
+Pillow
+
+# GDAL Python-Bindings (osgeo). Aus pyproject.toml uebernommen.
+# Pip-Install nur unter Linux zuverlaessig; unter Windows ueblicherweise
+# via conda oder vorgebautes Wheel.
+gdal==3.8.4

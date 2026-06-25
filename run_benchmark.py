@@ -369,19 +369,29 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
 
     BANDNAMEN-FIX: COPERNICUS_30 liefert ein Band "DEM", S2 ein Band "B04".
     Bei verschiedenen Namen konkateniert merge_cubes die Cubes statt sie
-    pixelweise zu addieren (verifiziert: ohne Rename ist der GTiff-Output
-    median=2742, also reines S2; mit Rename = 2788 = S2+DEM). Daher wird
-    nach loadcollection2 ein rename_labels Knoten eingefuegt der das DEM-
-    Band auf "B04" umbenennt, damit merge_cubes die Bands als ueberlappend
-    erkennt und der overlap_resolver (add/subtract) greift.
+    pixelweise zu addieren. Daher rename_labels DEM->B04 nach loadcollection2.
+
+    TEMPORAL-FIX: COPERNICUS_30 hat einen Zeitstempel in 2010-2015, S2 in
+    2024. merge_cubes addiert nur wo sich BEIDE Cubes in ALLEN Dimensionen
+    (Bands + t + spatial) ueberlappen. Wenn die Zeitdimensionen disjunkt sind,
+    konkateniert merge_cubes entlang t und das DEM verschwindet beim
+    Speichern der S2-Dates (verifiziert: Output median=2742 = reines S2,
+    erwartet 2788 = S2+DEM). Loesung: reduce_dimension(t, first) entfernt die
+    Zeitdimension komplett. Ein 2D-DEM-Cube wird beim merge_cubes per
+    openEO-Spec auf jeden S2-Zeitschritt gebroadcastet -> der overlap_resolver
+    (add/subtract) greift fuer jeden S2-Zeitschritt einzeln.
+
+    Reihenfolge: loadcollection2 -> renamelabels1 (DEM->B04)
+                 -> reducedimension_dem (t entfernen)
+                 -> [optional resample-Kette]
+                 -> merge1.cube2
     """
     pg = copy.deepcopy(template["process_graph"])
 
-    # rename_labels nach loadcollection2 einbauen, damit cube1.B04 und
-    # cube2.B04 in merge1 ueberlappen. source=["DEM"] ist der COPERNICUS_30
-    # Bandname; bei load_stac (local_pp / full_pp) wird das von den Buildern
-    # nachtraeglich auf source=[] gesetzt, weil der vom Backend vergebene
-    # Bandname nicht garantiert "DEM" ist.
+    # rename_labels: cube2 Bandname auf "B04" -> ueberlappt mit cube1.
+    # source=["DEM"] ist der COPERNICUS_30 Bandname; bei load_stac
+    # (local_pp / full_pp) ueberschreiben die Builder source=[], weil
+    # der vom Backend vergebene Bandname nicht garantiert "DEM" ist.
     pg["renamelabels1"] = {
         "arguments": {
             "data": {"from_node": "loadcollection2"},
@@ -391,9 +401,28 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
         },
         "process_id": "rename_labels",
     }
-    # merge1.cube2 zeigt jetzt auf das umbenannte DEM statt direkt auf
-    # loadcollection2.
-    pg["merge1"]["arguments"]["cube2"] = {"from_node": "renamelabels1"}
+    # reduce_dimension(t, first): DEM ist statisch -> der erste (und einzige
+    # in der temporal_extent enthaltene) Zeitwert reicht. Ergebnis ist ein
+    # Cube ohne t-Dimension, der per merge_cubes-Broadcasting auf jeden
+    # S2-Zeitschritt gebroadcastet wird.
+    pg["reducedimension_dem"] = {
+        "arguments": {
+            "data": {"from_node": "renamelabels1"},
+            "dimension": "t",
+            "reducer": {
+                "process_graph": {
+                    "first1": {
+                        "arguments": {"data": {"from_parameter": "data"}},
+                        "process_id": "first",
+                        "result": True,
+                    }
+                }
+            },
+        },
+        "process_id": "reduce_dimension",
+    }
+    # merge1.cube2 zeigt jetzt auf das zeitlose DEM.
+    pg["merge1"]["arguments"]["cube2"] = {"from_node": "reducedimension_dem"}
 
     if workflow == "merge_add":
         return pg
@@ -494,12 +523,12 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
         if region is None:
             raise ValueError("workflow=resample benoetigt 'region' fuer das Ziel-UTM.")
         target_epsg = REGIONS[region]["epsg"]
-        # DEM (bereits umbenannt auf B04 in renamelabels1) nach EPSG:3035 @ 30m
-        # und zurueck nach UTM @ 10m resamplen. Reine CDSE-Operation - testet
-        # das interne Resampling.
+        # DEM (bereits umbenannt auf B04 + t-Dimension entfernt) nach EPSG:3035
+        # @ 30m und zurueck nach UTM @ 10m resamplen. Reine CDSE-Operation -
+        # testet das interne Resampling.
         pg["resamplespatial1"] = {
             "arguments": {
-                "data": {"from_node": "renamelabels1"},
+                "data": {"from_node": "reducedimension_dem"},
                 "projection": 3035,
                 "resolution": 30,
                 "method": "near",
