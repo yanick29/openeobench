@@ -1388,66 +1388,97 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
     per_date_results = []
 
     for s2_tif in s2_tifs:
-        with rasterio.open(str(s2_tif)) as s2_src:
-            s2_data = s2_src.read().astype(np.float64)
+        try:
+            with rasterio.open(str(s2_tif)) as s2_src:
+                s2_data = s2_src.read().astype(np.float64)
 
-        if workflow in ("merge_add", "resample"):
-            result = s2_data[0] + dem_data
-            _write_single(out_dir / s2_tif.name, result)
-            output_tifs.append(out_dir / s2_tif.name)
-
-        elif workflow == "subtract":
-            result = s2_data[0] - dem_data
-            _write_single(out_dir / s2_tif.name, result)
-            output_tifs.append(out_dir / s2_tif.name)
-
-        elif workflow == "mask":
-            if s2_data.shape[0] < 2:
+            # Defensiver Shape-Check: S2 (per Band) und DEM muessen das
+            # IDENTISCHE 2D-Grid haben. Sonst crasht das numpy-Broadcasting
+            # mit einer wenig hilfreichen Meldung; wir fangen das frueh ab
+            # und sagen explizit was nicht passt.
+            if s2_data.ndim != 3:
                 raise RuntimeError(
-                    f"workflow=mask erwartet 2 Baender (B04+SCL), "
-                    f"in {s2_tif.name} sind nur {s2_data.shape[0]}"
+                    f"S2-Raster {s2_tif.name} hat ndim={s2_data.ndim}, "
+                    f"erwartet 3 (bands, height, width)."
                 )
-            b04 = s2_data[0]
-            scl = s2_data[1].astype(int)
-            keep = np.isin(scl, (4, 5))
-            b04_masked = np.where(keep, b04, np.nan)
-            result = b04_masked + dem_data
-            _write_single(out_dir / s2_tif.name, result)
-            output_tifs.append(out_dir / s2_tif.name)
+            if s2_data.shape[1:] != dem_data.shape:
+                raise RuntimeError(
+                    f"Shape-Mismatch zwischen S2 und DEM: "
+                    f"S2 {s2_tif.name} hat Shape {s2_data.shape[1:]}, "
+                    f"DEM hat Shape {dem_data.shape}. "
+                    f"Beide muessen auf dem gleichen Grid liegen - "
+                    f"in run_strategy_local_reference muss das DEM via "
+                    f"reproject_dem_to_grid auf das S2-Grid reprojiziert "
+                    f"werden, nicht unabhaengig via reproject_dem_local."
+                )
 
-        elif workflow == "focal":
-            combined = s2_data[0] + dem_data
-            result = _box3_mean(combined)
-            _write_single(out_dir / s2_tif.name, result)
-            output_tifs.append(out_dir / s2_tif.name)
+            if workflow in ("merge_add", "resample"):
+                result = s2_data[0] + dem_data
+                _write_single(out_dir / s2_tif.name, result)
+                output_tifs.append(out_dir / s2_tif.name)
 
-        elif workflow == "filter_bbox":
-            combined = s2_data[0] + dem_data
-            h, w = combined.shape
-            i0, i1 = h // 4, h - h // 4
-            j0, j1 = w // 4, w - w // 4
-            result = combined[i0:i1, j0:j1]
-            crop_meta = ref_meta.copy()
-            crop_meta.update({
-                "count":  1,
-                "dtype":  "float32",
-                "height": result.shape[0],
-                "width":  result.shape[1],
-                "transform": Affine(
-                    ref_transform.a, 0,
-                    ref_transform.c + j0 * ref_transform.a,
-                    0, ref_transform.e,
-                    ref_transform.f + i0 * ref_transform.e,
-                ),
-            })
-            _write_single(out_dir / s2_tif.name, result, meta=crop_meta)
-            output_tifs.append(out_dir / s2_tif.name)
+            elif workflow == "subtract":
+                result = s2_data[0] - dem_data
+                _write_single(out_dir / s2_tif.name, result)
+                output_tifs.append(out_dir / s2_tif.name)
 
-        elif workflow == "aggregation":
-            per_date_results.append(s2_data[0] + dem_data)
+            elif workflow == "mask":
+                if s2_data.shape[0] < 2:
+                    raise RuntimeError(
+                        f"workflow=mask erwartet 2 Baender (B04+SCL), "
+                        f"in {s2_tif.name} sind nur {s2_data.shape[0]}"
+                    )
+                b04 = s2_data[0]
+                scl = s2_data[1].astype(int)
+                keep = np.isin(scl, (4, 5))
+                b04_masked = np.where(keep, b04, np.nan)
+                result = b04_masked + dem_data
+                _write_single(out_dir / s2_tif.name, result)
+                output_tifs.append(out_dir / s2_tif.name)
 
-        else:
-            raise ValueError(f"workflow={workflow} ist lokal nicht implementiert.")
+            elif workflow == "focal":
+                combined = s2_data[0] + dem_data
+                result = _box3_mean(combined)
+                _write_single(out_dir / s2_tif.name, result)
+                output_tifs.append(out_dir / s2_tif.name)
+
+            elif workflow == "filter_bbox":
+                combined = s2_data[0] + dem_data
+                h, w = combined.shape
+                i0, i1 = h // 4, h - h // 4
+                j0, j1 = w // 4, w - w // 4
+                result = combined[i0:i1, j0:j1]
+                crop_meta = ref_meta.copy()
+                crop_meta.update({
+                    "count":  1,
+                    "dtype":  "float32",
+                    "height": result.shape[0],
+                    "width":  result.shape[1],
+                    "transform": Affine(
+                        ref_transform.a, 0,
+                        ref_transform.c + j0 * ref_transform.a,
+                        0, ref_transform.e,
+                        ref_transform.f + i0 * ref_transform.e,
+                    ),
+                })
+                _write_single(out_dir / s2_tif.name, result, meta=crop_meta)
+                output_tifs.append(out_dir / s2_tif.name)
+
+            elif workflow == "aggregation":
+                per_date_results.append(s2_data[0] + dem_data)
+
+            else:
+                raise ValueError(
+                    f"workflow={workflow} ist lokal nicht implementiert."
+                )
+        except Exception as exc:
+            # Klare Fehlermeldung mit Dateinamen und Workflow, BEVOR die
+            # Exception nach oben propagiert. So weiss man sofort, an
+            # welcher S2-Datei + welcher Operation es haengt.
+            print(f"\n  FEHLER in _apply_local_workflow "
+                  f"(workflow={workflow}, file={s2_tif.name}): "
+                  f"{type(exc).__name__}: {exc}")
+            raise
 
     if workflow == "aggregation" and per_date_results:
         # Temporal mean. CDSE-Output-Dateiname fuer aggregation ist nicht
@@ -1550,18 +1581,21 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
         dem_tif_raw = dem_tifs[0]
         print(f"  DEM heruntergeladen ({dem_download_time:.1f} s)")
 
-        # Schritt 3: lokale Reprojektion - DEFINIERTE Settings
+        # Schritt 3: lokale Reprojektion. Reihenfolge ist wichtig:
+        #   1. ZUERST S2 reprojizieren - das definiert das Ziel-Grid (Transform,
+        #      Width, Height, CRS), inkl. dem 10 m S2-Snap.
+        #   2. DANN das DEM auf EXAKT das S2-Grid reprojizieren
+        #      (reproject_dem_to_grid - keine eigene Snap-Logik mehr).
+        # Frueher wurden beide unabhaengig via reproject_dem_local gesnappt,
+        # was bei leicht unterschiedlichen Source-Bounds zu (1139,1047) vs
+        # (1136,1044) Shape-Mismatches fuehrte und _apply_local_workflow zum
+        # Crash brachte.
         print(f"\n  [Schritt 3/4] Lokale Reprojektion (rasterio, "
               f"{args.local_resampling}, 10 m, {target_crs_str})...")
         repro_dir = base / "step3_reprojected"
         repro_dir.mkdir()
-        dem_repro = repro_dir / "dem.tif"
         t_repro_start = time.time()
-        reproject_dem_local(
-            dem_tif_raw, str(dem_repro),
-            dst_crs=target_crs_str, resampling=args.local_resampling,
-            target_resolution=10.0,
-        )
+
         s2_repro_tifs = []
         for s2_tif in s2_tifs:
             out = repro_dir / s2_tif.name
@@ -1571,8 +1605,27 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
                 target_resolution=10.0,
             )
             s2_repro_tifs.append(out)
+
+        # Ziel-Grid vom ersten reprojizierten S2 lesen (alle S2-TIFs derselben
+        # Region/Extent haben identisches Grid, weil sie aus demselben CDSE-
+        # Download-Job kommen).
+        with rasterio.open(str(s2_repro_tifs[0])) as ref:
+            target_grid = {
+                "crs":       ref.crs,
+                "transform": ref.transform,
+                "width":     ref.width,
+                "height":    ref.height,
+            }
+
+        dem_repro = repro_dir / "dem.tif"
+        reproject_dem_to_grid(
+            dem_tif_raw, str(dem_repro),
+            grid=target_grid, resampling=args.local_resampling,
+        )
         t_reproject = time.time() - t_repro_start
-        print(f"  {len(s2_repro_tifs)} S2 + 1 DEM reprojiziert ({t_reproject:.1f} s)")
+        print(f"  {len(s2_repro_tifs)} S2 reprojiziert + DEM auf S2-Grid "
+              f"({target_grid['width']}x{target_grid['height']}) gesnapped "
+              f"({t_reproject:.1f} s)")
 
         # Schritt 4: lokale Workflow-Operation. Der finale, gemergte Output
         # liegt in step4_result/ - getrennt von den reprojizierten
@@ -1643,7 +1696,10 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
             "outdir":              str(base),
         }
     except Exception as exc:
-        print(f"  FEHLER: {exc}")
+        print(f"\n{'!'*60}")
+        print(f"  FEHLER in run_strategy_local_reference: "
+              f"{type(exc).__name__}: {exc}")
+        print(f"{'!'*60}")
         import traceback
         traceback.print_exc()
         return {
