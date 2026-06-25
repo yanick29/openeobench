@@ -292,12 +292,12 @@ def main():
                         choices=("none", "region", "extent", "workflow"),
                         default="none",
                         help="Group strategies by region (derived from scenario name), "
-                             "by extent_size (small/medium/large/xlarge), or by "
-                             "workflow (merge_add/subtract/mask/aggregation)")
+                             "by extent_size (small/medium/large/xlarge/xxlarge), or by "
+                             "workflow (merge_add/subtract/mask/aggregation/focal/resample)")
     parser.add_argument("--region", default=None,
                         help="Filter to a single region (e.g. berlin, hamburg)")
     parser.add_argument("--extent-size",
-                        choices=("small", "medium", "large", "xlarge"),
+                        choices=("small", "medium", "large", "xlarge", "xxlarge"),
                         default=None,
                         help="Filter to a single extent size. Runs without recorded "
                              "extent_size are treated as 'medium'.")
@@ -364,7 +364,7 @@ def main():
             if metrics:
                 results.append((f"Region: {region}", metrics))
     elif args.group_by == "extent":
-        EXTENT_ORDER = ("small", "medium", "large", "xlarge")
+        EXTENT_ORDER = ("small", "medium", "large", "xlarge", "xxlarge")
         by_extent = defaultdict(list)
         for r in runs:
             by_extent[r.get("extent_size") or "medium"].append(r)
@@ -374,7 +374,7 @@ def main():
             if metrics:
                 results.append((f"Extent: {ext}", metrics))
     elif args.group_by == "workflow":
-        WORKFLOW_ORDER = ("merge_add", "subtract", "mask", "aggregation")
+        WORKFLOW_ORDER = ("merge_add", "subtract", "mask", "aggregation", "focal", "resample")
         by_wf = defaultdict(list)
         for r in runs:
             by_wf[r.get("workflow") or "merge_add"].append(r)

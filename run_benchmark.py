@@ -43,10 +43,10 @@ EXTRA_STRATEGIES = ["full_preprocessing"]
 
 # AOI-Groessen (Kantenlaenge in km) um den Region-Mittelpunkt.
 # 'medium' bleibt Backward-Compat = unveraenderter REGIONS-Extent.
-SIZE_KM = {"small": 5.0, "medium": 10.0, "large": 50.0, "xlarge": 100.0}
+SIZE_KM = {"small": 5.0, "medium": 10.0, "large": 50.0, "xlarge": 100.0, "xxlarge": 200.0}
 
 # Verfuegbare openEO-Workflows. 'merge_add' = bisheriges Verhalten.
-WORKFLOWS = ("merge_add", "subtract", "mask", "aggregation")
+WORKFLOWS = ("merge_add", "subtract", "mask", "aggregation", "focal", "resample")
 
 # Lokale DEM-Resampling-Methoden. CDSE intern nutzt immer NearestNeighbor;
 # bilinear/cubic lokal erzeugen messbare Abweichungen zum onthefly-Output.
@@ -213,7 +213,8 @@ def reproject_dem_local(input_tif: str, output_tif: str,
     return time.time() - t0
 
 
-def run_openeo(api_url: str, scenario: str, output_dir: str) -> dict:
+def run_openeo(api_url: str, scenario: str, output_dir: str,
+               job_timeout: int = 3600) -> dict:
     """
     Fuehrt openeotest.py run aus. Gibt den Inhalt von results.json zurueck.
     Wirft RuntimeError wenn results.json nicht geschrieben wurde.
@@ -223,6 +224,7 @@ def run_openeo(api_url: str, scenario: str, output_dir: str) -> dict:
         "--api-url", api_url,
         "--scenario", scenario,
         "--output-directory", output_dir,
+        "--job-timeout", str(job_timeout),
     ]
     print(f"\n  [openeotest] {' '.join(cmd)}")
     subprocess.run(cmd, check=False)
@@ -297,7 +299,7 @@ def _load_bench_template(region: str, extent_size: str = "medium") -> dict:
     return template
 
 
-def _build_workflow_pg(template: dict, workflow: str) -> dict:
+def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dict:
     """Baut den process_graph fuer den gewuenschten Workflow.
 
     Alle Workflows starten von der merge_add-Baseline (bench_onthefly_{region}.json)
@@ -307,6 +309,10 @@ def _build_workflow_pg(template: dict, workflow: str) -> dict:
       mask        -> SCL Band laden, Cloud-Mask (SCL not in {4,5}) auf B04 anwenden,
                      dann merge_add mit DEM
       aggregation -> merge_add gefolgt von temporalem reduce_dimension(mean)
+      focal       -> nach merge_add ein 3x3 Mittelwert-apply_kernel
+      resample    -> DEM wird CDSE-seitig nach EPSG:3035@30m und zurueck nach
+                     Region-UTM@10m resamplet, bevor es in merge1.cube2 geht.
+                     Testet CDSEs eigene Resampling-Genauigkeit.
     """
     pg = copy.deepcopy(template["process_graph"])
     if workflow == "merge_add":
@@ -390,6 +396,47 @@ def _build_workflow_pg(template: dict, workflow: str) -> dict:
         pg["saveresult1"]["arguments"]["data"] = {"from_node": "reducedimension1"}
         return pg
 
+    if workflow == "focal":
+        # 3x3 Mittelwert-Kernel auf den merge1-Output anwenden.
+        # Nachbarschaftsoperation -> reagiert auf jede Pixel-Aenderung.
+        kernel = [[1.0 / 9.0] * 3 for _ in range(3)]
+        pg["applykernel1"] = {
+            "arguments": {
+                "data": {"from_node": "merge1"},
+                "kernel": kernel,
+            },
+            "process_id": "apply_kernel",
+        }
+        pg["saveresult1"]["arguments"]["data"] = {"from_node": "applykernel1"}
+        return pg
+
+    if workflow == "resample":
+        if region is None:
+            raise ValueError("workflow=resample benoetigt 'region' fuer das Ziel-UTM.")
+        target_epsg = REGIONS[region]["epsg"]
+        # DEM nach EPSG:3035 @ 30m und zurueck nach UTM @ 10m resamplen.
+        # Reine CDSE-Operation - testet das interne Resampling.
+        pg["resamplespatial1"] = {
+            "arguments": {
+                "data": {"from_node": "loadcollection2"},
+                "projection": 3035,
+                "resolution": 30,
+                "method": "near",
+            },
+            "process_id": "resample_spatial",
+        }
+        pg["resamplespatial2"] = {
+            "arguments": {
+                "data": {"from_node": "resamplespatial1"},
+                "projection": target_epsg,
+                "resolution": 10,
+                "method": "near",
+            },
+            "process_id": "resample_spatial",
+        }
+        pg["merge1"]["arguments"]["cube2"] = {"from_node": "resamplespatial2"}
+        return pg
+
     raise ValueError(f"Unbekannter Workflow: {workflow}")
 
 
@@ -398,7 +445,7 @@ def build_onthefly_scenario(region: str, target_path: Path,
                             workflow: str = "merge_add") -> Path:
     """Onthefly = Workflow-PG aus bench_onthefly_{region}.json gebaut."""
     template = _load_bench_template(region, extent_size)
-    pg = _build_workflow_pg(template, workflow)
+    pg = _build_workflow_pg(template, workflow, region=region)
     with open(target_path, "w") as f:
         json.dump({"process_graph": pg}, f, indent=2)
     return target_path
@@ -442,7 +489,7 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     Hetzner-STAC-Item-URL zeigt.
     """
     template = _load_bench_template(region, extent_size)
-    pg = _build_workflow_pg(template, workflow)
+    pg = _build_workflow_pg(template, workflow, region=region)
 
     # loadcollection2 entfernen und durch loadstac1 ersetzen
     pg.pop("loadcollection2", None)
@@ -450,8 +497,18 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
         "arguments": {"url": stac_item_url},
         "process_id": "load_stac",
     }
-    # merge1.cube2 auf loadstac1 umbiegen (cube1 bleibt vom Workflow gesetzt)
-    pg["merge1"]["arguments"]["cube2"] = {"from_node": "loadstac1"}
+    # Alle Knoten umbiegen die noch auf loadcollection2 zeigen
+    # (merge1.cube2, oder bei workflow=resample auch resamplespatial1.data).
+    def _retarget_dem(node_args):
+        for k, v in list(node_args.items()):
+            if isinstance(v, dict):
+                if v.get("from_node") == "loadcollection2":
+                    node_args[k] = {"from_node": "loadstac1"}
+                else:
+                    _retarget_dem(v)
+    for node in pg.values():
+        if isinstance(node, dict) and isinstance(node.get("arguments"), dict):
+            _retarget_dem(node["arguments"])
 
     scenario = {"process_graph": pg}
     with open(target_path, "w") as f:
@@ -675,7 +732,7 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     auf den S2 STAC um.
     """
     template = _load_bench_template(region, extent_size)
-    pg = _build_workflow_pg(template, workflow)
+    pg = _build_workflow_pg(template, workflow, region=region)
 
     pg.pop("loadcollection1", None)
     pg.pop("loadcollection2", None)
@@ -705,8 +762,11 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     # Sicherstellen, dass merge1 die richtigen Cubes bekommt (cube1=S2, cube2=DEM).
     if "merge1" in pg:
         merge_args = pg["merge1"]["arguments"]
-        # cube2 = DEM (frueher loadcollection2 -> jetzt loadstac2)
-        merge_args["cube2"] = {"from_node": "loadstac2"}
+        # cube2 = DEM (frueher loadcollection2 -> jetzt loadstac2). Bei
+        # workflow=resample bleibt der Resample-Pfad (resamplespatial2) erhalten,
+        # da der bereits durch _retarget korrekt auf loadstac2 zeigt.
+        if workflow != "resample":
+            merge_args["cube2"] = {"from_node": "loadstac2"}
         # cube1: bei workflow=mask kommt es aus mask1; sonst direkt loadstac1.
         if workflow != "mask":
             merge_args["cube1"] = {"from_node": "loadstac1"}
@@ -781,7 +841,8 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
             extent_size=args.extent_size,
             workflow=args.workflow,
         )
-        results = run_openeo(args.api_url, str(scenario_path), str(outdir))
+        results = run_openeo(args.api_url, str(scenario_path), str(outdir),
+                             job_timeout=args.job_timeout)
         total_time = results.get("total_time")
         run_id = import_run(str(outdir), crs_strategy="onthefly",
                             run_type=run_type, extent_size=args.extent_size,
@@ -827,7 +888,8 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
             region, dl_dir / "scenario_dem_download.json",
             extent_size=extent_size,
         )
-        results = run_openeo(args.api_url, str(dem_scenario), str(dl_dir))
+        results = run_openeo(args.api_url, str(dem_scenario), str(dl_dir),
+                             job_timeout=getattr(args, "job_timeout", 3600))
         t_download = results.get("total_time") or 0.0
 
         tif_files = glob.glob(str(dl_dir / "*.tif"))
@@ -844,7 +906,8 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
         region, base / "scenario_dem_download.json",
         extent_size=extent_size,
     )
-    results = run_openeo(args.api_url, str(dem_scenario), str(step1_dir))
+    results = run_openeo(args.api_url, str(dem_scenario), str(step1_dir),
+                         job_timeout=getattr(args, "job_timeout", 3600))
     t_download = results.get("total_time") or 0.0
 
     tif_files = glob.glob(str(step1_dir / "*.tif"))
@@ -935,7 +998,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             extent_size=args.extent_size,
             workflow=args.workflow,
         )
-        results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir))
+        results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
+                                   job_timeout=args.job_timeout)
         t_main = results_step5.get("total_time") or 0.0
         total_time = preprocessing_time + t_main
 
@@ -1030,7 +1094,8 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             extent_size=args.extent_size, workflow=args.workflow,
         )
         t_s2_dl_start = time.time()
-        s2_results = run_openeo(args.api_url, str(s2_scenario), str(s2_dl_dir))
+        s2_results = run_openeo(args.api_url, str(s2_scenario), str(s2_dl_dir),
+                                job_timeout=args.job_timeout)
         # CDSE total_time fuer S2 separat festhalten (waere genauer als wall-time,
         # aber wall-time deckt auch Submit/Queue ab. Beides ist 'extern'.)
         t_s2_download = s2_results.get("total_time") or (time.time() - t_s2_dl_start)
@@ -1045,7 +1110,8 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             region, base / "scenario_dem_download.json",
             extent_size=args.extent_size,
         )
-        dem_results = run_openeo(args.api_url, str(dem_scenario), str(dem_dl_dir))
+        dem_results = run_openeo(args.api_url, str(dem_scenario), str(dem_dl_dir),
+                                 job_timeout=args.job_timeout)
         t_dem_download = dem_results.get("total_time") or 0.0
         dem_tifs = glob.glob(str(dem_dl_dir / "*.tif"))
         if not dem_tifs:
@@ -1179,7 +1245,8 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             base / f"full_preprocessing_{region}.json",
             extent_size=args.extent_size, workflow=args.workflow,
         )
-        results_main = run_openeo(args.api_url, str(scenario_path), str(main_dir))
+        results_main = run_openeo(args.api_url, str(scenario_path), str(main_dir),
+                                  job_timeout=args.job_timeout)
         t_main = results_main.get("total_time") or 0.0
         total_time = preprocessing_time + t_main
 
@@ -1269,7 +1336,7 @@ def _pg_extent_matches(pg: dict, target: dict, exact: bool = False) -> bool:
     """True wenn ein Knoten ein spatial_extent mit gleichem Mittelpunkt hat.
 
     exact=False: Center-basiert (Toleranz ~0.01 deg = ~1 km), damit
-    verschiedene extent_size-Werte (small/medium/large/xlarge) trotzdem
+    verschiedene extent_size-Werte (small/medium/large/xlarge/xxlarge) trotzdem
     zur selben Region matchen.
 
     exact=True: zusaetzlich muessen alle 4 Bounds uebereinstimmen
@@ -1560,12 +1627,15 @@ def main() -> None:
                              "Region ausfuehren. Mit --repeat 0 auch standalone "
                              "auf existierenden Outputs verwendbar.")
     parser.add_argument("--extent-size", default="medium",
-                        choices=("small", "medium", "large", "xlarge"),
+                        choices=("small", "medium", "large", "xlarge", "xxlarge"),
                         help="AOI-Kantenlaenge um das Region-Zentrum: "
                              "small=5km, medium=10km (Default = bisheriger fester "
                              "REGIONS-Extent, rueckwaertskompatibel), large=50km, "
-                             "xlarge=100km. Wirkt auf onthefly, DEM-Download und "
-                             "local_pp Szenarien sowie das STAC Item.")
+                             "xlarge=100km, xxlarge=200km (ueberschreitet die "
+                             "CDSE-Tile-Grenze von 120km und macht die "
+                             "Tile-Boundary-Penalty messbar). Wirkt auf "
+                             "onthefly, DEM-Download und local_pp Szenarien "
+                             "sowie das STAC Item.")
     parser.add_argument("--workflow", default="merge_add",
                         choices=WORKFLOWS,
                         help="openEO Workflow: "
@@ -1573,7 +1643,10 @@ def main() -> None:
                              "subtract (B04-DEM via merge_cubes/subtract), "
                              "mask (B04 mit SCL Cloud-Mask, SCL not in {4,5} "
                              "wird maskiert, dann B04+DEM/add), "
-                             "aggregation (B04+DEM/add, dann temporal mean).")
+                             "aggregation (B04+DEM/add, dann temporal mean), "
+                             "focal (B04+DEM/add, dann 3x3 mean apply_kernel), "
+                             "resample (DEM CDSE-seitig nach EPSG:3035@30m und "
+                             "zurueck nach Region-UTM@10m, dann B04+DEM/add).")
     parser.add_argument("--local-resampling", default="nearest",
                         choices=tuple(LOCAL_RESAMPLING.keys()),
                         help="Resampling-Methode fuer die lokale DEM-Reprojektion "
@@ -1595,6 +1668,11 @@ def main() -> None:
                              "Auch die S2-Raster lokal nach --target-crs "
                              "reprojizieren (Szenario 3: BEIDE Raster im "
                              "Nicht-UTM-Ziel-CRS).")
+    parser.add_argument("--job-timeout", type=int, default=3600,
+                        help="Maximale Wartezeit in Sekunden fuer einen "
+                             "CDSE-Job (Default: 3600 = 1h). Bei xxlarge "
+                             "(200km) oder grossen Workflows ggf. hoeher "
+                             "setzen, z.B. --job-timeout 7200.")
 
     args = parser.parse_args()
 

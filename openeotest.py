@@ -212,7 +212,7 @@ def authenticate(connection, backend_name):
         logger.error(f"Authentication failed for backend {backend_name}: {str(e)}")
         return False
 
-def run_task(api_url, scenario_path, output_directory=None):
+def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
     """Run a specific scenario on a given backend."""
     # Parse hostname for default output directory
     hostname = urllib.parse.urlparse(api_url).netloc
@@ -322,7 +322,7 @@ def run_task(api_url, scenario_path, output_directory=None):
         # Monitor job status with fixed 5 s polling (max Messfehler ~5 s)
         poll_interval = 5
         max_poll_interval = 30  # nicht mehr benutzt
-        timeout = 3600  # 1 hour timeout
+        timeout = job_timeout
         last_status = "submitted"
         status_times = {"submitted": job_start_datetime}
         check_count = 0
@@ -3045,6 +3045,9 @@ def main():
     run_parser.add_argument('--api-url', required=True, help='URL of the OpenEO backend')
     run_parser.add_argument('--scenario', required=True, help='Path to the process graph JSON file')
     run_parser.add_argument('--output-directory', help='Output directory for results (optional)')
+    run_parser.add_argument('--job-timeout', type=int, default=3600,
+                            help='Maximum wait time in seconds for the CDSE job (default: 3600 = 1h). '
+                                 'Increase for very large extents.')
     
     # Summarize task parser
     summarize_parser = subparsers.add_parser('summarize', help='Generate a summary report from output folders')
@@ -3083,7 +3086,8 @@ def main():
     args = parser.parse_args()
     
     if args.task == 'run':
-        run_task(args.api_url, args.scenario, args.output_directory)
+        run_task(args.api_url, args.scenario, args.output_directory,
+                 job_timeout=args.job_timeout)
     elif args.task == 'summarize':
         # Handle both new and old-style arguments
         input_patterns = args.input_patterns if hasattr(args, 'input_patterns') and args.input_patterns else [args.input]
