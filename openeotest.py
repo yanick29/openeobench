@@ -467,6 +467,16 @@ def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
             # serverseitig veroeffentlicht sind ("JobNotFinished" /
             # 404 / leere Assets-Liste). Wir versuchen bis zu 5 mal mit
             # 10 s Pause zwischen den Versuchen.
+            #
+            # ZUSAETZLICH: Nach jedem Download wird per
+            # _validate_downloaded_tifs(...) geprueft ob die TIFs vollstaendig
+            # lesbar sind. Hintergrund: bei full_preprocessing (viele/grosse
+            # Output-TIFs) bricht die Verbindung gelegentlich mitten in einer
+            # Datei ab, ohne dass der openeo-Client einen Fehler wirft - das
+            # letzte Tile fehlt und rasterio meldet beim Lesen "ZIPDecode:
+            # Not enough data at scanline ..." / "TIFFReadEncodedTile()
+            # failed". Wir behandeln das wie einen normalen Download-Fehler
+            # und probieren es erneut.
             max_download_attempts = 5
             download_retry_delay = 10
             last_download_error = None
@@ -476,6 +486,7 @@ def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
                     job_results = job.get_results()
                     metadata = job_results.get_metadata()
                     job_results.download_files(output_directory)
+                    _validate_downloaded_tifs(output_directory)
                     download_succeeded = True
                     if attempt > 1:
                         logger.info(
@@ -547,6 +558,60 @@ def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
         logger.info(f"Total time: {results['total_time']:.2f} seconds")
         
         return results
+
+
+def _validate_downloaded_tifs(output_directory):
+    """Oeffnet jedes .tif unter output_directory und liest jeden Block.
+
+    Hintergrund: CDSE bricht den HTTP-Stream gelegentlich vor dem letzten
+    Tile ab. `download_files()` des openEO-Clients erkennt das nicht (das
+    HTTP-Response-Body wird einfach als "fertig" interpretiert), beim
+    spaeteren Lesen meldet rasterio aber "ZIPDecode: Not enough data at
+    scanline ..." oder "TIFFReadEncodedTile() failed, IReadBlock failed".
+
+    Wir erzwingen hier das vollstaendige Decode durch Blockweises Lesen
+    pro Band. Wirft RuntimeError beim ersten unvollstaendigen TIFF - die
+    aeussere Retry-Schleife in run_scenario laedt dann erneut.
+
+    Plattform-Hinweis: nutzt rasterio (Linux + Windows). Auch JSON-Assets
+    landen in output_directory; die werden uebersprungen.
+    """
+    if not os.path.isdir(output_directory):
+        return
+    tif_paths = sorted(
+        os.path.join(output_directory, fn)
+        for fn in os.listdir(output_directory)
+        if fn.lower().endswith((".tif", ".tiff"))
+    )
+    if not tif_paths:
+        return
+    try:
+        import rasterio  # type: ignore
+    except ImportError:
+        logger.warning(
+            "rasterio nicht verfuegbar - Download-Integritaet wird nicht "
+            "geprueft. Korrupte TIFs fallen erst beim Lesen auf."
+        )
+        return
+    for tif_path in tif_paths:
+        try:
+            file_size = os.path.getsize(tif_path)
+            with rasterio.open(tif_path) as src:
+                # ALLE Baender vollstaendig lesen. Bei multi-Band-COGs (CDSE
+                # liefert oft 2-3 Baender pro TIF) sitzen die Bytes der
+                # spaeteren Baender am Ende der Datei und sind als erstes
+                # weg, wenn der Download abgeschnitten wird. Ein Test nur
+                # auf Band 1 wuerde das uebersehen.
+                src.read()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Integritaets-Check fehlgeschlagen fuer "
+                f"{os.path.basename(tif_path)} (Groesse {file_size} Bytes): "
+                f"{type(exc).__name__}: {exc}. Wahrscheinlich unvollstaendiger "
+                f"Download - Datei wird neu geladen."
+            ) from exc
+    logger.info(f"Download-Integritaet OK fuer {len(tif_paths)} TIF(s) "
+                f"in {output_directory}")
 
 
 def _save_results(results, output_directory, scenario_name, timestamp):

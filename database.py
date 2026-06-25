@@ -62,8 +62,15 @@ def create_database():
         input_pixels_mp DOUBLE,
         max_memory_gb DOUBLE,
 
-        -- Reproduzierbarkeit: results.json["environment"] (P2.15)
+        -- Reproduzierbarkeit: results.json["environment"] (P2.15).
+        -- Einzelne Spalten fuer einfache SQL-Filter; environment_json
+        -- enthaelt zusaetzlich den vollstaendigen Block (git_dirty, GDAL,
+        -- python_version, platform, ...).
         git_commit TEXT,
+        openeo_version TEXT,
+        rasterio_version TEXT,
+        numpy_version TEXT,
+        proj_version TEXT,
         environment_json TEXT
     )''')
     
@@ -122,6 +129,14 @@ def create_database():
         c.execute("ALTER TABLE runs ADD COLUMN target_crs TEXT")
     if "git_commit" not in existing_run_cols:
         c.execute("ALTER TABLE runs ADD COLUMN git_commit TEXT")
+    if "openeo_version" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN openeo_version TEXT")
+    if "rasterio_version" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN rasterio_version TEXT")
+    if "numpy_version" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN numpy_version TEXT")
+    if "proj_version" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN proj_version TEXT")
     if "environment_json" not in existing_run_cols:
         c.execute("ALTER TABLE runs ADD COLUMN environment_json TEXT")
 
@@ -142,10 +157,13 @@ def _ensure_run_extra_columns(conn):
     stabil bleibt, selbst wenn create_database() nie aufgerufen wurde.
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info('runs')").fetchall()}
-    if "git_commit" not in cols:
-        conn.execute("ALTER TABLE runs ADD COLUMN git_commit TEXT")
-    if "environment_json" not in cols:
-        conn.execute("ALTER TABLE runs ADD COLUMN environment_json TEXT")
+    new_text_cols = (
+        "git_commit", "openeo_version", "rasterio_version",
+        "numpy_version", "proj_version", "environment_json",
+    )
+    for col in new_text_cols:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {col} TEXT")
 
 
 def import_run(output_directory, crs_strategy=None, run_type=None,
@@ -161,10 +179,17 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
     with open(results_path, 'r') as f:
         results = json.load(f)
 
-    # Environment-Block (P2.15): git_commit als eigene Spalte fuer einfache
-    # Filter, kompletter Dict als JSON in environment_json.
+    # Environment-Block (P2.15): einzelne Versions-Felder als Spalten fuer
+    # einfache SQL-Filter, kompletter Dict zusaetzlich als JSON in
+    # environment_json. Fehlende Felder -> None statt KeyError.
     env_block = results.get("environment") or {}
-    git_commit = env_block.get("git_commit") if isinstance(env_block, dict) else None
+    if not isinstance(env_block, dict):
+        env_block = {}
+    git_commit = env_block.get("git_commit")
+    openeo_version = env_block.get("openeo_version")
+    rasterio_version = env_block.get("rasterio_version")
+    numpy_version = env_block.get("numpy_version")
+    proj_version = env_block.get("proj_version")
     environment_json = json.dumps(env_block) if env_block else None
     
     # queue_time und processing_time berechnen falls null
@@ -265,8 +290,9 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         s2_download_time, extent_size,
         workflow, local_resampling, target_crs,
         credits, cpu_seconds, duration_backend, input_pixels_mp, max_memory_gb,
-        git_commit, environment_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+        git_commit, openeo_version, rasterio_version, numpy_version,
+        proj_version, environment_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
         run_id,
         results.get("backend_url"),
         results.get("backend_name"),
@@ -302,6 +328,10 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         results.get("input_pixels_mp"),
         results.get("max_memory_gb"),
         git_commit,
+        openeo_version,
+        rasterio_version,
+        numpy_version,
+        proj_version,
         environment_json,
     ))
     

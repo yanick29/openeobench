@@ -37,13 +37,17 @@ from database import import_nginx_access_log, import_run
 
 CDSE_URL = "https://openeo.dataspace.copernicus.eu/openeo/1.2"
 
-ALL_STRATEGIES = ["onthefly", "local_preprocessing"]
-# full_preprocessing wird bewusst NICHT in "all" einbezogen, weil es deutlich
-# laenger dauert (zwei volle Downloads + N Uploads + STAC Collection).
+ALL_STRATEGIES = ["onthefly", "local_preprocessing", "full_preprocessing"]
 # local_reference ist die unabhaengige lokale Ground-Truth-Pipeline ohne
 # CDSE-Workflow-Job - separat opt-in, weil sie nicht direkt mit CDSE-Strategien
 # vergleichbar ist (wird per --reference-check als REFERENZ benutzt).
-EXTRA_STRATEGIES = ["full_preprocessing", "local_reference"]
+EXTRA_STRATEGIES = ["local_reference"]
+
+# Extents bei denen full_preprocessing per Default ausgesetzt wird, weil
+# die hohe Anzahl Range-Requests (siehe nginx_access_log -> xlarge ~1170
+# Requests) regelmaessig zu CDSE-Timeouts fuehrt. Mit --include-full-pp=yes
+# kann das uebersteuert werden.
+LARGE_EXTENTS_FOR_FULL_PP = ("xlarge", "xxlarge")
 
 # AOI-Groessen (Kantenlaenge in km) um den Region-Mittelpunkt.
 # 'medium' bleibt Backward-Compat = unveraenderter REGIONS-Extent.
@@ -2681,6 +2685,14 @@ def main() -> None:
                              "(trailing slash). Default: ENV "
                              "BENCHMARK_URL_BASE oder "
                              "http://46.224.62.97/benchmark-data/.")
+    parser.add_argument("--include-full-pp", default="auto",
+                        choices=("auto", "yes", "no"),
+                        help="Steuert ob full_preprocessing bei "
+                             "--strategy all mitlaeuft. auto (Default): "
+                             "ja bei extent in {small,medium,large}, nein "
+                             "bei {xlarge,xxlarge} (zu viele Range-Requests "
+                             "-> Timeouts). yes: immer einbeziehen. "
+                             "no: nie einbeziehen.")
 
     args = parser.parse_args()
 
@@ -2693,6 +2705,22 @@ def main() -> None:
         HETZNER_URL_BASE = _ensure_trailing_slash(args.url_base)
 
     strategies = ALL_STRATEGIES if args.strategy == "all" else [args.strategy]
+
+    # Safeguard: full_preprocessing bei grossen Extents per Default ausnehmen,
+    # weil die Anzahl Range-Requests pro xlarge-Run schon ~1170 erreicht
+    # (gemessen in nginx_access_log) und der Backend-Job dadurch regelmaessig
+    # timeoutet. --include-full-pp=yes uebersteuert das.
+    if args.strategy == "all" and "full_preprocessing" in strategies:
+        if args.include_full_pp == "no":
+            print(f"\n[--include-full-pp=no] full_preprocessing wird ausgelassen.")
+            strategies = [s for s in strategies if s != "full_preprocessing"]
+        elif (args.include_full_pp == "auto"
+              and args.extent_size in LARGE_EXTENTS_FOR_FULL_PP):
+            print(f"\n[WARNUNG] full_preprocessing wird fuer extent="
+                  f"{args.extent_size} automatisch uebersprungen: zu viele "
+                  f"Range-Requests, der CDSE-Job wuerde timeouten. "
+                  f"Mit --include-full-pp=yes erzwingen.")
+            strategies = [s for s in strategies if s != "full_preprocessing"]
 
     print(f"\nBenchmark gestartet: {datetime.now().isoformat()}")
     print(f"API-URL:    {args.api_url}")
