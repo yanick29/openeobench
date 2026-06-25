@@ -24,8 +24,49 @@ import tempfile
 import re
 import base64
 import signal
+import threading
 from pathlib import Path
 from collections import defaultdict
+
+# SIGALRM ist POSIX-only (Linux/macOS). Auf Windows existiert es nicht und
+# das Modul muss auf einen plattformunabhaengigen Timeout ausweichen.
+_HAS_SIGALRM = hasattr(signal, "SIGALRM")
+
+
+def _call_with_timeout(func, timeout_s, *args, **kwargs):
+    """Ruft func(*args, **kwargs) mit einem harten Timeout auf.
+
+    Auf POSIX wird SIGALRM verwendet (unterbricht auch blockierende
+    Native-Calls). Auf Windows nutzen wir einen Worker-Thread; ein
+    haengender Thread kann dort nicht gekillt werden, aber die Wartezeit
+    im Aufrufer ist begrenzt. Wirft TimeoutError bei Ablauf.
+    """
+    if _HAS_SIGALRM:
+        def _handler(signum, frame):
+            raise TimeoutError(f"{func.__name__} exceeded {timeout_s} s")
+        signal.signal(signal.SIGALRM, _handler)
+        signal.alarm(int(timeout_s))
+        try:
+            return func(*args, **kwargs)
+        finally:
+            signal.alarm(0)
+
+    result_box = {}
+
+    def _runner():
+        try:
+            result_box["value"] = func(*args, **kwargs)
+        except BaseException as exc:
+            result_box["error"] = exc
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        raise TimeoutError(f"{func.__name__} exceeded {timeout_s} s")
+    if "error" in result_box:
+        raise result_box["error"]
+    return result_box.get("value")
 
 # Try to import optional visualization dependencies
 try:
@@ -338,17 +379,11 @@ def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
             try:
                 current_time = datetime.datetime.now()
 
-                # 30 s Timeout fuer den job.status() Call via SIGALRM,
-                # damit ein haengender CDSE-Request den Loop nicht blockiert.
-                def _status_timeout_handler(signum, frame):
-                    raise TimeoutError("job.status() exceeded 30 s")
-
-                signal.signal(signal.SIGALRM, _status_timeout_handler)
-                signal.alarm(30)
-                try:
-                    current_status = job.status()
-                finally:
-                    signal.alarm(0)
+                # 30 s harter Timeout fuer den job.status() Call, damit ein
+                # haengender CDSE-Request den Loop nicht blockiert. Cross-
+                # platform via _call_with_timeout (SIGALRM auf POSIX,
+                # threading.Timer-Fallback auf Windows).
+                current_status = _call_with_timeout(job.status, 30)
 
                 check_count += 1
                 results["job_status"] = current_status
@@ -427,23 +462,48 @@ def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
             clean_scenario_name = scenario_name.replace('.json', '').replace('/', '_').replace('\\', '_')
 
             
-            # Get the results
-            job_results = job.get_results()
-            
-            # Get and save metadata
-            metadata = job_results.get_metadata()
-            '''
-            metadata_file = os.path.join(output_directory, "metadata.json")
-            try:
-                with open(metadata_file, 'w', encoding='utf-8') as f:
-                    json.dump(metadata, f, indent=2)
-                logger.info(f"Saved job metadata to {metadata_file}")
-            except Exception as e:
-                logger.warning(f"Failed to save job metadata: {e}")
-            '''
-            # Download directly to the output directory
-            job_results.download_files(output_directory)            
-            
+            # Get the results + Download mit Retry. CDSE meldet manchmal
+            # bereits "finished", obwohl die Result-Assets noch nicht
+            # serverseitig veroeffentlicht sind ("JobNotFinished" /
+            # 404 / leere Assets-Liste). Wir versuchen bis zu 5 mal mit
+            # 10 s Pause zwischen den Versuchen.
+            max_download_attempts = 5
+            download_retry_delay = 10
+            last_download_error = None
+            download_succeeded = False
+            for attempt in range(1, max_download_attempts + 1):
+                try:
+                    job_results = job.get_results()
+                    metadata = job_results.get_metadata()
+                    job_results.download_files(output_directory)
+                    download_succeeded = True
+                    if attempt > 1:
+                        logger.info(
+                            f"Download fuer Job {job_id} erfolgreich beim "
+                            f"Versuch {attempt}/{max_download_attempts}"
+                        )
+                    break
+                except Exception as exc:
+                    last_download_error = exc
+                    msg = str(exc)
+                    logger.warning(
+                        f"Download-Versuch {attempt}/{max_download_attempts} "
+                        f"fuer Job {job_id} fehlgeschlagen: "
+                        f"{type(exc).__name__}: {msg}"
+                    )
+                    if attempt < max_download_attempts:
+                        time.sleep(download_retry_delay)
+
+            if not download_succeeded:
+                err = (
+                    f"Download fehlgeschlagen nach {max_download_attempts} "
+                    f"Versuchen: {last_download_error}"
+                )
+                results["error"] = err
+                logger.error(err)
+                _save_results(results, output_directory, scenario_name, timestamp)
+                return results
+
             logger.info(f"Downloaded files to {output_directory}")
             
             results["download_time"] = time.time() - download_start

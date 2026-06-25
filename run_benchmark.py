@@ -46,7 +46,8 @@ EXTRA_STRATEGIES = ["full_preprocessing"]
 SIZE_KM = {"small": 5.0, "medium": 10.0, "large": 50.0, "xlarge": 100.0, "xxlarge": 200.0}
 
 # Verfuegbare openEO-Workflows. 'merge_add' = bisheriges Verhalten.
-WORKFLOWS = ("merge_add", "subtract", "mask", "aggregation", "focal", "resample")
+WORKFLOWS = ("merge_add", "subtract", "mask", "aggregation", "focal", "resample",
+             "filter_bbox")
 
 # Lokale DEM-Resampling-Methoden. CDSE intern nutzt immer NearestNeighbor;
 # bilinear/cubic lokal erzeugen messbare Abweichungen zum onthefly-Output.
@@ -313,6 +314,9 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
       resample    -> DEM wird CDSE-seitig nach EPSG:3035@30m und zurueck nach
                      Region-UTM@10m resamplet, bevor es in merge1.cube2 geht.
                      Testet CDSEs eigene Resampling-Genauigkeit.
+      filter_bbox -> nach merge_add ein filter_bbox auf die mittleren 50%
+                     des Original-Extents (raeumliche Filteroperation aus
+                     dem Proposal).
     """
     pg = copy.deepcopy(template["process_graph"])
     if workflow == "merge_add":
@@ -435,6 +439,43 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
             "process_id": "resample_spatial",
         }
         pg["merge1"]["arguments"]["cube2"] = {"from_node": "resamplespatial2"}
+        return pg
+
+    if workflow == "filter_bbox":
+        # raeumliche Filteroperation: nach dem merge_add die mittleren 50%
+        # der spatial_extent ausschneiden. Damit testen wir CDSEs filter_bbox
+        # / filter_spatial-Operation als eigenstaendigen Workflow.
+        src_extent = template["process_graph"]["loadcollection1"]["arguments"].get(
+            "spatial_extent"
+        )
+        if not isinstance(src_extent, dict):
+            raise ValueError(
+                "workflow=filter_bbox: kein spatial_extent in loadcollection1."
+            )
+        w = float(src_extent["west"])
+        s = float(src_extent["south"])
+        e = float(src_extent["east"])
+        n = float(src_extent["north"])
+        cx, cy = (w + e) / 2.0, (s + n) / 2.0
+        half_w = (e - w) / 4.0
+        half_h = (n - s) / 4.0
+        inner = {
+            "west":  cx - half_w,
+            "south": cy - half_h,
+            "east":  cx + half_w,
+            "north": cy + half_h,
+        }
+        crs_val = src_extent.get("crs")
+        if crs_val is not None:
+            inner["crs"] = crs_val
+        pg["filterbbox1"] = {
+            "arguments": {
+                "data":   {"from_node": "merge1"},
+                "extent": inner,
+            },
+            "process_id": "filter_bbox",
+        }
+        pg["saveresult1"]["arguments"]["data"] = {"from_node": "filterbbox1"}
         return pg
 
     raise ValueError(f"Unbekannter Workflow: {workflow}")
@@ -1387,7 +1428,7 @@ def _folder_matches_extent(folder: Path, target_extent: dict) -> bool:
 
 def _detect_folder_region(folder: Path) -> str:
     """Region eines Run-Ordners bestimmen, oder None."""
-    # 1) local_pp: scenario_file heisst {strategy_label}_{region}.json
+    # 1) local_pp/full_pp: scenario_file heisst {strategy_label}_{region}.json
     for j in folder.glob("*.json"):
         stem = j.stem
         for region in REGIONS:
@@ -1398,6 +1439,7 @@ def _detect_folder_region(folder: Path) -> str:
         folder / "scenario_onthefly.json",
         folder / "processgraph.json",
         folder / "step3_main" / "processgraph.json",
+        folder / "step5_main" / "processgraph.json",
     )
     for cand in candidates:
         if not cand.exists():
@@ -1412,12 +1454,84 @@ def _detect_folder_region(folder: Path) -> str:
     return None
 
 
+def _detect_pg_workflow(pg: dict):
+    """Workflow-Variante aus einem process_graph erkennen, oder None.
+
+    Schaut auf charakteristische Knoten- bzw. overlap_resolver-Signaturen.
+    """
+    root = pg.get("process_graph", pg)
+    if not isinstance(root, dict):
+        return None
+    if "applykernel1" in root:
+        return "focal"
+    if "resamplespatial1" in root or "resamplespatial2" in root:
+        return "resample"
+    if "filterbbox1" in root:
+        return "filter_bbox"
+    if "reducedimension1" in root:
+        return "aggregation"
+    if "mask1" in root:
+        return "mask"
+    merge = root.get("merge1")
+    if isinstance(merge, dict):
+        ov = merge.get("arguments", {}).get("overlap_resolver")
+        if isinstance(ov, dict):
+            for node in ov.get("process_graph", {}).values():
+                if not isinstance(node, dict):
+                    continue
+                pid = node.get("process_id")
+                if pid == "subtract":
+                    return "subtract"
+                if pid == "add":
+                    return "merge_add"
+    return None
+
+
+def _detect_folder_workflow(folder: Path):
+    """Workflow eines Run-Ordners ueber den gespeicherten Process Graph
+    bestimmen, oder None. Nur Graphen mit merge1 (oder applykernel1)
+    werden ausgewertet, damit reine S2-/DEM-Download-Szenarien (die in
+    full_pp Runs ebenfalls als JSON liegen) ignoriert werden.
+    """
+    candidates = [
+        folder / "step5_main" / "processgraph.json",
+        folder / "step3_main" / "processgraph.json",
+        folder / "processgraph.json",
+        folder / "scenario_onthefly.json",
+    ]
+    candidates += sorted(folder.glob("*.json"))
+    seen = set()
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        if not cand.exists() or not cand.is_file():
+            continue
+        try:
+            pg = json.loads(cand.read_text())
+        except Exception:
+            continue
+        root = pg.get("process_graph", pg)
+        if not isinstance(root, dict):
+            continue
+        if "merge1" not in root and "applykernel1" not in root:
+            continue
+        wf = _detect_pg_workflow(pg)
+        if wf:
+            return wf
+    return None
+
+
 def _find_latest_run_dir(base: str, suffix: str, region: str,
-                          extent_size: str = None):
+                          extent_size: str = None,
+                          workflow: str = None):
     """Neuesten outputs/run_*_{suffix} fuer Region zurueckgeben, oder None.
 
     Wenn extent_size gesetzt ist, werden nur Ordner beruecksichtigt, deren
     Scenario-JSON exakt diesen Extent enthaelt (Bounding-Box-Vergleich).
+    Wenn workflow gesetzt ist, muss zusaetzlich der im Process Graph
+    erkannte Workflow uebereinstimmen - das verhindert das versehentliche
+    Vergleichen verschiedener Workflow-Varianten der gleichen Region/Extent.
     """
     base_p = Path(base)
     if not base_p.is_dir():
@@ -1436,34 +1550,46 @@ def _find_latest_run_dir(base: str, suffix: str, region: str,
             continue
         if target_extent is not None and not _folder_matches_extent(d, target_extent):
             continue
+        if workflow is not None and _detect_folder_workflow(d) != workflow:
+            continue
         candidates.append(d)
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def _compare_tif_pair(ref_tif: Path, test_tif: Path):
-    """Pro Band MAE/RMSE, dann gemittelt. Returns (mae, rmse, n_bands)."""
+def _compare_tif_pair(ref_tif: Path, test_tif: Path,
+                      resampling_method: str = "nearest"):
+    """Pro Band MAE/RMSE + Coverage, dann gemittelt.
+
+    Returns (mae, rmse, n_bands, valid_pixels, total_pixels). Bei Fehler
+    werden alle Werte None / 0.
+    """
     try:
         from accuracy_calculator import align_rasters, calculate_metrics
         import numpy as np
     except Exception as exc:
         print(f"  Import-Fehler fuer accuracy_calculator: {exc}")
-        return (None, None, 0)
+        return (None, None, 0, 0, 0)
 
     try:
-        ref_data, test_data, _ = align_rasters(str(ref_tif), str(test_tif))
+        ref_data, test_data, _ = align_rasters(
+            str(ref_tif), str(test_tif),
+            resampling_method=resampling_method,
+        )
         results = calculate_metrics(ref_data, test_data)
     except Exception as exc:
         print(f"  Vergleich fehlgeschlagen ({ref_tif.name}): {exc}")
-        return (None, None, 0)
+        return (None, None, 0, 0, 0)
 
     bands = results.get("bands") or []
     if not bands:
-        return (None, None, 0)
+        return (None, None, 0, 0, 0)
     mae = float(np.mean([b["MAE"] for b in bands]))
     rmse = float(np.mean([b["RMSE"] for b in bands]))
-    return (mae, rmse, len(bands))
+    valid_pixels = int(sum(b.get("valid_pixels", 0) for b in bands))
+    total_pixels = int(sum(b.get("total_pixels", 0) for b in bands))
+    return (mae, rmse, len(bands), valid_pixels, total_pixels)
 
 
 def _lookup_run_id_for_dir(step3_dir: Path):
@@ -1515,51 +1641,103 @@ def _persist_accuracy(run_id: int, mae: float, rmse: float,
         print(f"  WARNUNG: Accuracy nicht in DB geschrieben: {exc}")
 
 
-def run_accuracy_check(output_base: str, region: str,
-                       local_pp_run_id=None, extent_size: str = None):
-    """Neuesten onthefly- und local_pp-Run der Region vergleichen.
+# Mapping: test-Strategie -> (suffix in run_*_{suffix}, Unterordner mit den TIFs)
+_ACCURACY_TEST_LAYOUT = {
+    "local_preprocessing": ("local_pp", "step3_main"),
+    "full_preprocessing":  ("full_pp",  "step5_main"),
+}
 
-    Wenn extent_size gesetzt ist, werden nur Runs mit passendem Extent
-    beruecksichtigt (verhindert das Vergleichen unterschiedlich grosser AOIs).
+
+def run_accuracy_check(output_base: str, region: str,
+                       test_strategy: str = None,
+                       test_run_id=None, extent_size: str = None,
+                       workflow: str = None,
+                       resampling_method: str = "nearest"):
+    """Neuesten onthefly-Run (Referenz) vs neuesten {test_strategy}-Run vergleichen.
+
+    test_strategy: "local_preprocessing" oder "full_preprocessing". Wenn None,
+    wird automatisch ermittelt: Bevorzugt wird full_preprocessing, falls
+    sowohl ein passender full_pp- als auch ein local_pp-Run existiert (full_pp
+    erfordert explizites Opt-in vom User).
+
+    Es werden nur Runs verglichen, deren Region, extent_size UND Workflow
+    uebereinstimmen - damit nicht versehentlich ein alter Run einer anderen
+    Konfiguration verglichen wird.
+
+    resampling_method wird an align_rasters durchgereicht und sollte mit
+    --local-resampling uebereinstimmen, damit der Accuracy-Vergleich die
+    gleiche Resampling-Methode nutzt wie die zu vergleichende Pipeline.
 
     Speichert den Median(MAE)/Median(RMSE) ueber alle gemeinsamen Date-TIFs in
-    die accuracy-Tabelle (run_id des local_pp Runs).
+    die accuracy-Tabelle (run_id des Test-Runs).
     """
     print(f"\n{'='*60}")
     extent_info = f"  |  Extent: {extent_size}" if extent_size else ""
-    print(f"  Accuracy-Check  |  Region: {region}{extent_info}")
+    workflow_info = f"  |  Workflow: {workflow}" if workflow else ""
+    print(f"  Accuracy-Check  |  Region: {region}{extent_info}{workflow_info}")
 
-    onthefly_dir = _find_latest_run_dir(output_base, "onthefly", region, extent_size)
-    local_pp_dir = _find_latest_run_dir(output_base, "local_pp", region, extent_size)
+    onthefly_dir = _find_latest_run_dir(output_base, "onthefly", region,
+                                        extent_size=extent_size,
+                                        workflow=workflow)
 
-    if not onthefly_dir or not local_pp_dir:
-        miss = "onthefly" if not onthefly_dir else "local_pp"
-        extent_msg = f" mit extent_size='{extent_size}'" if extent_size else ""
-        print(f"  Skip: kein {miss}-Run fuer Region '{region}'{extent_msg} gefunden.")
+    # test_strategy auto-detecten: bevorzugt full_pp, sonst local_pp.
+    if test_strategy is None:
+        for cand in ("full_preprocessing", "local_preprocessing"):
+            suf, _ = _ACCURACY_TEST_LAYOUT[cand]
+            if _find_latest_run_dir(output_base, suf, region,
+                                    extent_size=extent_size,
+                                    workflow=workflow) is not None:
+                test_strategy = cand
+                break
+
+    if test_strategy not in _ACCURACY_TEST_LAYOUT:
+        print(f"  Skip: keine passende Test-Strategie gefunden "
+              f"(brauche local_preprocessing oder full_preprocessing).")
         return None
 
-    print(f"  Referenz (onthefly): {onthefly_dir.name}")
-    print(f"  Test (local_pp):     {local_pp_dir.name}")
+    test_suffix, test_tif_subdir = _ACCURACY_TEST_LAYOUT[test_strategy]
+    test_dir = _find_latest_run_dir(output_base, test_suffix, region,
+                                    extent_size=extent_size,
+                                    workflow=workflow)
+
+    if not onthefly_dir or not test_dir:
+        miss = "onthefly" if not onthefly_dir else test_strategy
+        extent_msg = f" mit extent_size='{extent_size}'" if extent_size else ""
+        wf_msg = f" und workflow='{workflow}'" if workflow else ""
+        print(f"  Skip: kein {miss}-Run fuer Region '{region}'"
+              f"{extent_msg}{wf_msg} gefunden.")
+        return None
+
+    print(f"  Referenz (onthefly):      {onthefly_dir.name}")
+    print(f"  Test ({test_strategy}): {test_dir.name}")
+    print(f"  Resampling-Methode:       {resampling_method}")
 
     onthefly_tifs = {p.name: p for p in onthefly_dir.glob("*.tif")}
-    local_pp_tifs = {p.name: p for p in (local_pp_dir / "step3_main").glob("*.tif")}
-    common = sorted(set(onthefly_tifs) & set(local_pp_tifs))
+    test_tifs = {p.name: p for p in (test_dir / test_tif_subdir).glob("*.tif")}
+    common = sorted(set(onthefly_tifs) & set(test_tifs))
     if not common:
         print(f"  Skip: keine gemeinsamen TIF-Dateien.")
         print(f"    onthefly TIFs: {sorted(onthefly_tifs)}")
-        print(f"    local_pp TIFs: {sorted(local_pp_tifs)}")
+        print(f"    {test_strategy} TIFs ({test_tif_subdir}): {sorted(test_tifs)}")
         return None
 
     per_mae, per_rmse, n_bands_last = [], [], 0
+    per_valid, per_total = [], []
     for name in common:
-        mae, rmse, n_bands = _compare_tif_pair(onthefly_tifs[name],
-                                               local_pp_tifs[name])
+        mae, rmse, n_bands, valid_px, total_px = _compare_tif_pair(
+            onthefly_tifs[name], test_tifs[name],
+            resampling_method=resampling_method,
+        )
         if mae is None:
             continue
         per_mae.append(mae)
         per_rmse.append(rmse)
+        per_valid.append(valid_px)
+        per_total.append(total_px)
         n_bands_last = n_bands
-        print(f"    {name}: MAE={mae:.6f}, RMSE={rmse:.6f} ({n_bands} Bands)")
+        cov_pct = (100.0 * valid_px / total_px) if total_px else float("nan")
+        print(f"    {name}: MAE={mae:.6f}, RMSE={rmse:.6f}  "
+              f"({n_bands} Bands, {valid_px:,}/{total_px:,} Pixel = {cov_pct:.1f}%)")
 
     if not per_mae:
         print("  Skip: kein valider Pixel-Vergleich moeglich.")
@@ -1567,27 +1745,39 @@ def run_accuracy_check(output_base: str, region: str,
 
     median_mae = statistics.median(per_mae)
     median_rmse = statistics.median(per_rmse)
+    valid_total = sum(per_valid)
+    total_total = sum(per_total)
+    coverage_pct = (100.0 * valid_total / total_total) if total_total else None
 
-    run_id = local_pp_run_id
+    run_id = test_run_id
     if run_id is None:
-        run_id = _lookup_run_id_for_dir(local_pp_dir / "step3_main")
+        run_id = _lookup_run_id_for_dir(test_dir / test_tif_subdir)
     if run_id is not None:
         _persist_accuracy(run_id, median_mae, median_rmse, str(onthefly_dir))
     else:
-        print("  WARNUNG: kein run_id fuer local_pp gefunden, nicht in DB geschrieben.")
+        print(f"  WARNUNG: kein run_id fuer {test_strategy} gefunden, "
+              f"nicht in DB geschrieben.")
 
+    cov_str = f"{coverage_pct:.1f}%" if coverage_pct is not None else "n/a"
     print(f"\n  Accuracy-Check: MAE={median_mae:.6f}, RMSE={median_rmse:.6f} "
-          f"({len(per_mae)} Dates, {n_bands_last} Bands verglichen)")
+          f"({len(per_mae)} Dates, {n_bands_last} Bands, "
+          f"Coverage {valid_total:,}/{total_total:,} = {cov_str}, "
+          f"resampling={resampling_method})")
 
     return {
         "region": region,
+        "test_strategy": test_strategy,
+        "resampling_method": resampling_method,
         "mae": median_mae,
         "rmse": median_rmse,
         "n_dates": len(per_mae),
         "n_bands": n_bands_last,
+        "valid_pixels": valid_total,
+        "total_pixels": total_total,
+        "coverage_percent": coverage_pct,
         "run_id": run_id,
         "onthefly_dir": str(onthefly_dir),
-        "local_pp_dir": str(local_pp_dir),
+        "test_dir": str(test_dir),
     }
 
 
@@ -1646,7 +1836,9 @@ def main() -> None:
                              "aggregation (B04+DEM/add, dann temporal mean), "
                              "focal (B04+DEM/add, dann 3x3 mean apply_kernel), "
                              "resample (DEM CDSE-seitig nach EPSG:3035@30m und "
-                             "zurueck nach Region-UTM@10m, dann B04+DEM/add).")
+                             "zurueck nach Region-UTM@10m, dann B04+DEM/add), "
+                             "filter_bbox (B04+DEM/add, dann filter_bbox auf "
+                             "die mittleren 50% des Extents).")
     parser.add_argument("--local-resampling", default="nearest",
                         choices=tuple(LOCAL_RESAMPLING.keys()),
                         help="Resampling-Methode fuer die lokale DEM-Reprojektion "
@@ -1707,14 +1899,23 @@ def main() -> None:
     print_summary(all_results)
 
     if args.accuracy_check:
-        local_pp_run_id = None
+        test_strategy = None
+        test_run_id = None
         for r in all_results:
-            if (r.get("strategy") in ("local_preprocessing", "local_pp_cached")
-                    and r.get("run_id") is not None
-                    and r.get("status") == "success"):
-                local_pp_run_id = r["run_id"]
-        run_accuracy_check(args.output_dir, args.region, local_pp_run_id,
-                           extent_size=args.extent_size)
+            if r.get("status") != "success" or r.get("run_id") is None:
+                continue
+            if r.get("strategy") in ("local_preprocessing", "local_pp_cached"):
+                test_strategy = "local_preprocessing"
+                test_run_id = r["run_id"]
+            elif r.get("strategy") == "full_preprocessing":
+                test_strategy = "full_preprocessing"
+                test_run_id = r["run_id"]
+        run_accuracy_check(args.output_dir, args.region,
+                           test_strategy=test_strategy,
+                           test_run_id=test_run_id,
+                           extent_size=args.extent_size,
+                           workflow=args.workflow,
+                           resampling_method=args.local_resampling)
 
 
 if __name__ == "__main__":

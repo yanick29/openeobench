@@ -293,7 +293,7 @@ def main():
                         default="none",
                         help="Group strategies by region (derived from scenario name), "
                              "by extent_size (small/medium/large/xlarge/xxlarge), or by "
-                             "workflow (merge_add/subtract/mask/aggregation/focal/resample)")
+                             "workflow (merge_add/subtract/mask/aggregation/focal/resample/filter_bbox)")
     parser.add_argument("--region", default=None,
                         help="Filter to a single region (e.g. berlin, hamburg)")
     parser.add_argument("--extent-size",
@@ -301,6 +301,11 @@ def main():
                         default=None,
                         help="Filter to a single extent size. Runs without recorded "
                              "extent_size are treated as 'medium'.")
+    parser.add_argument("--split-run-type", action="store_true",
+                        help="Zeige zusaetzlich getrennte Tabellen fuer cold "
+                             "und hot Runs (statt sie zu mischen). Wichtig "
+                             "weil cold-Runs (z.B. erster Run mit DEM-Cache-"
+                             "Miss) andere Laufzeiten haben als hot-Runs.")
     args = parser.parse_args()
 
     runs = fetch_runs(args.db)
@@ -350,19 +355,36 @@ def main():
                 metrics[strategy] = m
         return metrics
 
+    def _append_group(results, label, runs_subset):
+        """Append summary for runs_subset; with --split-run-type zusaetzlich
+        getrennte cold/hot Sub-Tabellen."""
+        metrics = _summarize_group(runs_subset)
+        if metrics:
+            results.append((label, metrics))
+        if args.split_run_type:
+            cold_runs = [r for r in runs_subset
+                         if (r.get("run_type") or "").lower() == "cold"]
+            hot_runs = [r for r in runs_subset
+                        if (r.get("run_type") or "").lower() == "hot"]
+            if cold_runs:
+                m_cold = _summarize_group(cold_runs)
+                if m_cold:
+                    results.append((f"{label}  [cold]", m_cold))
+            if hot_runs:
+                m_hot = _summarize_group(hot_runs)
+                if m_hot:
+                    results.append((f"{label}  [hot]", m_hot))
+
     results = []
 
-    overall_metrics = _summarize_group(runs)
-    results.append(("Overall", overall_metrics))
+    _append_group(results, "Overall", runs)
 
     if args.group_by == "region":
         by_region = defaultdict(list)
         for r in runs:
             by_region[r["region"]].append(r)
         for region in sorted(by_region.keys()):
-            metrics = _summarize_group(by_region[region])
-            if metrics:
-                results.append((f"Region: {region}", metrics))
+            _append_group(results, f"Region: {region}", by_region[region])
     elif args.group_by == "extent":
         EXTENT_ORDER = ("small", "medium", "large", "xlarge", "xxlarge")
         by_extent = defaultdict(list)
@@ -370,19 +392,16 @@ def main():
             by_extent[r.get("extent_size") or "medium"].append(r)
         for ext in sorted(by_extent.keys(),
                           key=lambda e: EXTENT_ORDER.index(e) if e in EXTENT_ORDER else 99):
-            metrics = _summarize_group(by_extent[ext])
-            if metrics:
-                results.append((f"Extent: {ext}", metrics))
+            _append_group(results, f"Extent: {ext}", by_extent[ext])
     elif args.group_by == "workflow":
-        WORKFLOW_ORDER = ("merge_add", "subtract", "mask", "aggregation", "focal", "resample")
+        WORKFLOW_ORDER = ("merge_add", "subtract", "mask", "aggregation",
+                          "focal", "resample", "filter_bbox")
         by_wf = defaultdict(list)
         for r in runs:
             by_wf[r.get("workflow") or "merge_add"].append(r)
         for wf in sorted(by_wf.keys(),
                          key=lambda w: WORKFLOW_ORDER.index(w) if w in WORKFLOW_ORDER else 99):
-            metrics = _summarize_group(by_wf[wf])
-            if metrics:
-                results.append((f"Workflow: {wf}", metrics))
+            _append_group(results, f"Workflow: {wf}", by_wf[wf])
 
     for label, metrics in results:
         print_table(label, metrics)

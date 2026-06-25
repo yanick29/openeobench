@@ -40,22 +40,51 @@ def load_raster(filepath):
     return data, profile, bounds, crs, transform
 
 
-def align_rasters(ref_path, test_path):
+RESAMPLING_METHODS = {
+    "nearest":  Resampling.nearest,
+    "bilinear": Resampling.bilinear,
+    "cubic":    Resampling.cubic,
+}
+
+
+def _resolve_resampling(resampling_method):
+    """Akzeptiert einen String oder ein Resampling-Enum und liefert Enum zurueck."""
+    if isinstance(resampling_method, str):
+        if resampling_method not in RESAMPLING_METHODS:
+            raise ValueError(
+                f"Unbekannte resampling_method '{resampling_method}'. "
+                f"Erlaubt: {sorted(RESAMPLING_METHODS)}"
+            )
+        return RESAMPLING_METHODS[resampling_method]
+    return resampling_method
+
+
+def align_rasters(ref_path, test_path, resampling_method="nearest"):
     """
     Align test raster to reference raster grid.
-    Returns aligned numpy arrays for both.
+
+    resampling_method: 'nearest' (Default), 'bilinear' oder 'cubic' — oder ein
+    rasterio Resampling-Enum. Die Methode wird genau dann verwendet, wenn
+    tatsaechlich resamplet werden muss. Wenn beide Raster bereits
+    pixelidentisch sind (gleiche Shape, CRS und Transform), wird ein
+    Early-Exit ausgefuehrt: die Test-Daten werden 1:1 zurueckgegeben, ohne
+    jegliches Resampling. Dadurch entstehen keine Snap-Artefakte, die einen
+    echten Pixel-Unterschied "wegresamplen" koennten.
+
+    Returns aligned numpy arrays for both rasters und das Referenz-Profile.
     """
+    resampling = _resolve_resampling(resampling_method)
+
     with rasterio.open(ref_path) as ref_src:
         ref_data = ref_src.read()
         ref_profile = ref_src.profile
         ref_crs = ref_src.crs
         ref_transform = ref_src.transform
-        ref_width = ref_src.width
-        ref_height = ref_src.height
-        ref_bounds = ref_src.bounds
-    
+
     with rasterio.open(test_path) as test_src:
         test_crs = test_src.crs
+        test_transform = test_src.transform
+        test_shape = (test_src.count, test_src.height, test_src.width)
 
         ref_count = ref_data.shape[0]
         n_bands = min(ref_count, test_src.count)
@@ -64,36 +93,38 @@ def align_rasters(ref_path, test_path):
                   f"(reference={ref_count}, test={test_src.count}). "
                   f"Vergleiche nur die ersten {n_bands} Band(s).")
 
-        # If CRS matches, reproject test to reference grid
-        if test_crs == ref_crs:
-            # Same CRS - just need to align grids
-            test_aligned = np.zeros(ref_data.shape, dtype=np.float64)
-            
-            for band_idx in range(n_bands):
-                reproject(
-                    source=rasterio.band(test_src, band_idx + 1),
-                    destination=test_aligned[band_idx],
-                    src_transform=test_src.transform,
-                    src_crs=test_crs,
-                    dst_transform=ref_transform,
-                    dst_crs=ref_crs,
-                    resampling=Resampling.nearest
+        # Early-Exit: identische Grids -> kein Resampling, exakte Werte.
+        identical_grid = (
+            test_crs == ref_crs
+            and test_shape[1] == ref_data.shape[1]
+            and test_shape[2] == ref_data.shape[2]
+            and test_transform == ref_transform
+        )
+        if identical_grid:
+            test_aligned = test_src.read(
+                indexes=list(range(1, n_bands + 1))
+            ).astype(np.float64)
+            if n_bands < ref_count:
+                pad = np.zeros(
+                    (ref_count - n_bands,) + test_aligned.shape[1:],
+                    dtype=np.float64,
                 )
-        else:
-            # Different CRS - need full reprojection
-            test_aligned = np.zeros(ref_data.shape, dtype=np.float64)
-            
-            for band_idx in range(n_bands):
-                reproject(
-                    source=rasterio.band(test_src, band_idx + 1),
-                    destination=test_aligned[band_idx],
-                    src_transform=test_src.transform,
-                    src_crs=test_crs,
-                    dst_transform=ref_transform,
-                    dst_crs=ref_crs,
-                    resampling=Resampling.nearest
-                )
-    
+                test_aligned = np.concatenate([test_aligned, pad], axis=0)
+            return ref_data, test_aligned, ref_profile
+
+        # Sonst: auf Referenz-Grid reprojizieren mit der gewaehlten Methode.
+        test_aligned = np.zeros(ref_data.shape, dtype=np.float64)
+        for band_idx in range(n_bands):
+            reproject(
+                source=rasterio.band(test_src, band_idx + 1),
+                destination=test_aligned[band_idx],
+                src_transform=test_transform,
+                src_crs=test_crs,
+                dst_transform=ref_transform,
+                dst_crs=ref_crs,
+                resampling=resampling,
+            )
+
     return ref_data, test_aligned, ref_profile
 
 
@@ -298,6 +329,11 @@ def main():
                         help="Ergebnisse in die accuracy-Tabelle der DuckDB schreiben")
     parser.add_argument("--db", default=DEFAULT_DB_PATH,
                         help=f"Pfad zur DuckDB (default: {DEFAULT_DB_PATH})")
+    parser.add_argument("--resampling-method", default="nearest",
+                        choices=tuple(RESAMPLING_METHODS.keys()),
+                        help="Resampling-Methode fuer das Test->Referenz "
+                             "Alignment (nur wenn Grids nicht bereits "
+                             "identisch sind). Default: nearest.")
 
     args = parser.parse_args()
 
@@ -319,7 +355,9 @@ def main():
     print(f"Loading and aligning rasters...")
     
     # Align rasters
-    ref_data, test_data, profile = align_rasters(ref_path, test_path)
+    ref_data, test_data, profile = align_rasters(
+        ref_path, test_path, resampling_method=args.resampling_method,
+    )
     
     print(f"Reference shape: {ref_data.shape}")
     print(f"Test shape:      {test_data.shape}")

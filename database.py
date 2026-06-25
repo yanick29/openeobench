@@ -416,7 +416,7 @@ if __name__ == "__main__":
         print("  --dem-download-time <sekunden>")
         print("  --s2-download-time <sekunden>")
         print("  --extent-size small|medium|large|xlarge|xxlarge")
-        print("  --workflow merge_add|subtract|mask|aggregation|focal|resample")
+        print("  --workflow merge_add|subtract|mask|aggregation|focal|resample|filter_bbox")
         print("  --local-resampling nearest|bilinear|cubic")
         print("  --target-crs EPSG:32633|EPSG:3035|EPSG:4326|...")
         sys.exit(1)
