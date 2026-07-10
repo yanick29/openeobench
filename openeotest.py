@@ -918,15 +918,111 @@ def _validate_downloaded_tifs(output_directory):
                 # weg, wenn der Download abgeschnitten wird. Ein Test nur
                 # auf Band 1 wuerde das uebersehen.
                 src.read()
+            logger.info(
+                f"[verify-read] {os.path.basename(tif_path)} OK "
+                f"({file_size:,} Bytes)"
+            )
         except Exception as exc:
+            # Diagnose: raw TIFF-Header inspizieren um zu klaeren ob die
+            # Datei strukturell truncated ist (dann waere ein Transfer-Bug
+            # naheliegend) oder ob der TIFF-Header ok ist und nur die
+            # Kachel-Daten intern korrupt sind (dann liegt es am Backend).
+            diag = _diagnose_tiff_header(tif_path)
+            logger.error(
+                f"[tiff-diagnose] {os.path.basename(tif_path)}  "
+                f"size={diag['size_bytes']:,} B  "
+                f"first16={diag['first16_hex']}  "
+                f"byte_order={diag['byte_order']}  "
+                f"is_tiff={diag['is_tiff']}  "
+                f"is_bigtiff={diag['is_bigtiff']}  "
+                f"first_ifd_offset={diag['first_ifd_offset']}  "
+                f"first_ifd_within_file={diag['first_ifd_within_file']}  "
+                f"verdict={diag['verdict']}"
+            )
             raise RuntimeError(
                 f"Integritaets-Check fehlgeschlagen fuer "
                 f"{os.path.basename(tif_path)} (Groesse {file_size} Bytes): "
-                f"{type(exc).__name__}: {exc}. Wahrscheinlich unvollstaendiger "
-                f"Download - Datei wird neu geladen."
+                f"{type(exc).__name__}: {exc}. TIFF-Struktur-Verdikt: "
+                f"{diag['verdict']}."
             ) from exc
     logger.info(f"Download-Integritaet OK fuer {len(tif_paths)} TIF(s) "
                 f"in {output_directory}")
+
+
+def _diagnose_tiff_header(path, nbytes=32):
+    """Byte-Level Inspektion des TIFF-Headers ohne rasterio.
+
+    Liefert die Byte-Order (II/MM), die TIFF-Magic (42=Classic, 43=BigTIFF)
+    und den Offset des ersten IFD, plus die Aussage ob der IFD-Offset im
+    tatsaechlich vorhandenen Byte-Bereich liegt. Kombiniert mit der Datei-
+    groesse laesst sich damit unterscheiden:
+      - 'structurally_truncated_ifd_offset_beyond_eof': die Datei wurde
+        vor dem IFD-Ende abgeschnitten -> Transfer/Serverseite hat
+        weniger geliefert als gedacht.
+      - 'tiff_header_ok_body_may_be_corrupt': Header + IFD-Position sind
+        plausibel, die Datei hat die erwartete Struktur, aber die Kachel-
+        Daten selbst sind vom Backend defekt geschrieben.
+    """
+    p = str(path)
+    try:
+        total = os.path.getsize(p)
+    except OSError:
+        total = 0
+    try:
+        with open(p, "rb") as f:
+            head = f.read(nbytes)
+    except OSError:
+        head = b""
+
+    hex_head = " ".join(f"{b:02x}" for b in head[:16])
+    result = {
+        "path": p,
+        "size_bytes": total,
+        "first16_hex": hex_head,
+        "byte_order": None,
+        "is_tiff": False,
+        "is_bigtiff": False,
+        "first_ifd_offset": None,
+        "first_ifd_within_file": None,
+        "verdict": "unknown",
+    }
+    if len(head) < 8:
+        result["verdict"] = "too_short"
+        return result
+
+    order_bytes = head[:2]
+    if order_bytes == b"II":
+        result["byte_order"] = "little_endian"
+        endian = "little"
+    elif order_bytes == b"MM":
+        result["byte_order"] = "big_endian"
+        endian = "big"
+    else:
+        result["verdict"] = "not_a_tiff (byte-order Bytes falsch)"
+        return result
+
+    magic = int.from_bytes(head[2:4], endian)
+    if magic == 42:
+        result["is_tiff"] = True
+        ifd_off = int.from_bytes(head[4:8], endian)
+        result["first_ifd_offset"] = ifd_off
+        result["first_ifd_within_file"] = (ifd_off < total)
+    elif magic == 43:
+        result["is_tiff"] = True
+        result["is_bigtiff"] = True
+        if len(head) >= 16:
+            ifd_off = int.from_bytes(head[8:16], endian)
+            result["first_ifd_offset"] = ifd_off
+            result["first_ifd_within_file"] = (ifd_off < total)
+    else:
+        result["verdict"] = f"not_a_tiff (magic={magic})"
+        return result
+
+    if result["is_tiff"] and result["first_ifd_within_file"] is False:
+        result["verdict"] = "structurally_truncated_ifd_offset_beyond_eof"
+    elif result["is_tiff"]:
+        result["verdict"] = "tiff_header_ok_body_may_be_corrupt"
+    return result
 
 
 def _save_results(results, output_directory, scenario_name, timestamp):

@@ -31,7 +31,7 @@ from pathlib import Path
 import re
 
 import rasterio
-from rasterio.transform import Affine
+from rasterio.transform import Affine, array_bounds
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 
 from database import import_nginx_access_log, import_run
@@ -559,6 +559,22 @@ def _reproject_dem_to_array(input_tif: str, dst_crs: str,
                 resampling=method,
             )
     return data, dst_meta
+
+
+def _grid_from_dst_meta(dst_meta: dict) -> dict:
+    """Grid-Dict (read_s2_grid-Stil) aus dem In-Memory-Ziel-Grid der
+    Reprojektion.
+
+    Fuer STAC-proj-Metadaten OHNE Re-Open des geschriebenen Outputs:
+    Zarr-Stores und NetCDF lassen sich nicht wie ein GeoTIFF mit rasterio
+    oeffnen, das Ziel-Grid ist aber fuer alle Formate identisch, weil alle
+    Writer denselben In-Memory-Puffer aus _reproject_dem_to_array schreiben.
+    """
+    transform = dst_meta["transform"]
+    width, height = dst_meta["width"], dst_meta["height"]
+    left, bottom, right, top = array_bounds(height, width, transform)
+    return {"transform": transform, "width": width, "height": height,
+            "bounds": (left, bottom, right, top), "shape": (height, width)}
 
 
 def reproject_dem_local(input_tif: str, output_tif: str,
@@ -1251,7 +1267,8 @@ def build_s2_stac_collection(collection_id: str,
 def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
                            target_path: Path,
                            extent_size: str = "medium",
-                           workflow: str = "merge_add") -> Path:
+                           workflow: str = "merge_add",
+                           save_format: str = "GTiff") -> Path:
     """
     Process Graph fuer full_preprocessing: ZWEI load_stac Aufrufe
     (loadstac1=S2, loadstac2=DEM) + Workflow-Verknuepfung.
@@ -1261,6 +1278,11 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     - loadcollection2 (DEM) -> loadstac2
     sowie biegen merge1.cube1/cube2 und (workflow=mask) filterbands_b04/_scl
     auf den S2 STAC um.
+
+    save_format: Ausgabeformat des Backend save_result. Default 'GTiff' -
+    wie bisher. Alternative 'netCDF' fuer die Diagnose ob die beobachtete
+    Output-Korruption GTiff-spezifisch beim CDSE-Writer ist (Schritt 4 der
+    Ursachensuche).
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region)
@@ -1309,6 +1331,13 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     if "renamelabels1" in pg:
         pg["renamelabels1"]["arguments"]["source"] = []
 
+    # save_result Format ueberschreiben, wenn abweichend vom Template-Default
+    # (GTiff). Nur die Format-Angabe wird geaendert - options bleiben leer,
+    # damit CDSE ein moeglichst standardkonformes Output-Profil schreibt.
+    if save_format != "GTiff" and "saveresult1" in pg:
+        pg["saveresult1"]["arguments"]["format"] = save_format
+        pg["saveresult1"]["arguments"]["options"] = {}
+
     scenario = {"process_graph": pg}
     with open(target_path, "w") as f:
         json.dump(scenario, f, indent=2)
@@ -1317,7 +1346,8 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
 
 def build_stac_item(region: str, asset_href: str, epsg: int,
                     item_id: str, extent: dict = None,
-                    dem_format: str = "gtiff") -> dict:
+                    dem_format: str = "gtiff",
+                    grid: dict = None) -> dict:
     """STAC Item passend zum reprojizierten DEM-Asset.
 
     `extent` ueberschreibt REGIONS[region]['extent'] (z.B. fuer small/large
@@ -1328,6 +1358,16 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
       zarr   - Verzeichnis-Store, media_type=application/vnd+zarr, href
                endet auf '/' damit klar ist dass es kein Einzelfile ist.
       netcdf - Einzeldatei .nc, media_type=application/x-netcdf.
+
+    grid (read_s2_grid-Stil: transform/width/height/bounds): liefert
+    proj:shape / proj:bbox / proj:transform fuer Item-Properties UND
+    data-Asset. Fuer zarr/netcdf ist das de facto Pflicht: proj:epsg
+    allein reicht CDSE nicht, um einen raeumlichen Extent abzuleiten
+    ("Unable to derive a spatial extent from provided STAC metadata" /
+    "Collected 0 projection metadata entries"). GeoTIFF funktionierte nur,
+    weil das Backend das File selbst oeffnen kann - zarr/netcdf kann es
+    nicht. Die Werte muessen deshalb aus dem In-Memory-Ziel-Grid der
+    Reprojektion kommen (_grid_from_dst_meta), nicht aus dem Output-File.
     """
     ext = extent if extent is not None else REGIONS[region]["extent"]
     w, s, e, n = ext["west"], ext["south"], ext["east"], ext["north"]
@@ -1336,24 +1376,48 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     href = asset_href
     if dem_format == "zarr" and not href.endswith("/"):
         href = href + "/"
+
+    # Ohne Band-Metadaten laedt CDSE den Cube ohne Band-Label
+    # ("bands_from_stac_item: no band name source found"), renamelabels1
+    # hat dann nichts zum Umbenennen und das DEM faellt still aus
+    # merge_cubes raus. eo:bands (STAC 1.0 ueblich) + bands (STAC 1.1)
+    # parallel, damit jeder Reader-Pfad eine Bandnamen-Quelle findet.
+    band_meta = [{"name": "DEM"}]
+    asset = {
+        "href": href,
+        "type": media_type,
+        "roles": ["data"],
+        "proj:epsg": epsg,
+        "eo:bands": band_meta,
+        "bands": band_meta,
+    }
+    properties = {"datetime": "2011-01-06T00:00:00Z", "proj:epsg": epsg}
+    if grid is not None:
+        t = grid["transform"]
+        left, bottom, right, top = grid["bounds"]
+        proj_fields = {
+            "proj:shape": [int(grid["height"]), int(grid["width"])],
+            "proj:bbox": [left, bottom, right, top],
+            "proj:transform": [t.a, t.b, t.c, t.d, t.e, t.f, 0.0, 0.0, 1.0],
+        }
+        asset.update(proj_fields)
+        properties.update(proj_fields)
+
     return {
         "type": "Feature",
         "stac_version": "1.0.0",
+        "stac_extensions": [
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+            "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+        ],
         "id": item_id,
         "geometry": {
             "type": "Polygon",
             "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]],
         },
         "bbox": [w, s, e, n],
-        "properties": {"datetime": "2011-01-06T00:00:00Z"},
-        "assets": {
-            "data": {
-                "href": href,
-                "type": media_type,
-                "roles": ["data"],
-                "proj:epsg": epsg,
-            }
-        },
+        "properties": properties,
+        "assets": {"data": asset},
         "links": [],
     }
 
@@ -1522,35 +1586,64 @@ def scp_upload_dir(local_dir: str, remote_dirname: str) -> float:
     return elapsed
 
 
+_REWRITE_PROFILES = ("simple_striped", "tiled_deflate")
+
+
 def _rewrite_tif_clean(input_tif: str, output_tif: str,
+                       profile: str = "simple_striped",
                        blocksize: int = 256,
                        compress: str = "deflate") -> float:
-    """Schreibt ein GeoTIFF neu mit einem robusten, einfachen GTiff-Profil.
+    """Schreibt ein GeoTIFF neu mit einem einfachen, breit dekodierbaren Profil.
 
-    Hintergrund: CDSE liefert S2 als COG mit getilten/komprimierten Bloecken.
-    Beim Roundtrip (Download -> scp -> nginx -> load_stac) bricht das Tile-
-    Profil regelmaessig - rasterio meldet dann "TIFFReadEncodedTile() failed,
-    IReadBlock failed" auf der Empfaengerseite. Wir re-encoden hier mit
-    einem konservativen Profil: driver=GTiff, tiled, 256x256 Bloecke,
-    deflate.
+    NEUE ERKENNTNIS (Runde 2, gesichert): Der Streaming-Download liefert die
+    CDSE-Ergebnisse Byte-fuer-Byte korrekt aus, aber die Ergebnisse bei
+    full_preprocessing sind trotzdem defekt (TIFFReadEncodedTile failed,
+    MAE ~12000). Die Ursache liegt nicht im Transfer, sondern in der Art,
+    wie CDSE die hochgeladenen S2-Eingaben ueber load_stac interpretiert
+    oder das Ergebnis schreibt. local_preprocessing liefert korrekte
+    Ergebnisse und laed sein DEM als striped, unkomprimiertes GeoTIFF hoch.
+
+    Neuer Default profile='simple_striped': gestreiftes, unkomprimiertes
+    GeoTIFF - identisch zu dem, was local_preprocessing fuer das DEM
+    verwendet und was CDSE nachweislich sauber liest.
+
+    Alter Default (bis zum Bugfix): profile='tiled_deflate' - tiled 256x256
+    mit deflate. War die Reaktion auf einen davor vermuteten Transfer-Bug,
+    ist aber der wahrscheinlichere Ausloeser der beobachteten CDSE-Output-
+    Korruption bei full_pp und deshalb NICHT mehr der Default.
 
     CRS, Transform, Dtype, Nodata und Band-Beschreibungen werden 1:1
     uebernommen, sodass STAC-Geometrie und Pixel-Werte unveraendert bleiben.
-    Idempotent - mehrfaches Rewriting aendert das Profil weiter nicht.
+    Idempotent.
     """
+    if profile not in _REWRITE_PROFILES:
+        raise ValueError(
+            f"Unbekanntes _rewrite_tif_clean profile: {profile!r}. "
+            f"Erlaubt: {_REWRITE_PROFILES}"
+        )
     t0 = time.time()
     with rasterio.open(input_tif) as src:
-        profile = src.profile.copy()
-        profile.update({
-            "driver":     "GTiff",
-            "tiled":      True,
-            "blockxsize": blocksize,
-            "blockysize": blocksize,
-            "compress":   compress,
-            "interleave": "band",
-            "BIGTIFF":    "IF_SAFER",
-        })
-        with rasterio.open(output_tif, "w", **profile) as dst:
+        prof = src.profile.copy()
+        prof["driver"] = "GTiff"
+        prof["BIGTIFF"] = "IF_SAFER"
+        prof["interleave"] = "band"
+        if profile == "simple_striped":
+            # Explizit tiled=False + kein compress. Vom Input geerbte Werte
+            # (falls das Source-TIF selbst tiled war) muessen unbedingt
+            # entfernt werden, sonst greift rasterio auf die Source-Bloecke
+            # zurueck.
+            prof["tiled"] = False
+            prof.pop("blockxsize", None)
+            prof.pop("blockysize", None)
+            prof.pop("compress", None)
+        else:  # tiled_deflate (Fallback fuer den alten Pfad)
+            prof.update({
+                "tiled":      True,
+                "blockxsize": blocksize,
+                "blockysize": blocksize,
+                "compress":   compress,
+            })
+        with rasterio.open(output_tif, "w", **prof) as dst:
             for i in range(1, src.count + 1):
                 dst.write(src.read(i), i)
             if src.descriptions and any(src.descriptions):
@@ -1558,6 +1651,117 @@ def _rewrite_tif_clean(input_tif: str, output_tif: str,
             if src.nodata is not None:
                 dst.nodata = src.nodata
     return time.time() - t0
+
+
+def _verify_tif_readable(path: str, label: str = "") -> dict:
+    """Oeffnet die Datei mit rasterio, liest ALLE Baender vollstaendig.
+    Wirft RuntimeError bei kaputten Kacheln / abgeschnittener Datei.
+
+    Gibt Statistiken zurueck: shape, count, dtype, size_bytes, block_size,
+    compression, tiled - damit im Log dokumentiert ist, was tatsaechlich
+    hochgeladen wird.
+    """
+    p = Path(path)
+    size = p.stat().st_size if p.exists() else 0
+    prefix = f"[verify-read{f' {label}' if label else ''}]"
+    try:
+        with rasterio.open(str(p)) as src:
+            prof = src.profile
+            # Alle Baender komplett dekodieren -> zwingt jeden Block-Read
+            arr = src.read()
+            info = {
+                "path": str(p),
+                "size_bytes": size,
+                "shape": list(arr.shape),
+                "count": src.count,
+                "dtype": str(arr.dtype),
+                "tiled": bool(prof.get("tiled", False)),
+                "blockxsize": prof.get("blockxsize"),
+                "blockysize": prof.get("blockysize"),
+                "compress": prof.get("compress"),
+                "interleave": prof.get("interleave"),
+            }
+    except Exception as exc:
+        raise RuntimeError(
+            f"{prefix} rasterio konnte {p.name} nicht vollstaendig lesen "
+            f"({size:,} Bytes): {type(exc).__name__}: {exc}"
+        ) from exc
+    print(f"  {prefix} {p.name} OK  ({size:,} Bytes, "
+          f"{info['count']}b {info['dtype']}, "
+          f"tiled={info['tiled']}"
+          + (f" {info['blockxsize']}x{info['blockysize']}" if info["tiled"] else "")
+          + f", compress={info['compress'] or 'none'})")
+    return info
+
+
+def _inspect_tif_header_bytes(path: str, nbytes: int = 32) -> dict:
+    """Direktes Byte-Level Inspection eines TIFF-Kopfs OHNE rasterio.
+
+    Wird nach einem gescheiterten rasterio-Read aufgerufen um zu klaeren:
+      - Ist die Datei ueberhaupt ein TIFF (magic bytes)?
+      - Byte-Order (II little-endian oder MM big-endian, BigTIFF)?
+      - Wo sitzt das erste IFD, und liegt der Offset im tatsaechlich
+        vorhandenen Byte-Bereich (== Datei ist strukturell vollstaendig)?
+
+    Damit wird belegbar, ob die Datei serverseitig defekt ANKAM (strukturell
+    truncated: IFD zeigt hinter das Datei-Ende) oder ob sie strukturell in
+    Ordnung, aber die Kachel-Daten selbst korrupt sind.
+    """
+    p = Path(path)
+    total = p.stat().st_size if p.exists() else 0
+    with open(p, "rb") as f:
+        head = f.read(nbytes)
+
+    hex_head = " ".join(f"{b:02x}" for b in head[:16])
+    result = {
+        "path": str(p),
+        "size_bytes": total,
+        "first16_hex": hex_head,
+        "byte_order": None,
+        "is_tiff": False,
+        "is_bigtiff": False,
+        "first_ifd_offset": None,
+        "first_ifd_within_file": None,
+        "verdict": "unknown",
+    }
+    if len(head) < 8:
+        result["verdict"] = "too_short"
+        return result
+
+    byte_order = head[:2]
+    if byte_order == b"II":
+        result["byte_order"] = "little_endian"
+        endian = "little"
+    elif byte_order == b"MM":
+        result["byte_order"] = "big_endian"
+        endian = "big"
+    else:
+        result["verdict"] = "not_a_tiff (byte-order bytes falsch)"
+        return result
+
+    magic = int.from_bytes(head[2:4], endian)
+    if magic == 42:
+        result["is_tiff"] = True
+        ifd_off = int.from_bytes(head[4:8], endian)
+        result["first_ifd_offset"] = ifd_off
+        result["first_ifd_within_file"] = (ifd_off < total)
+    elif magic == 43:
+        # BigTIFF: 2-byte offset size + 2-byte reserved + 8-byte IFD offset
+        result["is_tiff"] = True
+        result["is_bigtiff"] = True
+        if len(head) >= 16:
+            ifd_off = int.from_bytes(head[8:16], endian)
+            result["first_ifd_offset"] = ifd_off
+            result["first_ifd_within_file"] = (ifd_off < total)
+    else:
+        result["verdict"] = f"not_a_tiff (magic={magic})"
+        return result
+
+    if result["is_tiff"] and result["first_ifd_within_file"] is False:
+        result["verdict"] = "structurally_truncated_ifd_offset_beyond_eof"
+    elif result["is_tiff"]:
+        result["verdict"] = "tiff_header_ok_body_may_be_corrupt"
+    return result
 
 
 def _remote_file_size(host: str, remote_path: str,
@@ -1809,7 +2013,14 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             item_id=f"dem_reprojected_{region}_{run_ts}",
             extent=_compute_extent(region, args.extent_size),
             dem_format=dem_format,
+            grid=_grid_from_dst_meta(dst_meta),
         )
+        _stac_asset = stac_item["assets"]["data"]
+        print(f"  STAC data-Asset: proj:epsg={_stac_asset['proj:epsg']}  "
+              f"proj:shape={_stac_asset.get('proj:shape')}  "
+              f"proj:bbox={_stac_asset.get('proj:bbox')}")
+        print(f"                   proj:transform={_stac_asset.get('proj:transform')}  "
+              f"eo:bands={_stac_asset.get('eo:bands')}")
         local_stac_path = str(base / remote_stac_name)
         with open(local_stac_path, "w") as f:
             json.dump(stac_item, f, indent=2)
@@ -2016,27 +2227,33 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             s2_for_upload = new_tifs
             print(f"  S2 Reprojektion fertig  ({t_s2_reproject:.2f} s)")
 
-        # Schritt 3c: ALLE TIFs mit robustem Tile-Profil neu schreiben (S2 + DEM).
-        # Verhindert "TIFFReadEncodedTile() failed, IReadBlock failed" beim
-        # Roundtrip durch Hetzner+CDSE. Gilt fuer beide S2-Pfade (original vs
-        # reprojiziert) und auch fuer das DEM, damit das Upload-Profil
-        # konsistent ist.
+        # Schritt 3c: ALLE TIFs mit einfachem, breit dekodierbarem Profil
+        # neu schreiben (S2 + DEM). NEUER Default 'simple_striped' (identisch
+        # zu dem was local_pp fuer das DEM benutzt und was CDSE nachweislich
+        # sauber verarbeitet). Sofort danach lokal per rasterio komplett
+        # dekodieren - so ist belegbar, dass die hochgeladenen Dateien SELBST
+        # lesbar sind und CDSE keine korrupte Eingabe bekommt.
+        upload_profile = getattr(args, "fullpp_upload_profile", "simple_striped")
         clean_dir = base / "step3c_clean"
         clean_dir.mkdir(exist_ok=True)
-        print(f"\n  [Schritt 3c/7] S2 + DEM mit robustem GTiff-Profil neu "
-              f"schreiben (tiled 256x256, deflate)...")
+        print(f"\n  [Schritt 3c/7] S2 + DEM neu schreiben "
+              f"(profile={upload_profile}) und LOKAL auf Lesbarkeit "
+              f"pruefen...")
         t_clean_start = time.time()
         clean_s2 = []
         for stif in s2_for_upload:
             out = clean_dir / stif.name
-            _rewrite_tif_clean(str(stif), str(out))
+            _rewrite_tif_clean(str(stif), str(out), profile=upload_profile)
+            _verify_tif_readable(str(out), label=f"S2 {stif.name}")
             clean_s2.append(out)
         s2_for_upload = clean_s2
         clean_dem_tif = str(clean_dir / "dem.tif")
-        _rewrite_tif_clean(dem_repro_tif, clean_dem_tif)
+        _rewrite_tif_clean(dem_repro_tif, clean_dem_tif, profile=upload_profile)
+        _verify_tif_readable(clean_dem_tif, label="DEM")
         dem_for_upload = clean_dem_tif
         t_clean = time.time() - t_clean_start
-        print(f"  {len(clean_s2)} S2 + 1 DEM clean rewritten  ({t_clean:.2f} s)")
+        print(f"  {len(clean_s2)} S2 + 1 DEM neu geschrieben + lokal "
+              f"vollstaendig dekodiert  ({t_clean:.2f} s)")
 
         # Schritt 4: Alle TIFs auf Hetzner hochladen (mit Groessen-Verifikation).
         print(f"\n  [Schritt 4/7] {len(s2_for_upload)} S2 + 1 DEM TIF auf Hetzner hochladen (verified)...")
@@ -2093,9 +2310,12 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         dem_stac_remote_name = f"full_pp_dem_stac_{region}_{run_ts}.json"
         dem_stac_url = f"{HETZNER_URL_BASE}{dem_stac_remote_name}"
         dem_asset_url = f"{HETZNER_URL_BASE}{dem_remote_tif_name}"
+        # Grid aus dem reprojizierten DEM-GeoTIFF lesen (full_pp ist immer
+        # gtiff; das Clean-Rewrite aendert nur das Layout, nie das Grid).
         dem_item = build_stac_item(
             region=region, asset_href=dem_asset_url, epsg=dem_epsg,
             item_id=f"full_pp_dem_{region}_{run_ts}", extent=geo_extent,
+            grid=read_s2_grid(dem_repro_tif),
         )
         local_dem_stac = str(base / dem_stac_remote_name)
         with open(local_dem_stac, "w") as f:
@@ -2121,10 +2341,15 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
 
         # Schritt 6: full_pp Szenario bauen + ausfuehren
         print(f"\n  [Schritt 6/7] full_pp Szenario (2x load_stac) auf CDSE ausfuehren...")
+        fullpp_save_format = getattr(args, "fullpp_save_format", "GTiff")
+        if fullpp_save_format != "GTiff":
+            print(f"\n  [Diagnose] full_pp save_result Format ueberschrieben "
+                  f"auf {fullpp_save_format} (Schritt 4 der Ursachensuche).")
         scenario_path = build_full_pp_scenario(
             region, collection_url, dem_stac_url,
             base / f"full_preprocessing_{region}.json",
             extent_size=args.extent_size, workflow=args.workflow,
+            save_format=fullpp_save_format,
         )
         results_main = run_openeo(args.api_url, str(scenario_path), str(main_dir),
                                   job_timeout=args.job_timeout)
@@ -3468,6 +3693,24 @@ def main() -> None:
                              "(trailing slash). Default: ENV "
                              "BENCHMARK_URL_BASE oder "
                              "http://46.224.62.97/benchmark-data/.")
+    parser.add_argument("--fullpp-upload-profile", default="simple_striped",
+                        choices=_REWRITE_PROFILES,
+                        help="Schreibprofil fuer die S2- und DEM-Uploads bei "
+                             "full_preprocessing. simple_striped (Default, "
+                             "NEUER Bugfix): gestreiftes, unkomprimiertes "
+                             "GeoTIFF - identisch zu dem was local_pp fuer "
+                             "das DEM benutzt und was CDSE nachweislich sauber "
+                             "liest. tiled_deflate (alter Default): tiled "
+                             "256x256 mit deflate, wahrscheinlichere Ursache "
+                             "der beobachteten CDSE-Output-Korruption bei "
+                             "full_pp. Nur zur Regressions-Diagnose.")
+    parser.add_argument("--fullpp-save-format", default="GTiff",
+                        choices=("GTiff", "netCDF"),
+                        help="save_result Format des CDSE-Jobs bei "
+                             "full_preprocessing. Default GTiff. netCDF ist "
+                             "als Diagnose-Alternative gedacht, um zu pruefen "
+                             "ob die beobachtete Output-Korruption GTiff-"
+                             "spezifisch beim CDSE-Writer ist.")
     parser.add_argument("--include-full-pp", default="auto",
                         choices=("auto", "yes", "no"),
                         help="Steuert ob full_preprocessing bei "
