@@ -92,6 +92,7 @@ def create_database():
         accuracy_id INTEGER PRIMARY KEY,
         run_id INTEGER,
         reference_file TEXT,
+        reference_run_id INTEGER,
         rmse DOUBLE,
         max_diff DOUBLE,
         mean_diff DOUBLE,
@@ -116,6 +117,8 @@ def create_database():
     for col in ("mae", "correlation"):
         if col not in existing_cols:
             c.execute(f"ALTER TABLE accuracy ADD COLUMN {col} DOUBLE")
+    if "reference_run_id" not in existing_cols:
+        c.execute("ALTER TABLE accuracy ADD COLUMN reference_run_id INTEGER")
 
     existing_run_cols = {r[1] for r in c.execute("PRAGMA table_info('runs')").fetchall()}
     if "dem_download_time" not in existing_run_cols:

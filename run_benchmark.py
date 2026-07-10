@@ -20,6 +20,7 @@ import glob
 import json
 import math
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -2526,27 +2527,293 @@ def _lookup_run_id_for_dir(step3_dir: Path):
         return None
 
 
+def _ensure_accuracy_reference_column(conn) -> None:
+    """Idempotente Migration fuer reference_run_id in aelteren DBs.
+
+    Wird vor jedem INSERT in accuracy aufgerufen damit die Insert-Liste
+    stabil bleibt selbst wenn create_database() nicht lief.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info('accuracy')").fetchall()}
+    if "reference_run_id" not in cols:
+        conn.execute("ALTER TABLE accuracy ADD COLUMN reference_run_id INTEGER")
+
+
 def _persist_accuracy(run_id: int, mae: float, rmse: float,
-                      reference_file: str) -> None:
-    """MAE/RMSE in die accuracy-Tabelle schreiben."""
+                      reference_file: str,
+                      reference_run_id: int = None) -> None:
+    """MAE/RMSE in die accuracy-Tabelle schreiben.
+
+    reference_run_id: run_id des Ground-Truth-Runs (onthefly oder
+    local_reference). Wird fuer die Cleanup-Abhaengigkeitsanalyse gebraucht:
+    solange ein CDSE-Run seinen accuracy-Eintrag noch nicht hat, darf die
+    zugehoerige Referenz nicht geloescht werden.
+    """
     try:
         import duckdb
         from database import DB_PATH
         conn = duckdb.connect(DB_PATH)
+        _ensure_accuracy_reference_column(conn)
         next_id = conn.execute(
             "SELECT COALESCE(MAX(accuracy_id), 0) + 1 FROM accuracy"
         ).fetchone()[0]
         conn.execute(
             '''INSERT INTO accuracy
-               (accuracy_id, run_id, reference_file, rmse, mae)
-               VALUES (?, ?, ?, ?, ?)''',
-            (next_id, run_id, reference_file, rmse, mae),
+               (accuracy_id, run_id, reference_file, reference_run_id, rmse, mae)
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            (next_id, run_id, reference_file, reference_run_id, rmse, mae),
         )
         conn.commit()
         conn.close()
-        print(f"  Accuracy gespeichert (accuracy_id={next_id}, run_id={run_id})")
+        ref_str = f", reference_run_id={reference_run_id}" if reference_run_id else ""
+        print(f"  Accuracy gespeichert (accuracy_id={next_id}, run_id={run_id}{ref_str})")
     except Exception as exc:
         print(f"  WARNUNG: Accuracy nicht in DB geschrieben: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Plattenplatz-Schutz + Cleanup (verhindert das 100%-Fuell-Fiasko)
+# ---------------------------------------------------------------------------
+
+def _free_gb(path) -> float:
+    """Freier Platz in GB im Filesystem von path. path wird auf existierende
+    Elternebene reduziert falls es selbst noch nicht existiert."""
+    p = Path(path)
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    if not p.exists():
+        p = Path(".").resolve()
+    usage = shutil.disk_usage(str(p))
+    return usage.free / (1024 ** 3)
+
+
+def check_disk_space(output_dir: str, min_free_gb: float,
+                     context: str = "") -> None:
+    """Bricht mit RuntimeError ab wenn der freie Platz unter min_free_gb faellt.
+
+    context: kurzes Label fuer die Fehlermeldung, z.B. "Strategie=local_pp,
+    Run 1/3". Wird bei jedem einzelnen Run vor dem Start aufgerufen, damit
+    ein anlaufender Batch nicht spaeter mitten drin die Platte volllaeuft.
+    """
+    if min_free_gb is None or min_free_gb <= 0:
+        return
+    free = _free_gb(output_dir)
+    print(f"  [disk-check] Freier Platz: {free:.1f} GB "
+          f"(Schwelle {min_free_gb:.1f} GB)  {context}")
+    if free < min_free_gb:
+        raise RuntimeError(
+            f"Zu wenig freier Speicher fuer '{output_dir}': {free:.1f} GB "
+            f"frei, aber --min-free-gb={min_free_gb:.1f}. "
+            f"Run abgebrochen bevor er startet ({context})."
+        )
+
+
+def _run_has_accuracy(run_id: int) -> bool:
+    """True wenn fuer run_id mindestens eine accuracy-Zeile existiert.
+
+    _persist_accuracy schreibt nur bei erfolgreichem Vergleich - jede Zeile
+    ist damit gleichbedeutend mit 'Accuracy erfolgreich gemessen'.
+    """
+    if run_id is None:
+        return False
+    try:
+        import duckdb
+        from database import DB_PATH
+        conn = duckdb.connect(DB_PATH, read_only=True)
+        row = conn.execute(
+            "SELECT 1 FROM accuracy WHERE run_id = ? LIMIT 1", (run_id,)
+        ).fetchone()
+        conn.close()
+        return row is not None
+    except Exception as exc:
+        print(f"  WARNUNG: accuracy-Lookup fuer run_id={run_id} fehlgeschlagen: {exc}")
+        return False
+
+
+def _accuracy_test_run_ids_for_reference(reference_run_id: int) -> set:
+    """Alle test-run_ids die diese Referenz erfolgreich verwendet haben.
+
+    Fuer die Entscheidung ob eine local_reference geloescht werden darf:
+    solange ein erwarteter Abhaengiger noch nicht in dieser Menge steht,
+    bleibt die Referenz erhalten.
+    """
+    if reference_run_id is None:
+        return set()
+    try:
+        import duckdb
+        from database import DB_PATH
+        conn = duckdb.connect(DB_PATH, read_only=True)
+        rows = conn.execute(
+            "SELECT DISTINCT run_id FROM accuracy WHERE reference_run_id = ?",
+            (reference_run_id,),
+        ).fetchall()
+        conn.close()
+        return {r[0] for r in rows if r[0] is not None}
+    except Exception as exc:
+        print(f"  WARNUNG: accuracy-Deps-Lookup fuer reference_run_id="
+              f"{reference_run_id} fehlgeschlagen: {exc}")
+        return set()
+
+
+def _list_run_tifs(run_dir: Path) -> list:
+    """Alle *.tif rekursiv unter run_dir. Case-insensitive.
+
+    Werden ausschliesslich die grossen Raster geloescht - results.json,
+    scenario_*.json, STAC Items und sonstige Metadaten bleiben unberuehrt.
+    """
+    run_dir = Path(run_dir)
+    if not run_dir.is_dir():
+        return []
+    tifs = []
+    for pat in ("*.tif", "*.TIF", "*.tiff", "*.TIFF"):
+        tifs.extend(run_dir.rglob(pat))
+    # dedupe (case-insensitive glob ueberlappt auf case-insensitive FS)
+    return sorted({p.resolve() for p in tifs if p.is_file()})
+
+
+def delete_run_tifs(run_dir: Path, run_id, output_dir: str = "outputs",
+                    dry_run: bool = False, label: str = "") -> dict:
+    """Loescht alle *.tif eines Run-Ordners. Loggt run_id, Ordner, Anzahl,
+    freien Platz danach. Gibt Statistik-Dict zurueck.
+
+    dry_run: nichts wirklich loeschen, nur berichten was WUERDE geloescht.
+    """
+    run_dir = Path(run_dir)
+    tifs = _list_run_tifs(run_dir)
+    total_bytes = sum(p.stat().st_size for p in tifs if p.exists())
+    label_str = f" [{label}]" if label else ""
+    print(f"\n  [cleanup{label_str}] run_id={run_id}  dir={run_dir}")
+    print(f"    Kandidaten: {len(tifs)} TIF-Dateien, "
+          f"{total_bytes / (1024**2):.1f} MB gesamt")
+
+    deleted = 0
+    freed = 0
+    for p in tifs:
+        try:
+            sz = p.stat().st_size
+        except OSError:
+            continue
+        if dry_run:
+            print(f"    [dry-run] wuerde loeschen: {p}  ({sz / 1024:.1f} KB)")
+            continue
+        try:
+            p.unlink()
+            deleted += 1
+            freed += sz
+        except OSError as exc:
+            print(f"    FEHLER beim Loeschen von {p}: {exc}")
+
+    if dry_run:
+        print(f"    [dry-run] Summe: {len(tifs)} Dateien, "
+              f"{total_bytes / (1024**2):.1f} MB wuerden freigegeben")
+    else:
+        free_gb_after = _free_gb(output_dir)
+        print(f"    Geloescht: {deleted}/{len(tifs)} Dateien, "
+              f"{freed / (1024**2):.1f} MB freigegeben. "
+              f"Freier Platz jetzt: {free_gb_after:.1f} GB")
+
+    return {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "candidates": len(tifs),
+        "deleted": deleted,
+        "freed_bytes": freed if not dry_run else 0,
+        "dry_run": dry_run,
+    }
+
+
+# Strategien die eine Referenz verwenden (also von Accuracy abhaengen).
+_CDSE_TEST_STRATEGIES = ("onthefly", "local_preprocessing",
+                         "local_pp_cached", "full_preprocessing")
+
+
+def cleanup_after_accuracy(session_results: list, output_dir: str,
+                           dry_run: bool = False) -> None:
+    """Orchestriert das Aufraeumen NACH allen Accuracy-Checks.
+
+    Zwingende Reihenfolge:
+      1. CDSE-Strategie-Runs (onthefly / local_pp / full_pp) werden geloescht
+         wenn ihr eigener Accuracy-Eintrag in der DB steht.
+      2. local_reference wird ERST geloescht wenn jeder erwartete
+         Abhaengige (gleiche Region + Extent + Workflow, aus dieser Session)
+         seinen Accuracy-Eintrag mit reference_run_id=local_reference.run_id
+         hat.
+
+    Damit ist ausgeschlossen, dass die Referenz vor den auf sie
+    verweisenden CDSE-Runs verschwindet.
+    """
+    if not session_results:
+        return
+
+    mode = "DRY-RUN" if dry_run else "LIVE"
+    print(f"\n{'='*60}")
+    print(f"  Cleanup nach Accuracy-Check  [{mode}]")
+
+    # Referenzen und CDSE-Runs in dieser Session identifizieren.
+    ref_runs = []       # local_reference-Runs
+    test_runs = []      # CDSE-Runs
+    for r in session_results:
+        if r.get("run_id") is None or r.get("status") != "success":
+            continue
+        s = r.get("strategy")
+        if s == "local_reference":
+            ref_runs.append(r)
+        elif s in _CDSE_TEST_STRATEGIES:
+            test_runs.append(r)
+
+    print(f"  Session: {len(test_runs)} CDSE-Runs, {len(ref_runs)} local_reference-Runs")
+
+    # 1) CDSE-Runs
+    for r in test_runs:
+        run_id = r["run_id"]
+        run_dir = Path(r["outdir"])
+        if not _run_has_accuracy(run_id):
+            print(f"\n  [skip] run_id={run_id} strategy={r.get('strategy')} - "
+                  f"kein Accuracy-Eintrag in DB. TIFs bleiben erhalten.")
+            continue
+        delete_run_tifs(run_dir, run_id, output_dir=output_dir,
+                        dry_run=dry_run, label=r.get("strategy"))
+
+    # 2) local_reference-Runs mit Abhaengigkeits-Pruefung
+    for r in ref_runs:
+        ref_id = r["run_id"]
+        run_dir = Path(r["outdir"])
+        region = r.get("region")
+        extent_size = r.get("extent_size")
+        workflow = r.get("workflow")
+
+        # Erwartete Abhaengige aus dieser Session: alle CDSE-Runs mit
+        # gleicher Region + Extent + Workflow.
+        expected_deps = {
+            t["run_id"] for t in test_runs
+            if t.get("region") == region
+            and t.get("extent_size") == extent_size
+            and t.get("workflow") == workflow
+        }
+        actual_deps = _accuracy_test_run_ids_for_reference(ref_id)
+        missing = expected_deps - actual_deps
+
+        if missing:
+            print(f"\n  [skip] local_reference run_id={ref_id} - "
+                  f"noch {len(missing)} abhaengige Run(s) ohne "
+                  f"Accuracy-Eintrag (run_ids={sorted(missing)}). "
+                  f"Referenz bleibt vollstaendig erhalten.")
+            continue
+        if not expected_deps:
+            print(f"\n  [skip] local_reference run_id={ref_id} - "
+                  f"in dieser Session keine passenden CDSE-Runs "
+                  f"(Region={region}, Extent={extent_size}, "
+                  f"Workflow={workflow}). Referenz bleibt erhalten "
+                  f"(koennte spaeter noch gebraucht werden).")
+            continue
+
+        print(f"\n  [ok] local_reference run_id={ref_id}: alle "
+              f"{len(expected_deps)} Abhaengigen (run_ids="
+              f"{sorted(expected_deps)}) haben Accuracy-Eintrag "
+              f"-> Referenz kann aufgeraeumt werden.")
+        delete_run_tifs(run_dir, ref_id, output_dir=output_dir,
+                        dry_run=dry_run, label="local_reference")
+
+    print(f"\n  Cleanup abgeschlossen  [{mode}]")
 
 
 # Mapping: Strategie -> (suffix in run_*_{suffix}, Unterordner mit den TIFs).
@@ -2718,8 +2985,16 @@ def run_accuracy_check(output_base: str, region: str,
     run_id = test_run_id
     if run_id is None:
         run_id = _lookup_run_id_for_dir(test_tif_dir)
+
+    # reference_run_id: fuer die Cleanup-Abhaengigkeitsanalyse. results.json
+    # der Referenz liegt sowohl bei onthefly als auch bei local_reference im
+    # Run-Root - _lookup_run_id_for_dir liest exakt das.
+    reference_run_id = _lookup_run_id_for_dir(reference_dir)
+
     if run_id is not None:
-        _persist_accuracy(run_id, median_mae, median_rmse, str(reference_dir))
+        _persist_accuracy(run_id, median_mae, median_rmse,
+                          str(reference_dir),
+                          reference_run_id=reference_run_id)
     else:
         print(f"  WARNUNG: kein run_id fuer {test_strategy} gefunden, "
               f"nicht in DB geschrieben.")
@@ -2743,6 +3018,7 @@ def run_accuracy_check(output_base: str, region: str,
         "total_pixels": total_total,
         "coverage_percent": coverage_pct,
         "run_id": run_id,
+        "reference_run_id": reference_run_id,
         "reference_dir": str(reference_dir),
         "test_dir": str(test_dir),
     }
@@ -2875,6 +3151,27 @@ def main() -> None:
                              "bei {xlarge,xxlarge} (zu viele Range-Requests "
                              "-> Timeouts). yes: immer einbeziehen. "
                              "no: nie einbeziehen.")
+    parser.add_argument("--min-free-gb", type=float, default=20.0,
+                        help="Minimaler freier Plattenplatz (in GB) im "
+                             "--output-dir, unterhalb dessen ein Run gar nicht "
+                             "erst startet. Default 20 GB. 0 deaktiviert die "
+                             "Pruefung. Faengt das '100%-Fuell-Fiasko' ab.")
+    parser.add_argument("--cleanup-after-accuracy", action="store_true",
+                        help="Nach jedem erfolgreich verbuchten Accuracy-Check "
+                             "die TIF-Ausgaben des Runs loeschen. "
+                             "results.json, Prozessgraphen und Metadaten "
+                             "bleiben erhalten. Reihenfolge ist zwingend: "
+                             "erst Run, dann Accuracy-Eintrag, dann Loeschen. "
+                             "local_reference wird erst geloescht wenn alle "
+                             "abhaengigen CDSE-Runs (gleiche Region/Extent/"
+                             "Workflow) einen Accuracy-Eintrag haben. "
+                             "Default: aus (bisheriges Verhalten).")
+    parser.add_argument("--dry-run-cleanup", action="store_true",
+                        help="Zeigt beim Aufraeumen nur an was geloescht "
+                             "WUERDE, ohne wirklich zu loeschen. Impliziert "
+                             "--cleanup-after-accuracy nicht - beides muss "
+                             "explizit gesetzt sein. Nuetzlich um vor dem "
+                             "ersten Live-Lauf die Loeschliste zu pruefen.")
 
     args = parser.parse_args()
 
@@ -2928,7 +3225,35 @@ def main() -> None:
 
     for strategy in strategies:
         for i in range(args.repeat):
+            ctx = (f"Strategie={strategy}, Run {i+1}/{args.repeat}, "
+                   f"Region={args.region}, Extent={args.extent_size}, "
+                   f"Workflow={args.workflow}")
+            try:
+                check_disk_space(args.output_dir, args.min_free_gb, context=ctx)
+            except RuntimeError as exc:
+                print(f"\n  FEHLER: {exc}")
+                all_results.append({
+                    "strategy": strategy,
+                    "repeat": i + 1,
+                    "run_type": _run_type_for(i, args.run_type),
+                    "status": "aborted_disk_full",
+                    "preprocessing_time": None,
+                    "total_time": None,
+                    "run_id": None,
+                    "outdir": None,
+                    "region": args.region,
+                    "extent_size": args.extent_size,
+                    "workflow": args.workflow,
+                    "error": str(exc),
+                })
+                # Kein weiterer Run wenn die Platte schon jetzt zu voll ist.
+                break
             result = runners[strategy](args, i)
+            # Cleanup-Orchestrator braucht Region/Extent/Workflow um die
+            # local_reference-Abhaengigkeiten aufzuloesen.
+            result.setdefault("region", args.region)
+            result.setdefault("extent_size", args.extent_size)
+            result.setdefault("workflow", args.workflow)
             all_results.append(result)
 
     print_summary(all_results)
@@ -2990,6 +3315,12 @@ def main() -> None:
         if not any_run:
             print("\n[--reference-check] Keine CDSE-Strategie-Runs gefunden "
                   "die gegen local_reference verglichen werden koennten.")
+
+    # Aufraeumen erst NACH allen Accuracy-Checks - sonst waeren die TIFs
+    # bereits geloescht bevor die Accuracy sie gelesen hat.
+    if args.cleanup_after_accuracy or args.dry_run_cleanup:
+        cleanup_after_accuracy(all_results, output_dir=args.output_dir,
+                               dry_run=args.dry_run_cleanup)
 
 
 if __name__ == "__main__":
