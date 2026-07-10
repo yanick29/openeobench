@@ -83,6 +83,28 @@ LOCAL_RESAMPLING = {
 DEM_LAYOUTS = ("striped", "tiled_uncompressed", "cog")
 _COG_BLOCK_SIZE = 128
 
+# ---------------------------------------------------------------------------
+# DEM-Format Experiment (Machbarkeit): kann CDSE ein extern per load_stac
+# bereitgestelltes DEM auch in Zarr / NetCDF verstehen, nicht nur GeoTIFF?
+# Nur local_preprocessing ist betroffen. Der Default 'gtiff' bleibt
+# rueckwaertskompatibel - die GeoTIFF-Achse mit --dem-layout ist orthogonal.
+#   gtiff  - Standard, siehe --dem-layout
+#   zarr   - xarray-Zarr-Verzeichnis-Store (CF-Attribute + spatial_ref)
+#   netcdf - xarray-NetCDF-4 Datei (CF-Attribute + spatial_ref)
+DEM_FORMATS = ("gtiff", "zarr", "netcdf")
+
+# Media-Types und Datei-Endungen pro Format.
+_DEM_FORMAT_MEDIA_TYPE = {
+    "gtiff":  "image/tiff; application=geotiff",
+    "zarr":   "application/vnd+zarr",
+    "netcdf": "application/x-netcdf",
+}
+_DEM_FORMAT_EXT = {
+    "gtiff":  ".tif",
+    "zarr":   ".zarr",   # bewusst kein '.', ist ein Verzeichnis-Store
+    "netcdf": ".nc",
+}
+
 
 def _normalize_crs(crs_str: str) -> str:
     """Normalisiert 'epsg:3035' / '3035' / 'EPSG:3035' -> 'EPSG:3035'."""
@@ -301,38 +323,188 @@ def _log_tif_layout(info: dict, prefix: str = "  ") -> None:
           f"(factors={info['overview_factors']})")
 
 
-def reproject_dem_local(input_tif: str, output_tif: str,
-                        dst_crs: str = "EPSG:32633",
-                        resampling: str = "nearest",
-                        target_resolution: float = 10.0,
-                        layout: str = "striped") -> float:
-    """Reprojiziert ein GeoTIFF lokal und resampelt auf target_resolution.
+def _check_dem_format_deps(dem_format: str) -> None:
+    """Wirft ImportError mit klarer Installationsanweisung wenn optionale
+    Pakete fehlen. Kein Auto-Install - der Nutzer entscheidet.
+    """
+    if dem_format == "gtiff":
+        return
+    missing = []
+    try:
+        import xarray  # noqa: F401
+    except ImportError:
+        missing.append("xarray")
+    if dem_format == "zarr":
+        try:
+            import zarr  # noqa: F401
+        except ImportError:
+            missing.append("zarr")
+    if dem_format == "netcdf":
+        try:
+            import netCDF4  # noqa: F401
+        except ImportError:
+            missing.append("netcdf4")
+    if missing:
+        pkgs = " ".join(missing)
+        raise ImportError(
+            f"Fuer --dem-format={dem_format} fehlen: {', '.join(missing)}. "
+            f"Installieren mit: pip install {pkgs}"
+        )
 
-    resampling: 'nearest' (Default, pixelidentisch zu CDSE), 'bilinear' oder
-    'cubic'. Letztere weichen vom CDSE-Output ab und machen den
-    Accuracy-Check aussagekraeftig.
 
-    target_resolution: Pixelgroesse im Ziel-CRS (Default 10 m, gleich wie
-    Sentinel-2 B04). Wird nur bei UTM-Ziel-CRS erzwungen + S2-Grid-Snap.
-    Bei Nicht-UTM-Zielen (LAEA, WGS84, ...) wird die native Aufloesung der
-    Reprojektion uebernommen, ohne Grid-Snap - dort hat 10 m / S2-Snap
-    keine sinnvolle Semantik.
+def _build_xarray_dataset(data, dst_meta):
+    """Baut ein xarray.Dataset mit x/y-Koordinaten, DEM-Datenvariable und
+    einer 'spatial_ref' Grid-Mapping Variable nach CF-Konventionen.
 
-    layout: DEM-Layout Experiment. Steuert NUR das Schreibprofil des
-    Ausgabe-GeoTIFF (striped / tiled_uncompressed / cog). Die reprojizierten
-    Pixelwerte sind ueber alle Layouts pixelidentisch - garantiert dadurch
-    dass die Reprojektion in einen In-Memory-Puffer laeuft und ausschliesslich
-    der finale Write vom Layout abhaengt. Default 'striped' = Verhalten vor
-    dem Layout-Experiment (rueckwaertskompatibel fuer full_pp).
+    - x/y werden aus dst_meta['transform'] als Pixel-Zentren berechnet.
+    - CRS wird als WKT2 in spatial_ref.crs_wkt + als PROJ.4-String in
+      spatial_ref.spatial_ref abgelegt (CF + GDAL Konvention).
+    - Bei mehreren Baendern kommt eine 'band'-Dimension dazu.
 
-    Gibt Laufzeit in Sekunden zurueck (inklusive Overview-Berechnung).
+    Damit erkennt jeder CF-konforme Reader (xarray + optional rioxarray,
+    QGIS, gdal, netCDF-Tools) die Georeferenz.
+    """
+    import numpy as np
+    import xarray as xr
+    from rasterio.crs import CRS as RIOCRS
+
+    transform = dst_meta["transform"]
+    width = dst_meta["width"]
+    height = dst_meta["height"]
+
+    # Pixel-Zentren (nicht -Ecken): x = c + (col + 0.5) * a, y = f + (row + 0.5) * e
+    a, _, c = transform.a, transform.b, transform.c
+    _, e, f = transform.d, transform.e, transform.f
+    xs = c + (np.arange(width) + 0.5) * a
+    ys = f + (np.arange(height) + 0.5) * e
+
+    # CRS als WKT2 + PROJ.4 in einer 0-D Grid-Mapping Variable ablegen.
+    try:
+        crs = RIOCRS.from_user_input(dst_meta["crs"])
+        crs_wkt = crs.to_wkt()
+        crs_proj4 = crs.to_proj4()
+        epsg = crs.to_epsg()
+    except Exception:
+        crs_wkt = str(dst_meta["crs"])
+        crs_proj4 = ""
+        epsg = None
+
+    spatial_ref_attrs = {
+        "crs_wkt": crs_wkt,
+        "spatial_ref": crs_wkt,          # GDAL-Konvention
+        "grid_mapping_name": "unknown",  # CF-Platzhalter
+        "GeoTransform": (f"{transform.c} {transform.a} {transform.b} "
+                         f"{transform.f} {transform.d} {transform.e}"),
+    }
+    if epsg is not None:
+        spatial_ref_attrs["epsg_code"] = int(epsg)
+    if crs_proj4:
+        spatial_ref_attrs["proj4"] = crs_proj4
+
+    count = data.shape[0]
+    coords = {
+        "y": ("y", ys),
+        "x": ("x", xs),
+        "spatial_ref": ((), np.array(0, dtype="int8"), spatial_ref_attrs),
+    }
+    # WICHTIG: _FillValue gehoert in .encoding, NICHT in .attrs. Steht sie
+    # in attrs, wandelt xarray beim Zurueckladen automatisch nach float und
+    # maskiert mit NaN - das wuerde die Pixel-Identitaet zerstoeren. Ueber
+    # encoding schreiben die zarr/netcdf-Backends den Fill-Wert korrekt in
+    # die Datei, der Datentyp bleibt beim Lesen aber int16 (sofern der
+    # Reader mask_and_scale=False setzt - CDSE macht das idR selbst).
+    var_attrs = {"grid_mapping": "spatial_ref"}
+    var_encoding = {}
+    nodata = dst_meta.get("nodata")
+    if nodata is not None:
+        var_encoding["_FillValue"] = nodata
+
+    if count == 1:
+        # 2D-Variable ohne band-Achse - typisch fuer DEM.
+        da = xr.DataArray(
+            data[0], dims=("y", "x"),
+            coords={"y": ys, "x": xs},
+            attrs=var_attrs, name="DEM",
+        )
+    else:
+        bands = np.arange(1, count + 1, dtype="int32")
+        da = xr.DataArray(
+            data, dims=("band", "y", "x"),
+            coords={"band": bands, "y": ys, "x": xs},
+            attrs=var_attrs, name="DEM",
+        )
+    if var_encoding:
+        da.encoding.update(var_encoding)
+
+    ds = da.to_dataset()
+    ds = ds.assign_coords({"spatial_ref": ((), np.array(0, dtype="int8"))})
+    ds["spatial_ref"].attrs = spatial_ref_attrs
+    ds["y"].attrs = {"standard_name": "projection_y_coordinate", "units": "metre"}
+    ds["x"].attrs = {"standard_name": "projection_x_coordinate", "units": "metre"}
+    ds.attrs = {
+        "Conventions": "CF-1.8",
+        "title": "Local-preprocessed DEM",
+        "source": "reproject_dem_local",
+    }
+    return ds
+
+
+def _write_dem_as_zarr(data, dst_meta, target_path) -> None:
+    """Schreibt data als Zarr-Verzeichnis-Store nach target_path.
+    Ueberschreibt einen existierenden Store idempotent.
+    """
+    _check_dem_format_deps("zarr")
+    target = Path(target_path)
+    if target.exists():
+        # Zarr-Store ist ein Verzeichnis - komplett wegwerfen und neu schreiben.
+        import shutil as _sh
+        _sh.rmtree(target, ignore_errors=True)
+    ds = _build_xarray_dataset(data, dst_meta)
+    # Kompression aus, damit die Datei-Struktur transparent ist. Konsumenten
+    # koennen mit ihren eigenen Codecs re-encoden falls noetig.
+    ds.to_zarr(str(target), mode="w")
+
+
+def _write_dem_as_netcdf(data, dst_meta, target_path) -> None:
+    """Schreibt data als NetCDF-4 Datei nach target_path (Endung .nc)."""
+    _check_dem_format_deps("netcdf")
+    target = Path(target_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()
+    ds = _build_xarray_dataset(data, dst_meta)
+    ds.to_netcdf(str(target), engine="netcdf4", format="NETCDF4")
+
+
+def _inspect_asset_size(path) -> dict:
+    """Groesse eines Assets (Datei oder Zarr-Verzeichnis) rekursiv."""
+    p = Path(path)
+    if p.is_dir():
+        total = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        num_files = sum(1 for f in p.rglob("*") if f.is_file())
+        return {"path": str(p), "size_bytes": total,
+                "num_files": num_files, "is_directory": True}
+    else:
+        return {"path": str(p), "size_bytes": p.stat().st_size,
+                "num_files": 1, "is_directory": False}
+
+
+def _reproject_dem_to_array(input_tif: str, dst_crs: str,
+                            resampling: str = "nearest",
+                            target_resolution: float = 10.0):
+    """Reprojiziert ein Quell-GeoTIFF in einen In-Memory Numpy-Puffer.
+
+    Gibt (data, dst_meta) zurueck. data ist shape (count, height, width)
+    im ziel-CRS und ziel-Grid. dst_meta ist ein rasterio-meta-Dict mit
+    driver='GTiff', dtype, count, crs, transform, width, height, nodata.
+
+    Dies ist der GEMEINSAME Reprojektions-Pfad fuer alle DEM-Formate
+    (gtiff/zarr/netcdf) und alle Layouts. Wer danach schreibt, sieht
+    dieselben Pixelwerte - garantiert pixel-Identitaet ueber alle
+    Formate/Varianten.
     """
     if resampling not in LOCAL_RESAMPLING:
         raise ValueError(f"Unbekannte Resampling-Methode: {resampling}")
-    if layout not in DEM_LAYOUTS:
-        raise ValueError(
-            f"Unbekanntes dem_layout: {layout!r}. Erlaubt: {DEM_LAYOUTS}"
-        )
     import numpy as np
     method = LOCAL_RESAMPLING[resampling]
 
@@ -343,7 +515,6 @@ def reproject_dem_local(input_tif: str, output_tif: str,
     except (ValueError, AttributeError):
         pass
 
-    t0 = time.time()
     with rasterio.open(input_tif) as src:
         if is_utm:
             transform, width, height = calculate_default_transform(
@@ -375,9 +546,6 @@ def reproject_dem_local(input_tif: str, output_tif: str,
         dst_meta.update({"crs": dst_crs, "transform": transform,
                          "width": width, "height": height})
 
-        # Reprojektion in In-Memory-Array. Wichtig: der Puffer ist die
-        # gemeinsame Quelle fuer ALLE Layout-Varianten - so ist garantiert,
-        # dass sich striped/tiled/cog nur im Schreibprofil unterscheiden.
         dtype = np.dtype(dst_meta["dtype"])
         data = np.empty((src.count, height, width), dtype=dtype)
         for i in range(1, src.count + 1):
@@ -390,7 +558,44 @@ def reproject_dem_local(input_tif: str, output_tif: str,
                 dst_crs=dst_crs,
                 resampling=method,
             )
+    return data, dst_meta
 
+
+def reproject_dem_local(input_tif: str, output_tif: str,
+                        dst_crs: str = "EPSG:32633",
+                        resampling: str = "nearest",
+                        target_resolution: float = 10.0,
+                        layout: str = "striped") -> float:
+    """Reprojiziert ein GeoTIFF lokal und resampelt auf target_resolution.
+
+    resampling: 'nearest' (Default, pixelidentisch zu CDSE), 'bilinear' oder
+    'cubic'. Letztere weichen vom CDSE-Output ab und machen den
+    Accuracy-Check aussagekraeftig.
+
+    target_resolution: Pixelgroesse im Ziel-CRS (Default 10 m, gleich wie
+    Sentinel-2 B04). Wird nur bei UTM-Ziel-CRS erzwungen + S2-Grid-Snap.
+    Bei Nicht-UTM-Zielen (LAEA, WGS84, ...) wird die native Aufloesung der
+    Reprojektion uebernommen, ohne Grid-Snap - dort hat 10 m / S2-Snap
+    keine sinnvolle Semantik.
+
+    layout: DEM-Layout Experiment. Steuert NUR das Schreibprofil des
+    Ausgabe-GeoTIFF (striped / tiled_uncompressed / cog). Die reprojizierten
+    Pixelwerte sind ueber alle Layouts pixelidentisch - garantiert dadurch
+    dass die Reprojektion in einen In-Memory-Puffer laeuft und ausschliesslich
+    der finale Write vom Layout abhaengt. Default 'striped' = Verhalten vor
+    dem Layout-Experiment (rueckwaertskompatibel fuer full_pp).
+
+    Gibt Laufzeit in Sekunden zurueck (inklusive Overview-Berechnung).
+    """
+    if layout not in DEM_LAYOUTS:
+        raise ValueError(
+            f"Unbekanntes dem_layout: {layout!r}. Erlaubt: {DEM_LAYOUTS}"
+        )
+    t0 = time.time()
+    data, dst_meta = _reproject_dem_to_array(
+        input_tif, dst_crs, resampling=resampling,
+        target_resolution=target_resolution,
+    )
     _write_dem_with_layout(data, dst_meta, output_tif, layout=layout)
     return time.time() - t0
 
@@ -1111,14 +1316,26 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
 
 
 def build_stac_item(region: str, asset_href: str, epsg: int,
-                    item_id: str, extent: dict = None) -> dict:
+                    item_id: str, extent: dict = None,
+                    dem_format: str = "gtiff") -> dict:
     """STAC Item passend zum reprojizierten DEM-Asset.
 
     `extent` ueberschreibt REGIONS[region]['extent'] (z.B. fuer small/large
     Modi). Default = REGIONS-Extent (medium).
+
+    dem_format:
+      gtiff  - Standard, media_type=image/tiff; application=geotiff
+      zarr   - Verzeichnis-Store, media_type=application/vnd+zarr, href
+               endet auf '/' damit klar ist dass es kein Einzelfile ist.
+      netcdf - Einzeldatei .nc, media_type=application/x-netcdf.
     """
     ext = extent if extent is not None else REGIONS[region]["extent"]
     w, s, e, n = ext["west"], ext["south"], ext["east"], ext["north"]
+    media_type = _DEM_FORMAT_MEDIA_TYPE.get(dem_format,
+                                            _DEM_FORMAT_MEDIA_TYPE["gtiff"])
+    href = asset_href
+    if dem_format == "zarr" and not href.endswith("/"):
+        href = href + "/"
     return {
         "type": "Feature",
         "stac_version": "1.0.0",
@@ -1131,8 +1348,8 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
         "properties": {"datetime": "2011-01-06T00:00:00Z"},
         "assets": {
             "data": {
-                "href": asset_href,
-                "type": "image/tiff; application=geotiff",
+                "href": href,
+                "type": media_type,
                 "roles": ["data"],
                 "proj:epsg": epsg,
             }
@@ -1268,6 +1485,39 @@ def scp_upload(local_path: str, remote_filename: str) -> float:
     if result.returncode != 0:
         raise RuntimeError(
             f"scp fehlgeschlagen ({result.returncode}): {result.stderr.strip()}"
+        )
+    return elapsed
+
+
+def scp_upload_dir(local_dir: str, remote_dirname: str) -> float:
+    """scp -r fuer ein Verzeichnis (Zarr-Store) auf Hetzner.
+
+    Zarr-Stores sind Verzeichnisbaeume, kein Einzelfile. Der Rekursiv-Upload
+    ist die minimalste Loesung; alternative Ansaetze (rsync, tar+scp+untar)
+    waeren robuster gegen Teil-Uebertragungen, aber scp -r reicht fuer den
+    Machbarkeitstest.
+    """
+    remote = f"{HETZNER_HOST}:{HETZNER_WEB_PATH}{remote_dirname}"
+    cmd = ["scp", "-r",
+           "-o", "StrictHostKeyChecking=no",
+           "-o", f"ConnectTimeout={min(SCP_SSH_TIMEOUT, 30)}",
+           local_dir, remote]
+    print(f"  [scp -r] {' '.join(cmd)}")
+    t0 = time.time()
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=SCP_SSH_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.time() - t0
+        raise RuntimeError(
+            f"scp -r Timeout nach {elapsed:.1f}s (Limit {SCP_SSH_TIMEOUT}s) "
+            f"fuer {local_dir} -> {remote}"
+        ) from exc
+    elapsed = time.time() - t0
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"scp -r fehlgeschlagen ({result.returncode}): "
+            f"{result.stderr.strip()}"
         )
     return elapsed
 
@@ -1461,7 +1711,6 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
 def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     run_type = _run_type_for(repeat_idx, args.run_type)
     base = _make_outdir(args.output_dir, "local_preprocessing")
-    step2_tif = str(base / "step2_reprojected.tif")
     step3_dir = base / "step3_main"
     step3_dir.mkdir()
 
@@ -1475,16 +1724,35 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         target_crs_str = f"EPSG:{region_epsg}"
     dst_crs = target_crs_str
     run_ts = _ts()
-    remote_tif_name = f"dem_reprojected_{region}_{run_ts}.tif"
+
+    dem_format = getattr(args, "dem_format", "gtiff")
+    dem_layout = getattr(args, "dem_layout", "striped")
+    if dem_format not in DEM_FORMATS:
+        raise ValueError(f"Unbekanntes --dem-format: {dem_format!r}. "
+                         f"Erlaubt: {DEM_FORMATS}")
+    # dem_layout ist GeoTIFF-spezifisch. Bei anderen Formaten hat es keinen
+    # Effekt; Warnung fuer den Fall dass jemand versehentlich beides setzt.
+    if dem_format != "gtiff" and dem_layout != "striped":
+        print(f"  [warn] --dem-layout={dem_layout} wird bei "
+              f"--dem-format={dem_format} ignoriert (nur fuer gtiff relevant).")
+
+    # Optionale Pakete FRUEH pruefen - klare Fehlermeldung bevor der DEM-
+    # Download laeuft.
+    _check_dem_format_deps(dem_format)
+
+    asset_ext = _DEM_FORMAT_EXT[dem_format]
+    local_asset_path = base / f"step2_reprojected{asset_ext}"
+    remote_asset_name = f"dem_reprojected_{region}_{run_ts}{asset_ext}"
     remote_stac_name = f"stac_item_{region}_{run_ts}.json"
-    asset_url = f"{HETZNER_URL_BASE}{remote_tif_name}"
+    asset_url = f"{HETZNER_URL_BASE}{remote_asset_name}"
     stac_url = f"{HETZNER_URL_BASE}{remote_stac_name}"
     cache_dir = Path(args.output_dir) / "dem_cache"
     strategy_label = "local_pp_cached" if args.dem_cache else "local_preprocessing"
 
     print(f"\n{'='*60}")
     print(f"  Strategie: {strategy_label}  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
-    print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}")
+    print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}  |  DEM-Format: {dem_format}"
+          + (f"  |  Layout: {dem_layout}" if dem_format == "gtiff" else ""))
 
     try:
         # Schritt 1: DEM aus Cache laden oder herunterladen (Download NICHT in preprocessing_time)
@@ -1494,24 +1762,45 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             args, region, base, cache_dir, use_cache=args.dem_cache
         )
 
-        # Schritt 2: Lokal reprojizieren (bei UTM auch auf 10 m S2-Grid snappen)
+        # Schritt 2: Lokal reprojizieren + im Ziel-Format schreiben.
+        # In-Memory-Reprojektion garantiert dass Pixelwerte identisch sind,
+        # egal ob GeoTIFF/Zarr/NetCDF - nur der Write unterscheidet sich.
         grid_info = "10 m, S2-snap" if _is_utm_epsg(target_epsg) else "native res"
-        dem_layout = getattr(args, "dem_layout", "striped")
         print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs} "
-              f"({args.local_resampling}, {grid_info}, dem_layout={dem_layout})...")
-        t_reproject = reproject_dem_local(dem_tif, step2_tif, dst_crs=dst_crs,
-                                          resampling=args.local_resampling,
-                                          layout=dem_layout)
-        print(f"  Reprojektion abgeschlossen: {step2_tif}  ({t_reproject:.2f} s)")
-        _log_tif_layout(_inspect_tif_layout(step2_tif))
+              f"({args.local_resampling}, {grid_info}, dem_format={dem_format})...")
+        t_reproj_start = time.time()
+        data, dst_meta = _reproject_dem_to_array(
+            dem_tif, dst_crs, resampling=args.local_resampling,
+            target_resolution=10.0,
+        )
+        if dem_format == "gtiff":
+            _write_dem_with_layout(data, dst_meta, str(local_asset_path),
+                                   layout=dem_layout)
+            _log_tif_layout(_inspect_tif_layout(str(local_asset_path)))
+        elif dem_format == "zarr":
+            _write_dem_as_zarr(data, dst_meta, str(local_asset_path))
+            info = _inspect_asset_size(str(local_asset_path))
+            print(f"  Zarr-Store: {info['num_files']} Dateien, "
+                  f"{info['size_bytes'] / (1024**2):.2f} MB")
+        elif dem_format == "netcdf":
+            _write_dem_as_netcdf(data, dst_meta, str(local_asset_path))
+            info = _inspect_asset_size(str(local_asset_path))
+            print(f"  NetCDF: {info['size_bytes'] / (1024**2):.2f} MB")
+        t_reproject = time.time() - t_reproj_start
+        print(f"  Reprojektion + Write abgeschlossen: {local_asset_path}  "
+              f"({t_reproject:.2f} s)")
 
-        # Schritt 3: TIF nach Hetzner hochladen
-        print(f"\n  [Schritt 3/5] TIF auf Hetzner hochladen -> {remote_tif_name}...")
-        t_scp_tif = scp_upload(step2_tif, remote_tif_name)
-        print(f"  TIF Upload fertig: {asset_url}  ({t_scp_tif:.2f} s)")
+        # Schritt 3: Asset nach Hetzner hochladen (Datei oder Verzeichnis)
+        print(f"\n  [Schritt 3/5] Asset auf Hetzner hochladen -> {remote_asset_name}...")
+        if dem_format == "zarr":
+            t_scp_asset = scp_upload_dir(str(local_asset_path), remote_asset_name)
+        else:
+            t_scp_asset = scp_upload(str(local_asset_path), remote_asset_name)
+        print(f"  Asset Upload fertig: {asset_url}  ({t_scp_asset:.2f} s)")
 
-        # Schritt 4: STAC Item generieren + hochladen
-        print(f"\n  [Schritt 4/5] STAC Item generieren + hochladen...")
+        # Schritt 4: STAC Item generieren + hochladen (media_type haengt am dem_format)
+        print(f"\n  [Schritt 4/5] STAC Item generieren + hochladen "
+              f"(media_type={_DEM_FORMAT_MEDIA_TYPE[dem_format]})...")
         t_stac_start = time.time()
         stac_item = build_stac_item(
             region=region,
@@ -1519,6 +1808,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             epsg=target_epsg,
             item_id=f"dem_reprojected_{region}_{run_ts}",
             extent=_compute_extent(region, args.extent_size),
+            dem_format=dem_format,
         )
         local_stac_path = str(base / remote_stac_name)
         with open(local_stac_path, "w") as f:
@@ -1529,7 +1819,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         print(f"  STAC Item Upload fertig: {stac_url}  ({t_stac:.2f} s)")
 
         # preprocessing_time = Reprojektion + SCP Upload + STAC (OHNE DEM Download)
-        preprocessing_time = t_reproject + t_scp_tif + t_stac
+        preprocessing_time = t_reproject + t_scp_asset + t_stac
         print(f"  Pre-Processing-Zeit (ohne DEM Download): {preprocessing_time:.2f} s")
         if t_download is not None and t_download > 0.0:
             print(f"  (DEM Download {t_download:.1f} s separat, nicht in preprocessing_time)")
@@ -1547,6 +1837,27 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         t_main = results_step5.get("total_time") or 0.0
         total_time = preprocessing_time + t_main
 
+        # Diagnose: CDSE-Fehler koennen bedeuten dass das Format nicht
+        # akzeptiert wurde. Kein stiller Fehlschlag - klare Meldung.
+        cdse_status = results_step5.get("status", "unknown")
+        cdse_error = str(results_step5.get("error") or "").lower()
+        if dem_format != "gtiff" and cdse_status != "success":
+            hints = ("load_stac", "format", "media type", "unsupported",
+                     "cannot read", "invalid asset", "type")
+            format_related = any(h in cdse_error for h in hints)
+            if format_related:
+                print(
+                    f"\n  [DIAGNOSE] CDSE lehnt --dem-format={dem_format} "
+                    f"ueber load_stac wahrscheinlich AB. Fehler: {cdse_error[:400]}"
+                )
+            else:
+                print(
+                    f"\n  [DIAGNOSE] CDSE-Job mit dem_format={dem_format} "
+                    f"fehlgeschlagen (status={cdse_status}). Kein eindeutiger "
+                    f"Hinweis auf Format-Ablehnung - bitte Fehlermeldung pruefen: "
+                    f"{cdse_error[:400] or '(kein error-Feld)'}"
+                )
+
         run_id = import_run(
             str(step3_dir),
             crs_strategy=strategy_label,
@@ -1558,13 +1869,14 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             local_resampling=args.local_resampling,
             target_crs=target_crs_str,
             dem_layout=dem_layout,
+            dem_format=dem_format,
         )
 
-        # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf TIF + STAC)
+        # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf Asset + STAC)
         print(f"\n  [Logs] Hole nginx Access-Logs vom Hetzner-Server...")
         try:
             import_nginx_access_log(
-                run_id, filenames=[remote_tif_name, remote_stac_name],
+                run_id, filenames=[remote_asset_name, remote_stac_name],
                 ssh_host=HETZNER_HOST,
             )
         except Exception as exc:
@@ -3111,7 +3423,20 @@ def main() -> None:
                              "unkomprimiert, keine Overviews. "
                              "cog: gekachelt 128x128, deflate, interne Overviews. "
                              "Nur das Schreibprofil aendert sich - die Pixelwerte "
-                             "sind ueber alle Varianten identisch.")
+                             "sind ueber alle Varianten identisch. "
+                             "Wird bei --dem-format!=gtiff ignoriert.")
+    parser.add_argument("--dem-format", default="gtiff",
+                        choices=DEM_FORMATS,
+                        help="DATEIFORMAT des reprojizierten DEM-Assets "
+                             "(nur local_preprocessing). gtiff (Default): "
+                             "GeoTIFF wie bisher, kombinierbar mit --dem-layout. "
+                             "zarr: xarray-Zarr-Verzeichnis-Store (braucht "
+                             "'pip install xarray zarr'). "
+                             "netcdf: xarray-NetCDF-4 Datei (braucht "
+                             "'pip install xarray netcdf4'). "
+                             "Machbarkeitstest ob CDSE ueber load_stac andere "
+                             "Formate als GeoTIFF akzeptiert - kann vom Backend "
+                             "abgelehnt werden.")
     parser.add_argument("--target-crs", default=None,
                         help="Ziel-CRS fuer die lokale DEM-Reprojektion. "
                              "local_preprocessing: Default = UTM-EPSG der Region "
