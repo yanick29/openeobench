@@ -25,6 +25,7 @@ import re
 import base64
 import signal
 import threading
+import requests
 from pathlib import Path
 from collections import defaultdict
 
@@ -477,16 +478,22 @@ def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
             # Not enough data at scanline ..." / "TIFFReadEncodedTile()
             # failed". Wir behandeln das wie einen normalen Download-Fehler
             # und probieren es erneut.
+            # AEUSSERE Retry-Schleife: faengt vor allem die "Job finished aber
+            # Assets noch nicht publiziert" Race ab (JobNotFinished / 404 /
+            # leere assets-Liste). Die INNERE Robustheit (Content-Length,
+            # Range-Resume, per-File-Retry, atomarer Rename) sitzt jetzt
+            # in _download_and_verify_assets(), die _validate_downloaded_tifs
+            # zusaetzlich am Ende aufruft.
             max_download_attempts = 5
             download_retry_delay = 10
             last_download_error = None
             download_succeeded = False
+            download_stats = None
             for attempt in range(1, max_download_attempts + 1):
                 try:
-                    job_results = job.get_results()
-                    metadata = job_results.get_metadata()
-                    job_results.download_files(output_directory)
-                    _validate_downloaded_tifs(output_directory)
+                    download_stats = _download_and_verify_assets(
+                        job, output_directory,
+                    )
                     download_succeeded = True
                     if attempt > 1:
                         logger.info(
@@ -521,6 +528,8 @@ def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
             results["status"] = "success"
             results["download_timestamp"] = download_timestamp
             results["downloads_directory"] = output_directory
+            if download_stats is not None:
+                results["download_stats"] = download_stats
             
             logger.info("Download completed")
             logger.info(f"Files saved with scenario name '{clean_scenario_name}' and timestamp {download_timestamp}")
@@ -558,6 +567,312 @@ def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
         logger.info(f"Total time: {results['total_time']:.2f} seconds")
         
         return results
+
+
+_DOWNLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MiB Streaming-Bloecke
+_DOWNLOAD_CONNECT_TIMEOUT_S = 30
+_DOWNLOAD_READ_TIMEOUT_S = 300
+_DOWNLOAD_MAX_ATTEMPTS = 5
+
+
+def _probe_asset_head(session, url,
+                      connect_timeout=_DOWNLOAD_CONNECT_TIMEOUT_S,
+                      read_timeout=_DOWNLOAD_READ_TIMEOUT_S):
+    """HEAD-Request um Content-Length + Range-Support zu bestimmen.
+
+    Returns (expected_size_or_None, supports_range_bool). Bei Fehlern nur
+    Warnung + (None, False) - der GET-Path faellt dann auf den Content-Length
+    Header der eigentlichen Response zurueck.
+    """
+    try:
+        r = session.head(url, timeout=(connect_timeout, read_timeout),
+                         allow_redirects=True)
+    except requests.RequestException as exc:
+        logger.warning(f"HEAD-Probe fehlgeschlagen ({exc}); "
+                       f"Content-Length wird aus GET-Response gelesen.")
+        return None, False
+    expected = None
+    cl = r.headers.get("Content-Length")
+    if cl and cl.isdigit():
+        expected = int(cl)
+    supports_range = (r.headers.get("Accept-Ranges", "").lower() == "bytes")
+    return expected, supports_range
+
+
+def _streaming_download_asset(url, target_path, session,
+                              max_attempts=_DOWNLOAD_MAX_ATTEMPTS,
+                              connect_timeout=_DOWNLOAD_CONNECT_TIMEOUT_S,
+                              read_timeout=_DOWNLOAD_READ_TIMEOUT_S,
+                              chunk_size=_DOWNLOAD_CHUNK_SIZE,
+                              backoff_base_s=2.0):
+    """Robuster HTTP-Streaming-Download EINES Assets.
+
+    - Content-Length aus HEAD (falls verfuegbar) und aus der eigentlichen
+      GET-Response. Groesse wird nach dem Schreiben gegen den erwarteten
+      Wert verglichen. Mismatch -> Retry.
+    - Range-Resume: wenn der Server 'Accept-Ranges: bytes' meldet und
+      die vorherige Teildatei existiert, wird der naechste Versuch per
+      'Range: bytes={offset}-' fortgesetzt statt neu geladen.
+    - Bis zu max_attempts Versuche pro Datei mit exponentieller Wartezeit.
+    - Schreibt in target.part, benennt erst NACH kompletter Verifikation
+      atomar auf target um - so entsteht nie eine halbe Datei unter dem
+      Endnamen.
+
+    Returns dict {attempts, used_resume, expected_size, actual_size, target}.
+    Wirft RuntimeError wenn alle Versuche fehlschlagen.
+    """
+    target_path = Path(target_path)
+    part_path = target_path.with_suffix(target_path.suffix + ".part")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    expected_size, supports_range = _probe_asset_head(
+        session, url, connect_timeout, read_timeout,
+    )
+
+    used_resume = False
+    last_error = None
+
+    # Stale .part aus einem vorherigen Aufruf wegwerfen wenn der Server
+    # keinen Range-Support signalisiert (nichts, worauf wir fortsetzen
+    # koennten -> von Anfang an neu laden).
+    if part_path.exists() and not supports_range:
+        try:
+            part_path.unlink()
+        except OSError:
+            pass
+
+    for attempt in range(1, max_attempts + 1):
+        current_offset = part_path.stat().st_size if part_path.exists() else 0
+        headers = {}
+        mode = "ab" if current_offset > 0 else "wb"
+        resume_this_attempt = False
+
+        if current_offset > 0 and supports_range:
+            headers["Range"] = f"bytes={current_offset}-"
+            resume_this_attempt = True
+            used_resume = True
+            logger.info(
+                f"[download] {target_path.name} Resume-Versuch "
+                f"{attempt}/{max_attempts} ab Offset {current_offset:,} Bytes"
+            )
+        else:
+            if current_offset > 0:
+                # Kein Range-Support -> neu starten
+                try:
+                    part_path.unlink()
+                except OSError:
+                    pass
+                current_offset = 0
+                mode = "wb"
+            logger.info(
+                f"[download] {target_path.name} Versuch {attempt}/{max_attempts}"
+                + (f" (expected {expected_size:,} Bytes)" if expected_size else "")
+            )
+
+        try:
+            with session.get(
+                url, headers=headers, stream=True,
+                timeout=(connect_timeout, read_timeout),
+                allow_redirects=True,
+            ) as r:
+                # Wenn wir Range gesendet haben, der Server aber 200 statt
+                # 206 antwortet, ignoriert er den Range-Header -> neu
+                # anfangen (offset zurueck, alte part_path wegwerfen).
+                if resume_this_attempt and r.status_code == 200:
+                    logger.warning(
+                        f"[download] {target_path.name}: Server hat "
+                        f"Range-Header ignoriert (200 statt 206). "
+                        f"Datei wird neu geladen."
+                    )
+                    r.close()
+                    try:
+                        part_path.unlink()
+                    except OSError:
+                        pass
+                    current_offset = 0
+                    mode = "wb"
+                    resume_this_attempt = False
+                    # Neuer GET ohne Range
+                    with session.get(
+                        url, stream=True,
+                        timeout=(connect_timeout, read_timeout),
+                        allow_redirects=True,
+                    ) as r2:
+                        r2.raise_for_status()
+                        _consume_response_to_file(
+                            r2, part_path, mode, chunk_size, expected_size
+                        )
+                        actual_size = part_path.stat().st_size
+                else:
+                    r.raise_for_status()
+                    # Expected-Size aus der Antwort ableiten:
+                    #   206 -> Content-Range: bytes X-Y/TOTAL
+                    #   200 -> Content-Length = Total
+                    if r.status_code == 206:
+                        cr = r.headers.get("Content-Range", "")
+                        if "/" in cr:
+                            try:
+                                total = int(cr.rsplit("/", 1)[1])
+                                expected_size = total
+                            except ValueError:
+                                pass
+                    elif r.status_code == 200:
+                        cl = r.headers.get("Content-Length")
+                        if cl and cl.isdigit():
+                            # Bei 200 = full body -> Content-Length ist Total
+                            expected_size = int(cl)
+                    _consume_response_to_file(
+                        r, part_path, mode, chunk_size, expected_size
+                    )
+                    actual_size = part_path.stat().st_size
+
+            # Content-Length Vergleich
+            if expected_size is not None and actual_size != expected_size:
+                missing = expected_size - actual_size
+                last_error = (
+                    f"Content-Length Mismatch: erhalten {actual_size:,} "
+                    f"von {expected_size:,} Bytes (fehlen {missing:,})"
+                )
+                logger.warning(
+                    f"[download] {target_path.name}: {last_error}. "
+                    f"Retry ({attempt}/{max_attempts})."
+                )
+                if not supports_range and actual_size < expected_size:
+                    # Ohne Range-Support koennen wir nicht fortsetzen -> wegwerfen
+                    try:
+                        part_path.unlink()
+                    except OSError:
+                        pass
+                time.sleep(backoff_base_s * attempt)
+                continue
+
+            # Groesse OK -> atomarer Rename
+            if target_path.exists():
+                target_path.unlink()
+            part_path.rename(target_path)
+            logger.info(
+                f"[download] {target_path.name} OK: {actual_size:,} Bytes, "
+                f"Versuche={attempt}, Resume={used_resume}"
+            )
+            return {
+                "attempts": attempt,
+                "used_resume": used_resume,
+                "expected_size": expected_size,
+                "actual_size": actual_size,
+                "target": str(target_path),
+            }
+
+        except requests.RequestException as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                f"[download] {target_path.name} Versuch {attempt}/"
+                f"{max_attempts} unterbrochen: {last_error}. "
+                f"Bereits geschrieben: {part_path.stat().st_size if part_path.exists() else 0:,} Bytes"
+            )
+            time.sleep(backoff_base_s * attempt)
+            continue
+
+    # Alle Versuche verbraucht -> Teildatei aufraeumen
+    if part_path.exists():
+        try:
+            part_path.unlink()
+        except OSError:
+            pass
+    raise RuntimeError(
+        f"Streaming-Download fehlgeschlagen fuer {target_path.name} nach "
+        f"{max_attempts} Versuchen. Letzter Fehler: {last_error}"
+    )
+
+
+def _consume_response_to_file(response, part_path, mode, chunk_size, expected_size):
+    """Streamt r.iter_content in part_path. Wirft requests.RequestException
+    wenn die Verbindung mitten drin abbricht - der Aufrufer entscheidet
+    ueber Retry vs Range-Resume anhand des dann vorhandenen Offsets."""
+    with open(part_path, mode) as f:
+        for block in response.iter_content(chunk_size=chunk_size):
+            if block:
+                f.write(block)
+
+
+def _download_and_verify_assets(job, output_directory,
+                                 max_attempts=_DOWNLOAD_MAX_ATTEMPTS):
+    """Ersetzt job_results.download_files() durch einen eigenen robusten
+    Streaming-Download pro Asset. Danach die inhaltliche Integritaets-
+    Pruefung via _validate_downloaded_tifs().
+
+    Ablauf:
+      1. get_results() + get_assets() -> Liste (name, href) pro Asset.
+      2. Fuer JEDES Asset _streaming_download_asset() (5 Versuche, Range-
+         Resume, Content-Length-Verifikation, atomarer Rename).
+      3. Wenn alle Dateien vollstaendig geschrieben sind: rasterio-Check.
+      4. Bei Fehlern: RuntimeError mit einer Liste ALLER unvollstaendigen
+         Dateien + jeweiligem Fehler.
+
+    Gibt eine Zusammenfassung fuer die results.json zurueck.
+    """
+    os.makedirs(output_directory, exist_ok=True)
+
+    job_results = job.get_results()
+    metadata = job_results.get_metadata()
+    assets = job_results.get_assets()
+
+    if not assets:
+        raise RuntimeError(
+            f"Keine Assets in Job-Results von Job {getattr(job, 'job_id', '?')} - "
+            f"nichts zum Herunterladen."
+        )
+
+    logger.info(
+        f"[download] Job {getattr(job, 'job_id', '?')}: "
+        f"{len(assets)} Asset(s) via Streaming-Download."
+    )
+
+    session = requests.Session()
+    per_asset_stats = []
+    failures = {}
+
+    for asset in assets:
+        target = Path(output_directory) / asset.name
+        try:
+            stats = _streaming_download_asset(
+                asset.href, target, session, max_attempts=max_attempts,
+            )
+            per_asset_stats.append({"name": asset.name, **stats})
+        except Exception as exc:
+            failures[asset.name] = str(exc)
+            logger.error(
+                f"[download] {asset.name} nach {max_attempts} Versuchen "
+                f"NICHT wiederhergestellt: {exc}"
+            )
+
+    # job-results.json Metadaten separat sichern (nicht zwingend als Asset
+    # gelistet, aber nuetzlich fuer die spaetere STAC-Rekonstruktion).
+    try:
+        job_results_json = Path(output_directory) / "job-results.json"
+        if not job_results_json.exists():
+            with open(job_results_json, "w") as f:
+                json.dump(metadata, f, indent=2)
+    except Exception as exc:
+        logger.warning(f"job-results.json konnte nicht geschrieben werden: {exc}")
+
+    if failures:
+        summary = "; ".join(f"{n}: {e}" for n, e in failures.items())
+        raise RuntimeError(
+            f"Download fehlgeschlagen fuer {len(failures)} Datei(en): {summary}"
+        )
+
+    logger.info(
+        f"[download] Content-Length-Pruefung OK fuer alle {len(per_asset_stats)} "
+        f"Asset(s). Starte inhaltlichen rasterio-Check."
+    )
+
+    # Inhaltliche Pruefung
+    _validate_downloaded_tifs(output_directory)
+
+    return {
+        "assets": per_asset_stats,
+        "num_assets": len(per_asset_stats),
+    }
 
 
 def _validate_downloaded_tifs(output_directory):
