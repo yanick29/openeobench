@@ -65,6 +65,23 @@ LOCAL_RESAMPLING = {
     "cubic":    Resampling.cubic,
 }
 
+# ---------------------------------------------------------------------------
+# DEM-Layout Experiment (Nebenkapitel): interne Struktur des extern
+# bereitgestellten DEM bei local_preprocessing. Die drei Varianten
+# unterscheiden sich AUSSCHLIESSLICH im Schreibprofil des GeoTIFF - die
+# reprojizierten Pixelwerte, CRS, Transform und Aufloesung sind identisch.
+#   striped              - gestreiftes GeoTIFF, keine Kachelung, keine
+#                          Kompression, keine Overviews. Aktuelles Verhalten
+#                          (Default -> rueckwaertskompatibel).
+#   tiled_uncompressed   - gekachelt 128x128, keine Kompression, keine
+#                          Overviews. Isoliert den Effekt der Kachelung.
+#   cog                  - gekachelt 128x128, deflate, interne Overviews.
+#                          Fuegt gegenueber tiled_uncompressed Kompression
+#                          und Overviews hinzu.
+# 128x128 = CDSE-Output-Blockgroesse -> fairer Vergleich.
+DEM_LAYOUTS = ("striped", "tiled_uncompressed", "cog")
+_COG_BLOCK_SIZE = 128
+
 
 def _normalize_crs(crs_str: str) -> str:
     """Normalisiert 'epsg:3035' / '3035' / 'EPSG:3035' -> 'EPSG:3035'."""
@@ -155,10 +172,139 @@ def _make_outdir(base: str, strategy: str) -> Path:
     return p
 
 
+def _compute_overview_factors(width: int, height: int, min_size: int = 256) -> list:
+    """Overview-Faktoren [2, 4, 8, ...] bis kleinste Seite < min_size.
+
+    Fuer die COG-Variante: Overviews sollen genug Ebenen haben, damit CDSE
+    bei einer typischen Anfrage nicht sofort den Vollpyramidenpixel liest.
+    min_size=256 -> letzte Overview >= 128 px pro Seite, keine winzigen
+    Ebenen die nur Overhead sind.
+    """
+    factors = []
+    f = 2
+    while max(width, height) // f >= min_size:
+        factors.append(f)
+        f *= 2
+    return factors
+
+
+def _write_dem_with_layout(data, dst_meta: dict, output_tif: str,
+                           layout: str = "striped",
+                           block: int = _COG_BLOCK_SIZE) -> None:
+    """Schreibt ein reprojiziertes DEM-Array mit einem der 3 Layout-Profile.
+
+    data: 3D numpy Array (bands, height, width) - die Pixelwerte sind
+    zwischen allen Layouts identisch, nur die on-disk Repraesentation
+    unterscheidet sich.
+
+    dst_meta: rasterio meta-Dict mit driver, dtype, crs, transform, width,
+    height, count, nodata. Wird pro Layout mit den layout-spezifischen
+    Feldern (tiled, blockxsize, blockysize, compress, interleave)
+    ueberschrieben, damit z.B. ein aus dem Input geerbtes tiled=True
+    fuer die striped-Variante zurueckgesetzt wird.
+
+    layout:
+      striped              - tiled=False, keine Kompression, keine Overviews
+      tiled_uncompressed   - tiled=True, block x block, keine Kompression,
+                             keine Overviews
+      cog                  - tiled=True, block x block, deflate, interne
+                             Overviews via rasterio.build_overviews
+    """
+    if layout not in DEM_LAYOUTS:
+        raise ValueError(
+            f"Unbekanntes dem_layout: {layout!r}. Erlaubt: {DEM_LAYOUTS}"
+        )
+
+    profile = dict(dst_meta)
+    profile["driver"] = "GTiff"
+
+    if layout == "striped":
+        profile.update({
+            "tiled": False,
+            "compress": None,
+            "interleave": "band",
+        })
+        profile.pop("blockxsize", None)
+        profile.pop("blockysize", None)
+    elif layout == "tiled_uncompressed":
+        profile.update({
+            "tiled": True,
+            "blockxsize": block,
+            "blockysize": block,
+            "compress": None,
+            "interleave": "band",
+        })
+    elif layout == "cog":
+        profile.update({
+            "tiled": True,
+            "blockxsize": block,
+            "blockysize": block,
+            "compress": "deflate",
+            "interleave": "band",
+        })
+
+    if profile.get("compress") is None:
+        profile.pop("compress", None)
+
+    with rasterio.open(output_tif, "w", **profile) as dst:
+        dst.write(data)
+
+    if layout == "cog":
+        factors = _compute_overview_factors(profile["width"], profile["height"])
+        if factors:
+            with rasterio.open(output_tif, "r+") as dst:
+                dst.build_overviews(factors, Resampling.average)
+                dst.update_tags(ns="rio_overview", resampling="average")
+
+
+def _inspect_tif_layout(path: str) -> dict:
+    """Liest die tatsaechliche interne Struktur zurueck.
+
+    Wird nach dem Schreiben aufgerufen, damit belegbar ist, dass die
+    gewuenschte Variante wirklich erzeugt wurde (und nicht z.B. tiled=True
+    weil rasterio vom Input geerbt hat).
+    """
+    with rasterio.open(path) as src:
+        profile = src.profile
+        overviews = list(src.overviews(1)) if src.count >= 1 else []
+        return {
+            "path": path,
+            "size_bytes": Path(path).stat().st_size,
+            "width": src.width,
+            "height": src.height,
+            "dtype": str(src.dtypes[0]),
+            "tiled": bool(profile.get("tiled", False)),
+            "blockxsize": profile.get("blockxsize"),
+            "blockysize": profile.get("blockysize"),
+            "compress": profile.get("compress"),
+            "interleave": profile.get("interleave"),
+            "num_overviews": len(overviews),
+            "overview_factors": overviews,
+        }
+
+
+def _log_tif_layout(info: dict, prefix: str = "  ") -> None:
+    """Formatierter Log der Layout-Info fuer die Konsole."""
+    size_mb = info["size_bytes"] / (1024 * 1024)
+    print(f"{prefix}Layout-Verifikation: {Path(info['path']).name}")
+    print(f"{prefix}  size            = {size_mb:.2f} MB "
+          f"({info['size_bytes']:,} Bytes)")
+    print(f"{prefix}  shape           = {info['width']} x {info['height']} "
+          f"({info['dtype']})")
+    print(f"{prefix}  tiled           = {info['tiled']}")
+    if info["tiled"]:
+        print(f"{prefix}  blocksize       = {info['blockxsize']} x "
+              f"{info['blockysize']}")
+    print(f"{prefix}  compress        = {info['compress'] or 'none'}")
+    print(f"{prefix}  overviews       = {info['num_overviews']} "
+          f"(factors={info['overview_factors']})")
+
+
 def reproject_dem_local(input_tif: str, output_tif: str,
                         dst_crs: str = "EPSG:32633",
                         resampling: str = "nearest",
-                        target_resolution: float = 10.0) -> float:
+                        target_resolution: float = 10.0,
+                        layout: str = "striped") -> float:
     """Reprojiziert ein GeoTIFF lokal und resampelt auf target_resolution.
 
     resampling: 'nearest' (Default, pixelidentisch zu CDSE), 'bilinear' oder
@@ -171,10 +317,22 @@ def reproject_dem_local(input_tif: str, output_tif: str,
     Reprojektion uebernommen, ohne Grid-Snap - dort hat 10 m / S2-Snap
     keine sinnvolle Semantik.
 
-    Gibt Laufzeit in Sekunden zurueck.
+    layout: DEM-Layout Experiment. Steuert NUR das Schreibprofil des
+    Ausgabe-GeoTIFF (striped / tiled_uncompressed / cog). Die reprojizierten
+    Pixelwerte sind ueber alle Layouts pixelidentisch - garantiert dadurch
+    dass die Reprojektion in einen In-Memory-Puffer laeuft und ausschliesslich
+    der finale Write vom Layout abhaengt. Default 'striped' = Verhalten vor
+    dem Layout-Experiment (rueckwaertskompatibel fuer full_pp).
+
+    Gibt Laufzeit in Sekunden zurueck (inklusive Overview-Berechnung).
     """
     if resampling not in LOCAL_RESAMPLING:
         raise ValueError(f"Unbekannte Resampling-Methode: {resampling}")
+    if layout not in DEM_LAYOUTS:
+        raise ValueError(
+            f"Unbekanntes dem_layout: {layout!r}. Erlaubt: {DEM_LAYOUTS}"
+        )
+    import numpy as np
     method = LOCAL_RESAMPLING[resampling]
 
     # UTM-Detection: nur dann 10 m erzwingen + auf S2-Grid snappen.
@@ -211,20 +369,28 @@ def reproject_dem_local(input_tif: str, output_tif: str,
             transform, width, height = calculate_default_transform(
                 src.crs, dst_crs, src.width, src.height, *src.bounds,
             )
-        meta = src.meta.copy()
-        meta.update({"crs": dst_crs, "transform": transform,
-                     "width": width, "height": height})
-        with rasterio.open(output_tif, "w", **meta) as dst:
-            for i in range(1, src.count + 1):
-                reproject(
-                    source=rasterio.band(src, i),
-                    destination=rasterio.band(dst, i),
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=transform,
-                    dst_crs=dst_crs,
-                    resampling=method,
-                )
+
+        dst_meta = src.meta.copy()
+        dst_meta.update({"crs": dst_crs, "transform": transform,
+                         "width": width, "height": height})
+
+        # Reprojektion in In-Memory-Array. Wichtig: der Puffer ist die
+        # gemeinsame Quelle fuer ALLE Layout-Varianten - so ist garantiert,
+        # dass sich striped/tiled/cog nur im Schreibprofil unterscheiden.
+        dtype = np.dtype(dst_meta["dtype"])
+        data = np.empty((src.count, height, width), dtype=dtype)
+        for i in range(1, src.count + 1):
+            reproject(
+                source=rasterio.band(src, i),
+                destination=data[i - 1],
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=transform,
+                dst_crs=dst_crs,
+                resampling=method,
+            )
+
+    _write_dem_with_layout(data, dst_meta, output_tif, layout=layout)
     return time.time() - t0
 
 
@@ -1329,10 +1495,14 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
 
         # Schritt 2: Lokal reprojizieren (bei UTM auch auf 10 m S2-Grid snappen)
         grid_info = "10 m, S2-snap" if _is_utm_epsg(target_epsg) else "native res"
-        print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs} ({args.local_resampling}, {grid_info})...")
+        dem_layout = getattr(args, "dem_layout", "striped")
+        print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs} "
+              f"({args.local_resampling}, {grid_info}, dem_layout={dem_layout})...")
         t_reproject = reproject_dem_local(dem_tif, step2_tif, dst_crs=dst_crs,
-                                          resampling=args.local_resampling)
+                                          resampling=args.local_resampling,
+                                          layout=dem_layout)
         print(f"  Reprojektion abgeschlossen: {step2_tif}  ({t_reproject:.2f} s)")
+        _log_tif_layout(_inspect_tif_layout(step2_tif))
 
         # Schritt 3: TIF nach Hetzner hochladen
         print(f"\n  [Schritt 3/5] TIF auf Hetzner hochladen -> {remote_tif_name}...")
@@ -1386,6 +1556,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             workflow=args.workflow,
             local_resampling=args.local_resampling,
             target_crs=target_crs_str,
+            dem_layout=dem_layout,
         )
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf TIF + STAC)
@@ -2654,6 +2825,17 @@ def main() -> None:
                              "dann MAE=RMSE=0. bilinear/cubic weichen vom "
                              "CDSE-Output ab und machen den Accuracy-Check "
                              "aussagekraeftig.")
+    parser.add_argument("--dem-layout", default="striped",
+                        choices=DEM_LAYOUTS,
+                        help="Interne Struktur des reprojizierten DEM-GeoTIFF "
+                             "vor dem Upload (nur local_preprocessing). "
+                             "striped (Default): gestreift, unkomprimiert, keine "
+                             "Overviews (bisheriges Verhalten). "
+                             "tiled_uncompressed: gekachelt 128x128, "
+                             "unkomprimiert, keine Overviews. "
+                             "cog: gekachelt 128x128, deflate, interne Overviews. "
+                             "Nur das Schreibprofil aendert sich - die Pixelwerte "
+                             "sind ueber alle Varianten identisch.")
     parser.add_argument("--target-crs", default=None,
                         help="Ziel-CRS fuer die lokale DEM-Reprojektion. "
                              "local_preprocessing: Default = UTM-EPSG der Region "

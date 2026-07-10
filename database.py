@@ -54,6 +54,7 @@ def create_database():
         workflow TEXT,
         local_resampling TEXT,
         target_crs TEXT,
+        dem_layout TEXT,
         
         -- Extra
         credits DOUBLE,
@@ -139,6 +140,8 @@ def create_database():
         c.execute("ALTER TABLE runs ADD COLUMN proj_version TEXT")
     if "environment_json" not in existing_run_cols:
         c.execute("ALTER TABLE runs ADD COLUMN environment_json TEXT")
+    if "dem_layout" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN dem_layout TEXT")
 
     conn.commit()
     conn.close()
@@ -160,6 +163,7 @@ def _ensure_run_extra_columns(conn):
     new_text_cols = (
         "git_commit", "openeo_version", "rasterio_version",
         "numpy_version", "proj_version", "environment_json",
+        "dem_layout",
     )
     for col in new_text_cols:
         if col not in cols:
@@ -169,7 +173,7 @@ def _ensure_run_extra_columns(conn):
 def import_run(output_directory, crs_strategy=None, run_type=None,
                preprocessing_time=None, extent_size=None, dem_download_time=None,
                s2_download_time=None, workflow=None, local_resampling=None,
-               target_crs=None):
+               target_crs=None, dem_layout=None):
     """Importiert einen Run aus results.json und job-results.json in die DB."""
     conn = duckdb.connect(DB_PATH)
     _ensure_run_extra_columns(conn)
@@ -288,11 +292,11 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         output_crs, pixel_shape, bounding_box, num_output_files, backend_version,
         crs_strategy, run_type, preprocessing_time, dem_download_time,
         s2_download_time, extent_size,
-        workflow, local_resampling, target_crs,
+        workflow, local_resampling, target_crs, dem_layout,
         credits, cpu_seconds, duration_backend, input_pixels_mp, max_memory_gb,
         git_commit, openeo_version, rasterio_version, numpy_version,
         proj_version, environment_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
         run_id,
         results.get("backend_url"),
         results.get("backend_name"),
@@ -322,6 +326,7 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         workflow,
         local_resampling,
         target_crs,
+        dem_layout,
         results.get("credits"),
         results.get("cpu_seconds"),
         results.get("duration_backend"),
