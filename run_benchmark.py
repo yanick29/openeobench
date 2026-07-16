@@ -3886,7 +3886,7 @@ def main() -> None:
                              "resample (DEM CDSE-seitig nach EPSG:3035@30m und "
                              "zurueck nach Region-UTM@10m, dann B04+DEM/add), "
                              "filter_bbox (B04+DEM/add, dann filter_bbox auf "
-                             "die mittleren 50% des Extents).")
+                             "die mittleren 50%% des Extents).")
     parser.add_argument("--local-resampling", default="nearest",
                         choices=tuple(LOCAL_RESAMPLING.keys()),
                         help="Resampling-Methode fuer die lokale DEM-Reprojektion "
@@ -3998,7 +3998,7 @@ def main() -> None:
                         help="Minimaler freier Plattenplatz (in GB) im "
                              "--output-dir, unterhalb dessen ein Run gar nicht "
                              "erst startet. Default 20 GB. 0 deaktiviert die "
-                             "Pruefung. Faengt das '100%-Fuell-Fiasko' ab.")
+                             "Pruefung. Faengt das '100%%-Fuell-Fiasko' ab.")
     parser.add_argument("--cleanup-after-accuracy", action="store_true",
                         help="Nach jedem erfolgreich verbuchten Accuracy-Check "
                              "die TIF-Ausgaben des Runs loeschen. "
