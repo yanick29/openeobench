@@ -460,9 +460,19 @@ def _write_dem_as_zarr(data, dst_meta, target_path) -> None:
         import shutil as _sh
         _sh.rmtree(target, ignore_errors=True)
     ds = _build_xarray_dataset(data, dst_meta)
-    # Kompression aus, damit die Datei-Struktur transparent ist. Konsumenten
-    # koennen mit ihren eigenen Codecs re-encoden falls noetig.
-    ds.to_zarr(str(target), mode="w")
+    # Kompression MUSS aus: xarray schreibt per Default blosc-komprimierte
+    # Chunks, und GDALs Zarr-Treiber scheitert daran hart ("Decompressor
+    # blosc not handled") - lokal belegt, gleicher Fehler ueber /vsicurl/.
+    # Ohne blosc oeffnet GDAL den Store als 2D-Raster inkl. CRS aus dem
+    # CF-grid_mapping (spatial_ref) und Transform aus den x/y-Koordinaten.
+    # Compressor ueber .encoding der Variablen setzen, NICHT ueber
+    # to_zarr(encoding=...): das Kwarg ersetzt die Encoding komplett und
+    # wuerde die in _build_xarray_dataset gesetzte _FillValue verwerfen.
+    for name in ds.variables:
+        ds[name].encoding["compressor"] = None
+    # Konsolidierte Metadaten (.zmetadata) explizit, damit GDAL den Store
+    # ueber HTTP ohne Directory-Listing versteht.
+    ds.to_zarr(str(target), mode="w", consolidated=True)
 
 
 def _write_dem_as_netcdf(data, dst_meta, target_path) -> None:
