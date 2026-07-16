@@ -32,7 +32,8 @@ import re
 
 import rasterio
 from rasterio.transform import Affine, array_bounds
-from rasterio.warp import Resampling, calculate_default_transform, reproject
+from rasterio.warp import (Resampling, calculate_default_transform, reproject,
+                           transform_bounds)
 
 from database import import_nginx_access_log, import_run
 
@@ -585,6 +586,175 @@ def _grid_from_dst_meta(dst_meta: dict) -> dict:
     left, bottom, right, top = array_bounds(height, width, transform)
     return {"transform": transform, "width": width, "height": height,
             "bounds": (left, bottom, right, top), "shape": (height, width)}
+
+
+def _s2_grid_from_extent(extent: dict, epsg: int,
+                         resolution: float = 10.0) -> dict:
+    """Erwartetes CDSE-Zielgitter aus dem angefragten Extent ableiten
+    (--snap-dem-to-s2), OHNE S2-Datei und OHNE CDSE-Aufruf.
+
+    Herleitung: Extent (EPSG:4326) ins UTM-Ziel-CRS projizieren, dann alle
+    vier Kanten OUTWARD auf Vielfache von `resolution` snappen (floor fuer
+    left/bottom, ceil fuer right/top). Gegen einen realen CDSE-Job
+    validiert (berlin/medium, EPSG:32633): Ergebnis-Grid des Jobs war
+    exakt left=384470 bottom=5812220 right=394910 top=5823580,
+    1044x1136 - identisch mit dieser Rekonstruktion auf allen 4 Kanten.
+
+    Rueckgabe im read_s2_grid-Stil: transform/width/height/bounds/shape.
+    """
+    left, bottom, right, top = transform_bounds(
+        "EPSG:4326", f"EPSG:{epsg}",
+        extent["west"], extent["south"], extent["east"], extent["north"],
+    )
+    res = resolution
+    snapped_left   = math.floor(left   / res) * res
+    snapped_bottom = math.floor(bottom / res) * res
+    snapped_right  = math.ceil(right   / res) * res
+    snapped_top    = math.ceil(top     / res) * res
+    width = int(round((snapped_right - snapped_left) / res))
+    height = int(round((snapped_top - snapped_bottom) / res))
+    transform = Affine(res, 0, snapped_left, 0, -res, snapped_top)
+    return {"transform": transform, "width": width, "height": height,
+            "bounds": (snapped_left, snapped_bottom,
+                       snapped_right, snapped_top),
+            "shape": (height, width)}
+
+
+def _crop_to_grid(data, dst_meta: dict, target_grid: dict):
+    """Croppt einen reprojizierten Puffer per reinem Array-Slicing auf
+    target_grid. Gibt (cropped_data, cropped_meta) zurueck.
+
+    BEWUSST Crop statt zweitem Warp direkt aufs Ziel-Grid: GDALs Warp ist
+    nicht frame-invariant - der approximierende Koordinaten-Transformer
+    (Default-Toleranz 0.125 px) und die Resample-Kernel-Arithmetik haengen
+    vom Grid-Ausschnitt ab. Lokal gemessen (synthetisches DEM, Grids auf
+    demselben 10-m-Raster): direkter Warp aufs Snap-Grid weicht vom
+    Ausschnitt des Quell-Bounds-Warps ab (bilinear 24.5% der Pixel um +-1,
+    nearest 3.6% bis +-10). Der Crop dagegen aendert Werte per Konstruktion
+    NICHT - genau die gewuenschte Semantik "Snapping betrifft nur die
+    Gittergeometrie". Voraussetzungen (werden geprueft, sonst ValueError):
+    gleiche Pixelgroesse, Gitter-Ausrichtung (Origin-Differenz = ganze
+    Pixel), target_grid vollstaendig im Puffer enthalten.
+    """
+    import numpy as np
+    t_src = dst_meta["transform"]
+    t_dst = target_grid["transform"]
+    res = t_src.a
+    if (t_dst.a, t_dst.e) != (t_src.a, t_src.e):
+        raise ValueError(
+            f"_crop_to_grid: Pixelgroesse passt nicht "
+            f"({t_src.a},{t_src.e}) vs ({t_dst.a},{t_dst.e})")
+    col_off = (t_dst.c - t_src.c) / res
+    row_off = (t_src.f - t_dst.f) / res
+    if abs(col_off - round(col_off)) > 1e-9 or \
+       abs(row_off - round(row_off)) > 1e-9:
+        raise ValueError(
+            f"_crop_to_grid: Gitter nicht ausgerichtet "
+            f"(col_off={col_off}, row_off={row_off}) - Crop wuerde das "
+            f"Pixelraster verschieben.")
+    col_off, row_off = int(round(col_off)), int(round(row_off))
+    height, width = int(target_grid["height"]), int(target_grid["width"])
+    if (col_off < 0 or row_off < 0
+            or col_off + width > dst_meta["width"]
+            or row_off + height > dst_meta["height"]):
+        raise ValueError(
+            f"_crop_to_grid: Ziel-Grid ragt aus dem reprojizierten DEM "
+            f"heraus (col_off={col_off}, row_off={row_off}, "
+            f"ziel={height}x{width}, "
+            f"puffer={dst_meta['height']}x{dst_meta['width']}). Das DEM "
+            f"deckt den angefragten Extent nicht vollstaendig ab - "
+            f"DEM-Download/Cache pruefen (passt die extent_size?).")
+    cropped = np.ascontiguousarray(
+        data[:, row_off:row_off + height, col_off:col_off + width])
+    cropped_meta = dict(dst_meta)
+    cropped_meta.update({"transform": t_dst, "width": width,
+                         "height": height})
+    return cropped, cropped_meta
+
+
+def _verify_snap_grid(dst_meta: dict, expected_grid: dict) -> bool:
+    """Log-Block: tatsaechliches Grid des reprojizierten Puffers gegen das
+    erwartete CDSE-Zielgitter (projizierter Extent, outward auf 10 m).
+    Prueft Ursprung, Pixelgroesse, Shape und Extent Feld fuer Feld.
+    """
+    actual = _grid_from_dst_meta(dst_meta)
+    ta, te = actual["transform"], expected_grid["transform"]
+    checks = [
+        ("Ursprung (left, top)", (ta.c, ta.f), (te.c, te.f)),
+        ("Pixelgroesse (a, e)", (ta.a, ta.e), (te.a, te.e)),
+        ("Shape (H, W)", actual["shape"], expected_grid["shape"]),
+        ("Extent (l,b,r,t)", tuple(actual["bounds"]),
+         tuple(expected_grid["bounds"])),
+    ]
+    all_ok = True
+    print("  [Snap-Verifikation] gesnapptes DEM-Grid vs. erwartetes "
+          "CDSE-Zielgitter:")
+    for label, got, want in checks:
+        ok = got == want
+        all_ok &= ok
+        print(f"    {label:22s} ist={got}  soll={want}  "
+              f"[{'OK' if ok else 'MISMATCH'}]")
+    return all_ok
+
+
+def _verify_snap_crop_identity(data_snapped, meta_snapped,
+                               data_unsnapped, meta_unsnapped) -> bool:
+    """Pflichttest fuer --snap-dem-to-s2: gesnapptes und ungesnapptes DEM
+    liegen auf demselben 10-m-Gitter (beide Urspruenge Vielfache der
+    Aufloesung), also MUESSEN die Pixelwerte im ueberlappenden Bereich
+    bitgenau identisch sein - das Snapping darf nur zuschneiden, nie
+    Werte veraendern. Vergleich per np.array_equal auf der Schnittmenge
+    der beiden Extents.
+
+    Die Fenster werden hier UNABHAENGIG von _crop_to_grid aus den
+    Geo-Koordinaten beider Metas hergeleitet - der Test validiert damit
+    die Crop-Indexierung end-to-end (Off-by-one in Offset/Window wuerde
+    als MISMATCH auffallen), nicht nur eine Tautologie.
+    """
+    import numpy as np
+    ts, tu = meta_snapped["transform"], meta_unsnapped["transform"]
+    res = ts.a
+    if (tu.a, tu.e) != (ts.a, ts.e):
+        print(f"  [Crop-Identitaet] FEHLER: unterschiedliche Pixelgroesse "
+              f"({ts.a},{ts.e}) vs ({tu.a},{tu.e}) - kein Vergleich moeglich.")
+        return False
+    # Gitter-Ausrichtung: Origin-Differenzen muessen ganze Pixel sein.
+    dx, dy = ts.c - tu.c, ts.f - tu.f
+    if abs(dx / res - round(dx / res)) > 1e-9 or \
+       abs(dy / res - round(dy / res)) > 1e-9:
+        print(f"  [Crop-Identitaet] FEHLER: Gitter nicht ausgerichtet "
+              f"(dx={dx}, dy={dy}, res={res}) - Snapping haette das "
+              f"Pixelraster verschoben.")
+        return False
+
+    bs = array_bounds(meta_snapped["height"], meta_snapped["width"], ts)
+    bu = array_bounds(meta_unsnapped["height"], meta_unsnapped["width"], tu)
+    inter_left = max(bs[0], bu[0])
+    inter_bottom = max(bs[1], bu[1])
+    inter_right = min(bs[2], bu[2])
+    inter_top = min(bs[3], bu[3])
+    if inter_left >= inter_right or inter_bottom >= inter_top:
+        print("  [Crop-Identitaet] FEHLER: Extents ueberlappen nicht.")
+        return False
+
+    def _window(t):
+        col0 = int(round((inter_left - t.c) / res))
+        row0 = int(round((t.f - inter_top) / res))
+        ncols = int(round((inter_right - inter_left) / res))
+        nrows = int(round((inter_top - inter_bottom) / res))
+        return slice(row0, row0 + nrows), slice(col0, col0 + ncols)
+
+    rs, cs = _window(ts)
+    ru, cu = _window(tu)
+    identical = np.array_equal(data_snapped[:, rs, cs],
+                               data_unsnapped[:, ru, cu])
+    n_px = (rs.stop - rs.start) * (cs.stop - cs.start)
+    print(f"  [Crop-Identitaet] Schnittmenge (l,b,r,t)=({inter_left}, "
+          f"{inter_bottom}, {inter_right}, {inter_top}), "
+          f"{rs.stop - rs.start}x{cs.stop - cs.start} px "
+          f"({n_px} Pixel/Band): np.array_equal="
+          f"{identical}  [{'OK' if identical else 'MISMATCH'}]")
+    return identical
 
 
 def reproject_dem_local(input_tif: str, output_tif: str,
@@ -1964,6 +2134,24 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     # Download laeuft.
     _check_dem_format_deps(dem_format)
 
+    # --snap-dem-to-s2: erwartetes CDSE-Zielgitter aus dem angefragten
+    # Extent ableiten; nach der (unveraenderten) Reprojektion wird der
+    # Puffer auf dieses Grid gecroppt. Nur bei UTM-Ziel sinnvoll - die
+    # S2-10-m-Grid-Semantik existiert nur dort (gleiche Regel wie der
+    # bestehende 10-m-Snap in _reproject_dem_to_array).
+    snap_to_s2 = getattr(args, "snap_dem_to_s2", False)
+    snap_grid = None
+    if snap_to_s2:
+        if _is_utm_epsg(target_epsg):
+            snap_grid = _s2_grid_from_extent(
+                _compute_extent(region, args.extent_size), target_epsg,
+                resolution=10.0,
+            )
+        else:
+            print(f"  [warn] --snap-dem-to-s2 wird bei Nicht-UTM-Ziel-CRS "
+                  f"{dst_crs} ignoriert (S2-10-m-Grid nur in UTM definiert).")
+            snap_to_s2 = False
+
     asset_ext = _DEM_FORMAT_EXT[dem_format]
     local_asset_path = base / f"step2_reprojected{asset_ext}"
     remote_asset_name = f"dem_reprojected_{region}_{run_ts}{asset_ext}"
@@ -1976,7 +2164,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     print(f"\n{'='*60}")
     print(f"  Strategie: {strategy_label}  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
     print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}  |  DEM-Format: {dem_format}"
-          + (f"  |  Layout: {dem_layout}" if dem_format == "gtiff" else ""))
+          + (f"  |  Layout: {dem_layout}" if dem_format == "gtiff" else "")
+          + ("  |  Snap: s2" if snap_to_s2 else ""))
 
     try:
         # Schritt 1: DEM aus Cache laden oder herunterladen (Download NICHT in preprocessing_time)
@@ -1989,14 +2178,35 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         # Schritt 2: Lokal reprojizieren + im Ziel-Format schreiben.
         # In-Memory-Reprojektion garantiert dass Pixelwerte identisch sind,
         # egal ob GeoTIFF/Zarr/NetCDF - nur der Write unterscheidet sich.
-        grid_info = "10 m, S2-snap" if _is_utm_epsg(target_epsg) else "native res"
+        if snap_to_s2:
+            grid_info = "10 m, Extent-Snap auf S2/CDSE-Zielgitter"
+        elif _is_utm_epsg(target_epsg):
+            grid_info = "10 m, S2-snap"
+        else:
+            grid_info = "native res"
         print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs} "
               f"({args.local_resampling}, {grid_info}, dem_format={dem_format})...")
         t_reproj_start = time.time()
+        # Reprojektion IMMER wie bisher (Grid aus den Quell-Bounds) - bei
+        # --snap-dem-to-s2 wird danach nur aufs Snap-Grid GECROPPT (reines
+        # Slicing, beide Grids liegen auf demselben 10-m-Raster). Kein
+        # zweiter Warp: GDALs Warp ist nicht frame-invariant, ein direkter
+        # Warp aufs Snap-Grid haette andere Pixelwerte als der Ausschnitt
+        # (Details in _crop_to_grid). So ist garantiert, dass MIT und OHNE
+        # Flag exakt dieselben Werte hochgeladen werden - nur der Extent
+        # unterscheidet sich.
         data, dst_meta = _reproject_dem_to_array(
             dem_tif, dst_crs, resampling=args.local_resampling,
             target_resolution=10.0,
         )
+        if snap_to_s2:
+            data_full, meta_full = data, dst_meta
+            data, dst_meta = _crop_to_grid(data, dst_meta, snap_grid)
+            print(f"  Snap-Crop: {meta_full['height']}x{meta_full['width']} "
+                  f"-> {dst_meta['height']}x{dst_meta['width']} px "
+                  f"(origin {meta_full['transform'].c},"
+                  f"{meta_full['transform'].f} -> "
+                  f"{dst_meta['transform'].c},{dst_meta['transform'].f})")
         if dem_format == "gtiff":
             _write_dem_with_layout(data, dst_meta, str(local_asset_path),
                                    layout=dem_layout)
@@ -2013,6 +2223,31 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         t_reproject = time.time() - t_reproj_start
         print(f"  Reprojektion + Write abgeschlossen: {local_asset_path}  "
               f"({t_reproject:.2f} s)")
+
+        # --snap-dem-to-s2 Pflicht-Verifikation (NICHT in preprocessing_time:
+        # laeuft nach dem gemessenen Reprojektions-/Write-Block und dient nur
+        # dem lokalen Beweis, nicht der Pipeline):
+        #   1. Grid-Check: sitzt der gesnappte Puffer exakt auf dem
+        #      erwarteten CDSE-Zielgitter (projizierter Extent, outward
+        #      auf 10 m)?
+        #   2. Crop-Identitaet: gesnappter Puffer == bitgenauer Ausschnitt
+        #      des ungesnappten Puffers auf der Extent-Schnittmenge
+        #      (np.array_equal, Fenster unabhaengig aus den Geo-Koordinaten
+        #      hergeleitet). Beweist lokal, dass das Snapping nur
+        #      zugeschnitten und keine Werte veraendert hat.
+        # Bei Verletzung wird abgebrochen: ein Lauf, dessen lokaler Beweis
+        # scheitert, ist fuer den MIT/OHNE-Vergleich wertlos und wuerde nur
+        # CDSE-Zeit verbrennen.
+        if snap_to_s2:
+            grid_ok = _verify_snap_grid(dst_meta, snap_grid)
+            crop_ok = _verify_snap_crop_identity(data, dst_meta,
+                                                 data_full, meta_full)
+            if not (grid_ok and crop_ok):
+                raise RuntimeError(
+                    "--snap-dem-to-s2 Verifikation fehlgeschlagen "
+                    f"(grid_ok={grid_ok}, crop_identity_ok={crop_ok}) - "
+                    "Abbruch vor Upload/CDSE."
+                )
 
         # Schritt 3: Asset nach Hetzner hochladen (Datei oder Verzeichnis)
         print(f"\n  [Schritt 3/5] Asset auf Hetzner hochladen -> {remote_asset_name}...")
@@ -2102,6 +2337,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             target_crs=target_crs_str,
             dem_layout=dem_layout,
             dem_format=dem_format,
+            dem_snap="s2" if snap_to_s2 else None,
         )
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf Asset + STAC)
@@ -3683,6 +3919,24 @@ def main() -> None:
                              "Machbarkeitstest ob CDSE ueber load_stac andere "
                              "Formate als GeoTIFF akzeptiert - kann vom Backend "
                              "abgelehnt werden.")
+    parser.add_argument("--snap-dem-to-s2", action="store_true",
+                        help="(nur local_preprocessing) DEM pixelgenau auf "
+                             "das erwartete CDSE/S2-Zielgitter bringen: "
+                             "Ziel-Grid wird aus dem angefragten Extent "
+                             "abgeleitet (nach UTM projiziert, Kanten "
+                             "outward auf 10 m); die Reprojektion laeuft "
+                             "unveraendert, danach wird der Puffer per "
+                             "reinem Slicing auf dieses Grid GECROPPT - "
+                             "die hochgeladenen Pixelwerte sind bitgenau "
+                             "dieselben wie ohne Flag, nur der Extent "
+                             "unterscheidet sich. Eliminiert die Extent-"
+                             "Differenz zum CDSE-Ergebnis-Grid, sodass "
+                             "load_stac nichts mehr zuschneiden/resampeln "
+                             "muss. Default AUS (bisheriges Verhalten), "
+                             "damit Laeufe MIT und OHNE Snapping "
+                             "vergleichbar sind. Inklusive lokaler Pflicht-"
+                             "Verifikation (Grid-Check + Crop-Identitaet). "
+                             "Wird bei Nicht-UTM --target-crs ignoriert.")
     parser.add_argument("--target-crs", default=None,
                         help="Ziel-CRS fuer die lokale DEM-Reprojektion. "
                              "local_preprocessing: Default = UTM-EPSG der Region "
