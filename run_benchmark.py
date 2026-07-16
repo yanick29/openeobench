@@ -1357,7 +1357,15 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
       gtiff  - Standard, media_type=image/tiff; application=geotiff
       zarr   - Verzeichnis-Store, media_type=application/vnd+zarr, href
                endet auf '/' damit klar ist dass es kein Einzelfile ist.
-      netcdf - Einzeldatei .nc, media_type=application/x-netcdf.
+      netcdf - Einzeldatei .nc, media_type=application/x-netcdf. Der href
+               bekommt ein /vsicurl/-Praefix: CDSE baut daraus den GDAL-Pfad
+               NETCDF:<href>:DEM ohne Quoting, und mit nacktem http-URL
+               deutet GDAL "http" als lokalen Pfad ("File does not exist:
+               http", Exception Code 4). Lokal verifiziert:
+                 NETCDF:http://HOST/f.nc:DEM           -> FAIL
+                 NETCDF:/vsicurl/http://HOST/f.nc:DEM  -> OK
+               Die Datei selbst + Upload bleiben unveraendert, nur der
+               href-String im Item traegt das Praefix.
 
     grid (read_s2_grid-Stil: transform/width/height/bounds): liefert
     proj:shape / proj:bbox / proj:transform fuer Item-Properties UND
@@ -1376,6 +1384,8 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     href = asset_href
     if dem_format == "zarr" and not href.endswith("/"):
         href = href + "/"
+    if dem_format == "netcdf" and href.startswith("http"):
+        href = "/vsicurl/" + href
 
     # Ohne Band-Metadaten laedt CDSE den Cube ohne Band-Label
     # ("bands_from_stac_item: no band name source found"), renamelabels1
@@ -2016,7 +2026,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             grid=_grid_from_dst_meta(dst_meta),
         )
         _stac_asset = stac_item["assets"]["data"]
-        print(f"  STAC data-Asset: proj:epsg={_stac_asset['proj:epsg']}  "
+        print(f"  STAC data-Asset: href={_stac_asset['href']}")
+        print(f"                   proj:epsg={_stac_asset['proj:epsg']}  "
               f"proj:shape={_stac_asset.get('proj:shape')}  "
               f"proj:bbox={_stac_asset.get('proj:bbox')}")
         print(f"                   proj:transform={_stac_asset.get('proj:transform')}  "
