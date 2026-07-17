@@ -22,9 +22,13 @@ bekommt).
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import sys
 import tempfile
+import threading
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
@@ -113,6 +117,82 @@ def _read_xarray_asset(path: Path) -> tuple:
     finally:
         ds.close()
     return arr, crs, transform
+
+
+class _RangeHTTPHandler(SimpleHTTPRequestHandler):
+    """SimpleHTTPRequestHandler + HTTP-Range-Support (206 Partial Content).
+
+    Pythons http.server ignoriert Range-Header und liefert immer 200/voll.
+    GDALs /vsicurl/ liest aber chunkweise per Range-Request - genau wie
+    spaeter CDSE gegen den nginx des Benchmark-Hosts. Nur GET/HEAD auf
+    Dateien, single-range ("bytes=start-end"), mehr braucht GDAL nicht.
+    """
+
+    def log_message(self, *args):  # kein Request-Spam im Testlog
+        pass
+
+    def do_HEAD(self):
+        path = Path(self.translate_path(self.path))
+        if not path.is_file():
+            self.send_error(404)
+            return
+        size = path.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+
+    def do_GET(self):
+        path = Path(self.translate_path(self.path))
+        if not path.is_file():
+            self.send_error(404)
+            return
+        size = path.stat().st_size
+        start, end, status = 0, size - 1, 200
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            spec = rng[len("bytes="):].split(",")[0].strip()
+            s, _, e = spec.partition("-")
+            if s:
+                start = int(s)
+                end = int(e) if e else size - 1
+            else:  # Suffix-Range "bytes=-N"
+                start = max(0, size - int(e))
+            end = min(end, size - 1)
+            if start > end or start >= size:
+                self.send_error(416)
+                return
+            status = 206
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        with open(path, "rb") as f:
+            f.seek(start)
+            self.wfile.write(f.read(length))
+
+
+def _read_zarr_via_vsicurl(store: Path) -> tuple:
+    """Oeffnet den Zarr-Store per GDAL /vsicurl/ ueber einen lokalen
+    Range-HTTP-Server - OHNE STAC-Item, die Georeferenz muss also aus dem
+    Store selbst kommen. Gibt (crs, transform_tuple, data_3d) zurueck."""
+    handler = partial(_RangeHTTPHandler, directory=str(store.parent))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        url = f'ZARR:"/vsicurl/http://127.0.0.1:{port}/{store.name}"'
+        with rasterio.open(url) as ds:
+            arr = ds.read()
+            return ds.crs, tuple(ds.transform)[:6], arr
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def _log_stac_media_types() -> None:
@@ -219,7 +299,48 @@ def main() -> int:
         if not matches:
             all_ok = False
 
-    # 6. STAC-Media-Types
+    # 6. Zarr: Georeferenz muss aus dem STORE ALLEIN kommen (kein STAC-Item).
+    #    6a. Konventions-Attribute liegen wirklich in den .zattrs
+    #    6b. GDAL /vsicurl/-Open ueber lokalen Range-HTTP-Server liefert
+    #        CRS + Transform + identische Pixel
+    print("\n[test] zarr-Georeferenz OHNE STAC-Item (GeoZarr/CF + GDAL _CRS)")
+    dem_attrs = json.loads((paths["zarr"] / "DEM" / ".zattrs").read_text())
+    sr_attrs = json.loads((paths["zarr"] / "spatial_ref" / ".zattrs").read_text())
+    conv_ok = (
+        isinstance(dem_attrs.get("_CRS"), dict)
+        and "wkt" in dem_attrs["_CRS"]
+        and dem_attrs.get("grid_mapping") == "spatial_ref"
+        and sr_attrs.get("grid_mapping_name") not in (None, "", "unknown")
+        and "crs_wkt" in sr_attrs
+        and "GeoTransform" in sr_attrs
+    )
+    print(f"  .zattrs: _CRS keys={sorted(dem_attrs.get('_CRS', {}))}, "
+          f"grid_mapping_name={sr_attrs.get('grid_mapping_name')!r}, "
+          f"GeoTransform={'GeoTransform' in sr_attrs}  "
+          f"[{'OK' if conv_ok else 'MISMATCH'}]")
+    if not conv_ok:
+        all_ok = False
+
+    try:
+        vs_crs, vs_tr, vs_arr = _read_zarr_via_vsicurl(paths["zarr"])
+    except Exception as exc:
+        print(f"  /vsicurl-Open FEHLGESCHLAGEN: {type(exc).__name__}: {exc}")
+        all_ok = False
+    else:
+        epsg_ok = vs_crs is not None and vs_crs.to_epsg() == 32633
+        a, b, c, d, e, f = vs_tr
+        tr_ok = (abs(a - src_a) < 1e-6 and abs(e - src_e) < 1e-6
+                 and abs(c - src_c) < 1e-6 and abs(f - src_f) < 1e-6
+                 and abs(b) < 1e-6 and abs(d) < 1e-6)
+        px_ok = np.array_equal(vs_arr, data) and _sha256(vs_arr) == ref_hash
+        marker = "OK" if epsg_ok and tr_ok and px_ok else "MISMATCH"
+        print(f"  /vsicurl: crs={vs_crs}  epsg_ok={epsg_ok}  "
+              f"transform=({a}, {e}, origin=({c}, {f}))  transform_ok={tr_ok}  "
+              f"pixel_identisch={px_ok}  [{marker}]")
+        if not (epsg_ok and tr_ok and px_ok):
+            all_ok = False
+
+    # 7. STAC-Media-Types
     _log_stac_media_types()
 
     print()

@@ -450,6 +450,68 @@ def _build_xarray_dataset(data, dst_meta):
     return ds
 
 
+def _apply_geozarr_metadata(ds, dst_meta) -> None:
+    """Ergaenzt das Dataset in-place um GeoZarr-/GDAL-konforme Georeferenz-
+    Attribute, damit ein reiner Zarr-Open (GDAL, CF-Reader) CRS UND Transform
+    OHNE begleitendes STAC-Item liefert. Nur fuer den zarr-Writer gedacht -
+    netcdf/gtiff bleiben unveraendert. Reine Metadaten: Pixelwerte und
+    .encoding (insb. _FillValue) werden nicht angefasst.
+
+    Drei Konventionen redundant nebeneinander, weil unbekannt ist, welchen
+    Lesepfad CDSE fuer zarr nutzt:
+      1. CF/GeoZarr: vollstaendige grid_mapping-Attribute via
+         pyproj.CRS.to_cf() (echter grid_mapping_name + Projektions-
+         parameter statt des Platzhalters "unknown") auf spatial_ref,
+         plus axis="X"/"Y" auf den Koordinatenvariablen.
+      2. GDAL-NetCDF-Konvention: spatial_ref + GeoTransform auf der
+         grid_mapping-Variable (kommt bereits aus _build_xarray_dataset).
+      3. GDAL-Zarr-Konvention: _CRS-Attribut ({url, wkt, projjson}) direkt
+         am DEM-Array - GDALs Zarr-Treiber liest url -> wkt -> projjson;
+         Treiber-Versionen ohne CF-Support sehen NUR dieses Attribut.
+    """
+    from rasterio.crs import CRS as RIOCRS
+
+    try:
+        crs = RIOCRS.from_user_input(dst_meta["crs"])
+        crs_wkt = crs.to_wkt()
+        epsg = crs.to_epsg()
+    except Exception:
+        crs_wkt = str(dst_meta["crs"])
+        epsg = None
+
+    try:
+        from pyproj import CRS as PJCRS
+        pj = PJCRS.from_user_input(dst_meta["crs"])
+    except Exception:
+        pj = None
+
+    # (1) CF/GeoZarr grid_mapping. update() statt Ersetzen, damit
+    # GeoTransform/spatial_ref aus _build_xarray_dataset erhalten bleiben.
+    if pj is not None and "spatial_ref" in ds:
+        try:
+            ds["spatial_ref"].attrs.update(pj.to_cf())
+        except Exception:
+            pass
+    for name, axis, long_name in (("x", "X", "x coordinate of projection"),
+                                  ("y", "Y", "y coordinate of projection")):
+        if name in ds:
+            ds[name].attrs.setdefault("axis", axis)
+            ds[name].attrs.setdefault("long_name", long_name)
+
+    # (3) GDAL-Zarr _CRS am Datenarray. Muss JSON-serialisierbar sein
+    # (zarr-Attrs landen 1:1 in .zattrs).
+    crs_attr = {"wkt": crs_wkt}
+    if epsg is not None:
+        crs_attr["url"] = f"http://www.opengis.net/def/crs/EPSG/0/{epsg}"
+    if pj is not None:
+        try:
+            crs_attr["projjson"] = json.loads(pj.to_json())
+        except Exception:
+            pass
+    for var in ds.data_vars.values():
+        var.attrs["_CRS"] = crs_attr
+
+
 def _write_dem_as_zarr(data, dst_meta, target_path) -> None:
     """Schreibt data als Zarr-Verzeichnis-Store nach target_path.
     Ueberschreibt einen existierenden Store idempotent.
@@ -461,6 +523,12 @@ def _write_dem_as_zarr(data, dst_meta, target_path) -> None:
         import shutil as _sh
         _sh.rmtree(target, ignore_errors=True)
     ds = _build_xarray_dataset(data, dst_meta)
+    # Georeferenz zusaetzlich IN den Store schreiben (GeoZarr/CF + GDAL
+    # _CRS), damit ein Reader sie auch OHNE das STAC-Item findet. CDSE
+    # ignoriert die proj:-Felder des STAC-Items bei application/vnd+zarr
+    # ("Collected 0 projection metadata entries"); ob sein Zarr-Lesepfad
+    # die Store-Georeferenz auswertet, entscheidet erst ein Serverlauf.
+    _apply_geozarr_metadata(ds, dst_meta)
     # Kompression MUSS aus: xarray schreibt per Default blosc-komprimierte
     # Chunks, und GDALs Zarr-Treiber scheitert daran hart ("Decompressor
     # blosc not handled") - lokal belegt, gleicher Fehler ueber /vsicurl/.
