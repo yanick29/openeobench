@@ -1680,6 +1680,91 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     }
 
 
+def _link_item_into_collection(item: dict, item_url: str,
+                               collection_id: str, collection_url: str) -> None:
+    """Verlinkt ein Standalone-Item in-place in seine Collection.
+
+    Setzt item['collection'] und ersetzt die (bisher leeren) links durch
+    self/root/parent/collection mit ABSOLUTEN URLs - relative hrefs sind
+    auf dem statischen Hetzner-Hosting nicht zuverlaessig aufloesbar.
+    Inhalt (properties, assets, proj-Felder, eo:bands) bleibt unberuehrt.
+    """
+    item["collection"] = collection_id
+    item["links"] = [
+        {"rel": "self", "href": item_url, "type": "application/geo+json"},
+        {"rel": "root", "href": collection_url, "type": "application/json"},
+        {"rel": "parent", "href": collection_url, "type": "application/json"},
+        {"rel": "collection", "href": collection_url,
+         "type": "application/json"},
+    ]
+
+
+def build_dem_stac_collection(collection_id: str, collection_url: str,
+                              item: dict, item_url: str) -> dict:
+    """Minimale valide STAC Collection (1.0.0) um genau EIN DEM-Item.
+
+    Zweck (dem_format=zarr): CDSEs load_stac hat fuer Collection vs.
+    einzelnes Item verschiedene Code-Pfade. Ueber ein Item ignoriert das
+    Backend beim Medientyp application/vnd+zarr saemtliche proj-Metadaten
+    ("Collected 0 projection metadata entries"); ob der Collection-Pfad
+    den zarr-Asset anders behandelt, ist unbekannt und wird hiermit
+    getestet. Deshalb tragen zusaetzlich zur Item-Verlinkung (rel=item)
+    auch item_assets und summaries die proj-/Band-Metadaten - manche
+    Backends lesen Asset-Metadaten von der Collection statt vom Item.
+
+    Alle Angaben werden aus dem fertigen Item abgeleitet, damit Item und
+    Collection nie divergieren koennen.
+    """
+    props = item.get("properties", {})
+    asset = item.get("assets", {}).get("data", {})
+    dt = props.get("datetime")
+
+    item_assets_data = {
+        "type": asset.get("type"),
+        "roles": asset.get("roles", ["data"]),
+    }
+    for key in ("proj:epsg", "proj:shape", "proj:bbox", "proj:transform",
+                "eo:bands", "bands"):
+        if key in asset:
+            item_assets_data[key] = asset[key]
+
+    summaries = {}
+    for key in ("proj:epsg", "proj:shape", "proj:bbox", "proj:transform"):
+        if key in props:
+            summaries[key] = [props[key]]
+    if "eo:bands" in asset:
+        summaries["eo:bands"] = asset["eo:bands"]
+
+    return {
+        "type": "Collection",
+        "stac_version": "1.0.0",
+        "stac_extensions": [
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+            "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+            "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
+        ],
+        "id": collection_id,
+        "description": ("Locally reprojected DEM (zarr store) hosted on "
+                        "Hetzner for openEO load_stac; single-item "
+                        "collection wrapper."),
+        "license": "proprietary",
+        "extent": {
+            "spatial": {"bbox": [list(item["bbox"])]},
+            "temporal": {"interval": [[dt, dt]]},
+        },
+        "item_assets": {"data": item_assets_data},
+        "summaries": summaries,
+        "links": [
+            {"rel": "self", "href": collection_url,
+             "type": "application/json"},
+            {"rel": "root", "href": collection_url,
+             "type": "application/json"},
+            {"rel": "item", "href": item_url,
+             "type": "application/geo+json"},
+        ],
+    }
+
+
 SCP_SSH_TIMEOUT = 120  # Sekunden - haengende Uploads/Logs hart abbrechen
 
 
@@ -2226,6 +2311,12 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     remote_stac_name = f"stac_item_{region}_{run_ts}.json"
     asset_url = f"{HETZNER_URL_BASE}{remote_asset_name}"
     stac_url = f"{HETZNER_URL_BASE}{remote_stac_name}"
+    # Nur zarr: Item wird zusaetzlich in eine minimale STAC COLLECTION
+    # eingebettet und load_stac zeigt auf die Collection statt aufs Item
+    # (CDSE-Codepfad Collection vs. Item ist verschieden; Versuch 4 gegen
+    # "Collected 0 projection metadata entries", s. build_dem_stac_collection).
+    remote_coll_name = f"stac_collection_{region}_{run_ts}.json"
+    collection_url = f"{HETZNER_URL_BASE}{remote_coll_name}"
     cache_dir = Path(args.output_dir) / "dem_cache"
     strategy_label = "local_pp_cached" if args.dem_cache else "local_preprocessing"
 
@@ -2345,13 +2436,29 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
               f"proj:bbox={_stac_asset.get('proj:bbox')}")
         print(f"                   proj:transform={_stac_asset.get('proj:transform')}  "
               f"eo:bands={_stac_asset.get('eo:bands')}")
+        stac_collection = None
+        if dem_format == "zarr":
+            collection_id = f"dem_collection_{region}_{run_ts}"
+            _link_item_into_collection(stac_item, stac_url,
+                                       collection_id, collection_url)
+            stac_collection = build_dem_stac_collection(
+                collection_id, collection_url, stac_item, stac_url)
         local_stac_path = str(base / remote_stac_name)
         with open(local_stac_path, "w") as f:
             json.dump(stac_item, f, indent=2)
         t_stac_build = time.time() - t_stac_start
         t_scp_stac = scp_upload(local_stac_path, remote_stac_name)
+        if stac_collection is not None:
+            local_coll_path = str(base / remote_coll_name)
+            with open(local_coll_path, "w") as f:
+                json.dump(stac_collection, f, indent=2)
+            t_scp_stac += scp_upload(local_coll_path, remote_coll_name)
         t_stac = t_stac_build + t_scp_stac
         print(f"  STAC Item Upload fertig: {stac_url}  ({t_stac:.2f} s)")
+        if stac_collection is not None:
+            print(f"  STAC Collection Upload fertig: {collection_url}  "
+                  f"(Item via rel=item verlinkt, item_assets+summaries "
+                  f"tragen proj/eo:bands)")
 
         # preprocessing_time = Reprojektion + SCP Upload + STAC (OHNE DEM Download)
         preprocessing_time = t_reproject + t_scp_asset + t_stac
@@ -2359,11 +2466,15 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         if t_download is not None and t_download > 0.0:
             print(f"  (DEM Download {t_download:.1f} s separat, nicht in preprocessing_time)")
 
-        # Schritt 5: load_stac Szenario ausfuehren
-        print(f"\n  [Schritt 5/5] load_stac Szenario auf CDSE ausfuehren...")
+        # Schritt 5: load_stac Szenario ausfuehren. Nur bei zarr zeigt
+        # load_stac auf die Collection-URL, gtiff/netcdf unveraendert
+        # weiter direkt auf die Item-URL.
+        load_stac_url = collection_url if dem_format == "zarr" else stac_url
+        print(f"\n  [Schritt 5/5] load_stac Szenario auf CDSE ausfuehren "
+              f"(url={'Collection' if dem_format == 'zarr' else 'Item'})...")
         scenario_filename = f"{strategy_label}_{region}.json"
         local_pp_scenario = build_local_pp_scenario(
-            region, stac_url, base / scenario_filename,
+            region, load_stac_url, base / scenario_filename,
             extent_size=args.extent_size,
             workflow=args.workflow,
         )

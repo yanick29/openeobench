@@ -42,11 +42,14 @@ from run_benchmark import (
     _DEM_FORMAT_EXT,
     _DEM_FORMAT_MEDIA_TYPE,
     _check_dem_format_deps,
+    _grid_from_dst_meta,
+    _link_item_into_collection,
     _reproject_dem_to_array,
     _write_dem_with_layout,
     _write_dem_as_zarr,
     _write_dem_as_netcdf,
     _inspect_asset_size,
+    build_dem_stac_collection,
     build_stac_item,
 )
 
@@ -340,7 +343,82 @@ def main() -> int:
         if not (epsg_ok and tr_ok and px_ok):
             all_ok = False
 
-    # 7. STAC-Media-Types
+    # 7. zarr: STAC-Collection-Wrapper. Bei dem_format=zarr zeigt load_stac
+    #    auf eine Collection statt aufs Item - hier wird lokal geprueft,
+    #    dass Collection + eingebettetes Item strukturell valide sind und
+    #    alle proj-/Band-Metadaten tragen.
+    print("\n[test] STAC Collection fuer zarr (Struktur, Links, proj/eo:bands)")
+    item_url = "http://example.org/stac_item_berlin_TEST.json"
+    coll_url = "http://example.org/stac_collection_berlin_TEST.json"
+    coll_id = "dem_collection_berlin_TEST"
+    item = build_stac_item(
+        region="berlin", asset_href="http://example.org/asset.zarr",
+        epsg=32633, item_id="dem_reprojected_berlin_TEST",
+        dem_format="zarr", grid=_grid_from_dst_meta(dst_meta),
+    )
+    _link_item_into_collection(item, item_url, coll_id, coll_url)
+    coll = build_dem_stac_collection(coll_id, coll_url, item, item_url)
+
+    def _rels(obj):
+        return {l["rel"]: l["href"] for l in obj.get("links", [])}
+
+    coll_rels = _rels(coll)
+    item_rels = _rels(item)
+    proj_keys = ("proj:epsg", "proj:shape", "proj:bbox", "proj:transform")
+    checks = {
+        "coll_pflichtfelder": all(coll.get(k) for k in (
+            "type", "stac_version", "id", "description", "license",
+            "extent", "links")) and coll["type"] == "Collection",
+        "coll_extent": (isinstance(coll["extent"]["spatial"]["bbox"][0], list)
+                        and len(coll["extent"]["spatial"]["bbox"][0]) == 4
+                        and coll["extent"]["temporal"]["interval"][0][0]
+                        is not None),
+        "coll_links_absolut": all(h.startswith("http")
+                                  for h in coll_rels.values()),
+        "coll_rel_item_zeigt_auf_item": coll_rels.get("item") == item_url,
+        "coll_rel_self_root": (coll_rels.get("self") == coll_url
+                               and coll_rels.get("root") == coll_url),
+        "coll_item_assets_proj_bands": all(
+            k in coll.get("item_assets", {}).get("data", {})
+            for k in proj_keys + ("eo:bands",)),
+        "coll_summaries_epsg": coll.get("summaries", {}).get("proj:epsg")
+                               == [32633],
+        "item_in_collection": (item.get("collection") == coll_id
+                               and item_rels.get("collection") == coll_url
+                               and item_rels.get("parent") == coll_url
+                               and item_rels.get("self") == item_url),
+        "item_proj_felder_erhalten": all(
+            k in item["properties"] and k in item["assets"]["data"]
+            for k in proj_keys),
+        "item_eo_bands_erhalten": item["assets"]["data"].get("eo:bands")
+                                  == [{"name": "DEM"}],
+    }
+    for name, ok in checks.items():
+        print(f"  {name:32s} [{'OK' if ok else 'MISMATCH'}]")
+        if not ok:
+            all_ok = False
+
+    # pystac-Schema-Validierung wenn moeglich (braucht jsonschema + Netz
+    # fuer die STAC-Schemas). Ein Validierungs-FEHLER ist ein Testfehler;
+    # fehlende Pakete/Netz nur ein Skip - die Pflichtfeld-Checks oben
+    # laufen immer.
+    try:
+        import pystac
+        from pystac.errors import STACValidationError
+        try:
+            pystac.validation.validate_dict(coll)
+            pystac.validation.validate_dict(item)
+            print("  pystac-Schema-Validierung: Collection + Item OK")
+        except STACValidationError as exc:
+            print(f"  pystac-Schema-Validierung FEHLGESCHLAGEN: {exc}")
+            all_ok = False
+        except Exception as exc:
+            print(f"  pystac-Validierung uebersprungen "
+                  f"(kein Netz/Schema-Download?): {type(exc).__name__}")
+    except ImportError:
+        print("  pystac/jsonschema nicht installiert - nur Pflichtfeld-Checks")
+
+    # 8. STAC-Media-Types
     _log_stac_media_types()
 
     print()
