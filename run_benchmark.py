@@ -963,6 +963,20 @@ def _compute_extent(region: str, extent_size: str) -> dict:
     }
 
 
+def _utm_zone_for_lon(lon: float) -> int:
+    """UTM-Zonennummer (1-60) fuer einen Laengengrad."""
+    return int((float(lon) + 180.0) // 6.0) % 60 + 1
+
+
+def _extent_spans_multiple_utm_zones(extent: dict) -> bool:
+    """True wenn der Laengenbereich [west, east] mehr als eine 6-Grad-UTM-Zone
+    beruehrt. Die MGRS-Sonderzonen (Norwegen/Svalbard, lat 56-84) liegen
+    ausserhalb aller Benchmark-Regionen und werden ignoriert.
+    """
+    return (_utm_zone_for_lon(extent["west"])
+            != _utm_zone_for_lon(extent["east"]))
+
+
 def _apply_extent_to_template(template: dict, new_extent: dict) -> None:
     """In-place: ersetzt jeden spatial_extent-Dict im Process Graph."""
     pg = template.get("process_graph", {})
@@ -1227,12 +1241,70 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
     raise ValueError(f"Unbekannter Workflow: {workflow}")
 
 
+def _force_onthefly_target_crs(pg: dict, target_epsg: int) -> None:
+    """In-place: haengt resample_spatial(target_epsg, 10 m, near) hinter
+    loadcollection1 (S2) und biegt alle Verbraucher darauf um.
+
+    Zweck: Ueberspannt der Extent eine UTM-Zonengrenze, liegen die S2-Daten
+    in zwei Zonen (z.B. 32632+32633) und CDSE bricht ohne Ziel-CRS-Vorgabe
+    beim Bounding-Box-Merge ab ("no target CRS specified, but multiple
+    CRSes across input"). Das explizite Ziel-CRS zwingt alle S2-Eingaben in
+    die primaere Zone der Region; das DEM (EPSG:4326) folgt danach wie
+    bisher implizit dem cube1-Grid im merge_cubes.
+
+    Knotenname bewusst NICHT resamplespatial1/2 - diese Namen sind die
+    Workflow-Signatur von workflow=resample (_detect_pg_workflow).
+    """
+    def _retarget(obj):
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                if (isinstance(val, dict)
+                        and val.get("from_node") == "loadcollection1"):
+                    obj[key] = {"from_node": "resampletargetcrs1"}
+                else:
+                    _retarget(val)
+        elif isinstance(obj, list):
+            for item in obj:
+                _retarget(item)
+
+    for node in pg.values():
+        if isinstance(node, dict):
+            _retarget(node.get("arguments"))
+    pg["resampletargetcrs1"] = {
+        "arguments": {
+            "data": {"from_node": "loadcollection1"},
+            "projection": target_epsg,
+            "resolution": 10,
+            "method": "near",
+        },
+        "process_id": "resample_spatial",
+    }
+
+
 def build_onthefly_scenario(region: str, target_path: Path,
                             extent_size: str = "medium",
-                            workflow: str = "merge_add") -> Path:
-    """Onthefly = Workflow-PG aus bench_onthefly_{region}.json gebaut."""
+                            workflow: str = "merge_add",
+                            force_target_crs: bool = False) -> Path:
+    """Onthefly = Workflow-PG aus bench_onthefly_{region}.json gebaut.
+
+    Ueberspannt der Extent mehrere UTM-Zonen (oder ist force_target_crs
+    gesetzt), bekommt der Graph ein explizites Ziel-CRS (primaere UTM-Zone
+    der Region, s. _force_onthefly_target_crs). Ein-Zonen-Extents bleiben
+    byte-identisch zum bisherigen Graphen.
+    """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region)
+    extent = template["process_graph"]["loadcollection1"]["arguments"][
+        "spatial_extent"]
+    spans_zones = _extent_spans_multiple_utm_zones(extent)
+    if force_target_crs or spans_zones:
+        target_epsg = REGIONS[region]["epsg"]
+        reason = ("Extent ueberspannt UTM-Zonen "
+                  f"{_utm_zone_for_lon(extent['west'])}+"
+                  f"{_utm_zone_for_lon(extent['east'])}"
+                  if spans_zones else "--force-target-crs")
+        print(f"  onthefly: explizites Ziel-CRS EPSG:{target_epsg} ({reason})")
+        _force_onthefly_target_crs(pg, target_epsg)
     with open(target_path, "w") as f:
         json.dump({"process_graph": pg}, f, indent=2)
     return target_path
@@ -2177,6 +2249,7 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
             args.region, outdir / "scenario_onthefly.json",
             extent_size=args.extent_size,
             workflow=args.workflow,
+            force_target_crs=getattr(args, "force_target_crs", False),
         )
         results = run_openeo(args.api_url, str(scenario_path), str(outdir),
                              job_timeout=args.job_timeout)
@@ -4124,6 +4197,19 @@ def main() -> None:
                              "Override z.B. EPSG:3035 (LAEA) oder EPSG:4326 "
                              "(WGS84) erzwingt eine echte CRS-Transformation "
                              "CDSE-seitig beim merge_cubes.")
+    parser.add_argument("--force-target-crs", action="store_true",
+                        help="Nur onthefly: explizites Ziel-CRS (primaere "
+                             "UTM-Zone der Region) auch dann in den Graphen "
+                             "setzen, wenn der Extent nur EINE UTM-Zone "
+                             "beruehrt. Bei Extents ueber einer Zonengrenze "
+                             "(z.B. berlin xxlarge) passiert das automatisch, "
+                             "weil CDSE sonst am Multi-CRS-Input scheitert "
+                             "('no target CRS specified, but multiple CRSes "
+                             "across input'). Achtung: die erzwungene "
+                             "Projektion ueber die Zonengrenze verzerrt "
+                             "zonenfremde Daten zunehmend mit dem Abstand "
+                             "zur Zielzone - das ist der Messgegenstand, "
+                             "kein Neutralum.")
     parser.add_argument("--reproject-s2", action="store_true",
                         help="Nur fuer full_preprocessing + --target-crs: "
                              "Auch die S2-Raster lokal nach --target-crs "
