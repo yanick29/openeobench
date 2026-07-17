@@ -771,8 +771,9 @@ def _verify_snap_crop_identity(data_snapped, meta_snapped,
     liegen auf demselben 10-m-Gitter (beide Urspruenge Vielfache der
     Aufloesung), also MUESSEN die Pixelwerte im ueberlappenden Bereich
     bitgenau identisch sein - das Snapping darf nur zuschneiden, nie
-    Werte veraendern. Vergleich per np.array_equal auf der Schnittmenge
-    der beiden Extents.
+    Werte veraendern. Vergleich NaN-bewusst auf der Schnittmenge der
+    beiden Extents (beidseitig NaN = Nodata = identisch, NaN-vs-Wert =
+    Mismatch).
 
     Die Fenster werden hier UNABHAENGIG von _crop_to_grid aus den
     Geo-Koordinaten beider Metas hergeleitet - der Test validiert damit
@@ -814,14 +815,41 @@ def _verify_snap_crop_identity(data_snapped, meta_snapped,
 
     rs, cs = _window(ts)
     ru, cu = _window(tu)
-    identical = np.array_equal(data_snapped[:, rs, cs],
-                               data_unsnapped[:, ru, cu])
+    a = data_snapped[:, rs, cs]
+    b = data_unsnapped[:, ru, cu]
+    if a.shape != b.shape:
+        print(f"  [Crop-Identitaet] FEHLER: Fenster-Shapes ungleich "
+              f"({a.shape} vs {b.shape}) - Fenster ragt aus einem der "
+              f"Puffer heraus.")
+        return False
+
+    # NaN-bewusster Identitaetsvergleich: die DEM-Puffer tragen NaN als
+    # Nodata (Warp-Slivers an den Raendern liegen auch IN der
+    # Schnittmenge). np.array_equal allein meldet dort MISMATCH, obwohl
+    # die Arrays bitgenau identisch sind (NaN != NaN, IEEE 754) - genau
+    # dieser Fehlalarm brach reale Snap-Laeufe ab. Beide-NaN zaehlt als
+    # identisch; NaN-vs-Wert bleibt ein echter Mismatch.
+    diff = a != b
+    n_both_nan = 0
+    if a.dtype.kind == "f":
+        both_nan = np.isnan(a) & np.isnan(b)
+        n_both_nan = int(both_nan.sum())
+        diff &= ~both_nan
+    n_diff = int(diff.sum())
+    identical = n_diff == 0
     n_px = (rs.stop - rs.start) * (cs.stop - cs.start)
+    detail = ""
+    if n_diff:
+        d = np.abs(a[diff].astype("float64") - b[diff].astype("float64"))
+        finite = d[np.isfinite(d)]
+        detail = (f", max|diff|={finite.max()}" if finite.size
+                  else ", nur NaN-vs-Wert-Paare")
     print(f"  [Crop-Identitaet] Schnittmenge (l,b,r,t)=({inter_left}, "
           f"{inter_bottom}, {inter_right}, {inter_top}), "
           f"{rs.stop - rs.start}x{cs.stop - cs.start} px "
-          f"({n_px} Pixel/Band): np.array_equal="
-          f"{identical}  [{'OK' if identical else 'MISMATCH'}]")
+          f"({n_px} Pixel/Band): {n_diff} Pixel abweichend"
+          f"{detail}, {n_both_nan} beidseitig NaN (Nodata) "
+          f"[{'OK' if identical else 'MISMATCH'}]")
     return identical
 
 
