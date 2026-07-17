@@ -1368,12 +1368,27 @@ def build_dem_download_scenario(region: str, target_path: Path,
 def build_local_pp_scenario(region: str, stac_item_url: str,
                             target_path: Path,
                             extent_size: str = "medium",
-                            workflow: str = "merge_add") -> Path:
+                            workflow: str = "merge_add",
+                            resample_s2_to_dem: bool = False) -> Path:
     """
     Erzeugt das load_stac Szenario fuer den gewuenschten Workflow:
     Workflow-PG (s. _build_workflow_pg) wird gebaut, dann wird
     loadcollection2 (DEM) durch loadstac1 ersetzt, das auf die
     Hetzner-STAC-Item-URL zeigt.
+
+    resample_s2_to_dem (--resample-s2-to-dem): umgekehrte Gitter-Hoheit.
+    Statt dass CDSE das per load_stac geladene DEM beim merge_cubes auf
+    sein S2-abgeleitetes Zielgitter zwingt (zweites, serverseitiges
+    Resampling), wird S2 VOR dem merge per
+    resample_cube_spatial(data=S2, target=DEM) auf das DEM-Gitter
+    ausgerichtet. Per openEO-Spec uebernimmt data dabei Aufloesung/CRS/
+    Alignment des target-Cubes; NUR S2 wird resampled, das DEM (der
+    zeitlose reducedimension_dem-Cube) laeuft durch KEIN Resample.
+    method='near': konsistent zur Repo-Konvention (nearest ist der
+    pixelwert-erhaltende Default der lokalen Pipeline; bilinear/cubic
+    wuerden S2-Werte glaetten und den MAE-Vergleich verfaelschen).
+    Ob CDSE das DEM-Gitter dann wirklich uebernimmt, zeigt erst der
+    Serverlauf (Ursprung des Ergebnis-Grids).
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region)
@@ -1404,6 +1419,31 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     # genau das was wir wollen: das eine Band heisst danach "B04".
     if "renamelabels1" in pg:
         pg["renamelabels1"]["arguments"]["source"] = []
+
+    if resample_s2_to_dem:
+        # S2 auf das DEM-Gitter ausrichten: alle bisherigen Verbraucher
+        # von loadcollection1 (merge1.cube1, bei workflow=mask die beiden
+        # filter_bands-Knoten) auf den neuen Resample-Knoten umbiegen.
+        # Knotenname bewusst NICHT resamplespatial1/2 - das ist die
+        # Workflow-Signatur von workflow=resample (_detect_pg_workflow).
+        def _retarget_s2(node_args):
+            for k, v in list(node_args.items()):
+                if isinstance(v, dict):
+                    if v.get("from_node") == "loadcollection1":
+                        node_args[k] = {"from_node": "resamplecubespatial1"}
+                    else:
+                        _retarget_s2(v)
+        for node in pg.values():
+            if isinstance(node, dict) and isinstance(node.get("arguments"), dict):
+                _retarget_s2(node["arguments"])
+        pg["resamplecubespatial1"] = {
+            "arguments": {
+                "data": {"from_node": "loadcollection1"},
+                "target": {"from_node": "reducedimension_dem"},
+                "method": "near",
+            },
+            "process_id": "resample_cube_spatial",
+        }
 
     scenario = {"process_graph": pg}
     with open(target_path, "w") as f:
@@ -2425,7 +2465,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     print(f"  Strategie: {strategy_label}  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
     print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}  |  DEM-Format: {dem_format}"
           + (f"  |  Layout: {dem_layout}" if dem_format == "gtiff" else "")
-          + ("  |  Snap: s2" if snap_to_s2 else ""))
+          + ("  |  Snap: s2" if snap_to_s2 else "")
+          + ("  |  Gitter-Hoheit: DEM (resample_cube_spatial S2->DEM)"
+             if getattr(args, "resample_s2_to_dem", False) else ""))
 
     try:
         # Schritt 1: DEM aus Cache laden oder herunterladen (Download NICHT in preprocessing_time)
@@ -2578,6 +2620,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             region, load_stac_url, base / scenario_filename,
             extent_size=args.extent_size,
             workflow=args.workflow,
+            resample_s2_to_dem=getattr(args, "resample_s2_to_dem", False),
         )
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
                                    job_timeout=args.job_timeout)
@@ -4225,6 +4268,18 @@ def main() -> None:
                              "Override z.B. EPSG:3035 (LAEA) oder EPSG:4326 "
                              "(WGS84) erzwingt eine echte CRS-Transformation "
                              "CDSE-seitig beim merge_cubes.")
+    parser.add_argument("--resample-s2-to-dem", action="store_true",
+                        help="Nur local_preprocessing: umgekehrte Gitter-"
+                             "Hoheit. S2 wird VOR merge_cubes per "
+                             "resample_cube_spatial(data=S2, target=DEM, "
+                             "method=near) auf das Gitter des per load_stac "
+                             "geladenen DEM ausgerichtet, statt dass CDSE "
+                             "das DEM auf sein S2-abgeleitetes Zielgitter "
+                             "zwingt (zweites serverseitiges Resampling). "
+                             "NUR S2 wird resampled, das DEM laeuft durch "
+                             "kein Resample. Ob CDSE das DEM-Gitter wirklich "
+                             "uebernimmt, zeigt der Ursprung des Ergebnis-"
+                             "Grids im Serverlauf. Default AUS.")
     parser.add_argument("--force-target-crs", action="store_true",
                         help="Nur onthefly: explizites Ziel-CRS (primaere "
                              "UTM-Zone der Region) auch dann in den Graphen "
