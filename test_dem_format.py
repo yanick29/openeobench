@@ -183,13 +183,20 @@ class _RangeHTTPHandler(SimpleHTTPRequestHandler):
 def _read_zarr_via_vsicurl(store: Path) -> tuple:
     """Oeffnet den Zarr-Store per GDAL /vsicurl/ ueber einen lokalen
     Range-HTTP-Server - OHNE STAC-Item, die Georeferenz muss also aus dem
-    Store selbst kommen. Gibt (crs, transform_tuple, data_3d) zurueck."""
+    Store selbst kommen. Gibt (crs, transform_tuple, data_3d) zurueck.
+
+    Seit Versuch 5 (Store ohne .zmetadata) geht der Open ueber den
+    direkten ARRAY-Subpfad ZARR:"...":/DEM: ohne konsolidierte Metadaten
+    kann GDAL den Store-ROOT ueber HTTP nicht oeffnen (404 - kein
+    Directory-Listing), der Subpfad braucht nur die einzelnen
+    .zarray/.zattrs und liefert CRS+Transform weiterhin aus dem Store
+    (lokal belegt, GDAL 3.12). Pfad case-sensitiv wie auf dem nginx."""
     handler = partial(_RangeHTTPHandler, directory=str(store.parent))
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         port = server.server_address[1]
-        url = f'ZARR:"/vsicurl/http://127.0.0.1:{port}/{store.name}"'
+        url = f'ZARR:"/vsicurl/http://127.0.0.1:{port}/{store.name}":/DEM'
         with rasterio.open(url) as ds:
             arr = ds.read()
             return ds.crs, tuple(ds.transform)[:6], arr
@@ -307,6 +314,24 @@ def main() -> int:
     #    6b. GDAL /vsicurl/-Open ueber lokalen Range-HTTP-Server liefert
     #        CRS + Transform + identische Pixel
     print("\n[test] zarr-Georeferenz OHNE STAC-Item (GeoZarr/CF + GDAL _CRS)")
+
+    # 6c (Versuch 5): Store ist UNKONSOLIDIERT - kein .zmetadata, und
+    # 'shape' liegt in jeder einzelnen .zarray (Kern der Hypothese gegen
+    # CDSEs "missing key: 'shape'").
+    zmeta_absent = not (paths["zarr"] / ".zmetadata").exists()
+    shape_ok = True
+    for arr_dir in sorted(p for p in paths["zarr"].iterdir() if p.is_dir()):
+        zarray = arr_dir / ".zarray"
+        has_shape = (zarray.exists()
+                     and "shape" in json.loads(zarray.read_text()))
+        if not has_shape:
+            shape_ok = False
+        print(f"  {arr_dir.name}/.zarray: shape={'OK' if has_shape else 'FEHLT'}")
+    print(f"  .zmetadata abwesend={zmeta_absent}  "
+          f"[{'OK' if zmeta_absent and shape_ok else 'MISMATCH'}]")
+    if not (zmeta_absent and shape_ok):
+        all_ok = False
+
     dem_attrs = json.loads((paths["zarr"] / "DEM" / ".zattrs").read_text())
     sr_attrs = json.loads((paths["zarr"] / "spatial_ref" / ".zattrs").read_text())
     conv_ok = (

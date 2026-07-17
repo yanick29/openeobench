@@ -539,9 +539,23 @@ def _write_dem_as_zarr(data, dst_meta, target_path) -> None:
     # wuerde die in _build_xarray_dataset gesetzte _FillValue verwerfen.
     for name in ds.variables:
         ds[name].encoding["compressor"] = None
-    # Konsolidierte Metadaten (.zmetadata) explizit, damit GDAL den Store
-    # ueber HTTP ohne Directory-Listing versteht.
-    ds.to_zarr(str(target), mode="w", consolidated=True)
+    # Versuch 5: OHNE konsolidierte Metadaten (.zmetadata) schreiben.
+    # CDSE scheitert an diesem Store mit "Can't parse the zarr array
+    # metadata, missing key: 'shape'". Die Meldung ist eine Python-
+    # KeyError-Signatur ('shape' mit Quotes) und stammt damit NICHT aus
+    # GDALs C++-Zarr-Treiber (der meldet "shape missing or not an
+    # array", zarr_v2_array.cpp) - sondern aus einem CDSE-seitigen
+    # Parser. Hypothese: der stolpert beim Iterieren der konsolidierten
+    # metadata-Map ueber Eintraege ohne 'shape' (".zgroup"/".zattrs").
+    # Ohne .zmetadata liegt 'shape' garantiert (nur) in jeder einzelnen
+    # .zarray. TRADE-OFF (lokal belegt, GDAL 3.12): ohne .zmetadata kann
+    # GDAL den Store-ROOT per /vsicurl NICHT mehr oeffnen (404, kein
+    # Directory-Listing ueber HTTP); der direkte Array-Subpfad
+    # ZARR:"/vsicurl/...":/DEM liefert weiterhin CRS+Transform+Pixel
+    # (test_dem_format Schritt 6). Ob CDSE damit klarkommt, entscheidet
+    # der Serverlauf - bleibt "missing key: 'shape'", ist die Hypothese
+    # widerlegt und zarr fuenffach belegte Backend-Grenze.
+    ds.to_zarr(str(target), mode="w", consolidated=False)
 
 
 def _write_dem_as_netcdf(data, dst_meta, target_path) -> None:
