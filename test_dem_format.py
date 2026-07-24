@@ -45,11 +45,16 @@ from run_benchmark import (
     _grid_from_dst_meta,
     _link_item_into_collection,
     _reproject_dem_to_array,
+    _split_dem_into_tiles,
+    _tile_grid_layout,
+    _verify_tile_union_identity,
+    _wgs84_extent_from_meta,
     _write_dem_with_layout,
     _write_dem_as_zarr,
     _write_dem_as_netcdf,
     _inspect_asset_size,
     build_dem_stac_collection,
+    build_dem_tiles_collection,
     build_stac_item,
 )
 
@@ -443,7 +448,129 @@ def main() -> int:
     except ImportError:
         print("  pystac/jsonschema nicht installiert - nur Pflichtfeld-Checks")
 
-    # 8. STAC-Media-Types
+    # 8. --dem-tiles: 2x2-Zerlegung aus demselben Puffer. Pflichttest:
+    #    Vereinigung der Kacheln == Einzel-DEM, bitgenau - einmal
+    #    in-memory (dieselbe Verifikation wie im Benchmark vor dem
+    #    Upload) und einmal ueber den vollen Write/Read-Roundtrip der
+    #    vier GeoTIFFs (Fenster-Offsets unabhaengig aus den Geotransforms
+    #    der geschriebenen Dateien hergeleitet).
+    print("\n[test] --dem-tiles: 2x2-Kacheln (Union bitgenau == Einzel-DEM?)")
+    assert _tile_grid_layout(4) == (2, 2)
+    tiles = _split_dem_into_tiles(data, dst_meta, 4)
+    if not _verify_tile_union_identity(tiles, data, dst_meta):
+        all_ok = False
+
+    t0 = dst_meta["transform"]
+    assembled = np.zeros_like(data)
+    cover = np.zeros((dst_meta["height"], dst_meta["width"]), dtype=np.uint8)
+    tile_grids = []
+    for i, (tile_data, tile_meta) in enumerate(tiles):
+        tile_path = tmp / f"tile{i}.tif"
+        _write_dem_with_layout(tile_data, tile_meta, str(tile_path),
+                               layout="striped")
+        arr, crs, tr = _read_gtiff(tile_path)
+        col_off = int(round((tr.c - t0.c) / t0.a))
+        row_off = int(round((tr.f - t0.f) / t0.e))
+        th, tw = arr.shape[1], arr.shape[2]
+        assembled[:, row_off:row_off + th, col_off:col_off + tw] = arr
+        cover[row_off:row_off + th, col_off:col_off + tw] += 1
+        tile_grids.append(_grid_from_dst_meta(tile_meta))
+        print(f"  tile{i}: shape=({th}, {tw})  offset=({row_off}, {col_off})  "
+              f"crs={crs}")
+    roundtrip_ok = (bool((cover == 1).all())
+                    and np.array_equal(assembled, data)
+                    and _sha256(assembled) == ref_hash)
+    print(f"  Roundtrip-Union: sha256={_sha256(assembled)}  "
+          f"array_equal={np.array_equal(assembled, data)}  "
+          f"abdeckung_1x={bool((cover == 1).all())}  "
+          f"[{'OK' if roundtrip_ok else 'MISMATCH'}]")
+    if not roundtrip_ok:
+        all_ok = False
+
+    # 8b. STAC-Struktur fuer die Kacheln: Collection mit VIER Items (je
+    #     ein Asset). Begruendung s. build_dem_tiles_collection - mehrere
+    #     Assets gleichen Bandnamens in EINEM Item wuerde der
+    #     geopyspark-Treiber bis auf das erste stumm verwerfen.
+    print("\n[test] STAC Collection fuer --dem-tiles "
+          "(4 Items, per-Kachel proj-Felder)")
+    tiles_coll_url = "http://example.org/stac_collection_berlin_TILES.json"
+    tiles_coll_id = "dem_collection_berlin_TILES"
+    items_with_urls = []
+    for i, (_tile_data, tile_meta) in enumerate(tiles):
+        item_url_i = f"http://example.org/stac_item_berlin_TILES_tile{i}.json"
+        itm = build_stac_item(
+            region="berlin",
+            asset_href=f"http://example.org/asset_tile{i}.tif",
+            epsg=32633, item_id=f"dem_reprojected_berlin_TILES_tile{i}",
+            extent=_wgs84_extent_from_meta(tile_meta),
+            dem_format="gtiff", grid=_grid_from_dst_meta(tile_meta),
+        )
+        _link_item_into_collection(itm, item_url_i, tiles_coll_id,
+                                   tiles_coll_url)
+        items_with_urls.append((itm, item_url_i))
+    tiles_coll = build_dem_tiles_collection(tiles_coll_id, tiles_coll_url,
+                                            items_with_urls)
+
+    tc_rels = [l for l in tiles_coll["links"] if l["rel"] == "item"]
+    per_item_ok = True
+    for i, ((itm, item_url_i), grid) in enumerate(zip(items_with_urls,
+                                                      tile_grids)):
+        a = itm["assets"]["data"]
+        left, bottom, right, top = grid["bounds"]
+        ok = (a.get("proj:shape") == [grid["height"], grid["width"]]
+              and a.get("proj:bbox") == [left, bottom, right, top]
+              and itm["properties"].get("proj:shape") == [grid["height"],
+                                                          grid["width"]]
+              and a.get("eo:bands") == [{"name": "DEM"}]
+              and itm.get("collection") == tiles_coll_id
+              and all(l["href"].startswith("http")
+                      for l in itm["links"]))
+        if not ok:
+            per_item_ok = False
+        print(f"  tile{i}: proj:shape/bbox passend zum Ausschnitt "
+              f"[{'OK' if ok else 'MISMATCH'}]")
+    union_bbox = tiles_coll["extent"]["spatial"]["bbox"][0]
+    item_bboxes = [itm["bbox"] for itm, _ in items_with_urls]
+    coll_checks = {
+        "coll_4_rel_item_links": (
+            len(tc_rels) == 4
+            and [l["href"] for l in tc_rels]
+            == [u for _, u in items_with_urls]),
+        "coll_links_absolut": all(l["href"].startswith("http")
+                                  for l in tiles_coll["links"]),
+        "coll_bbox_union": union_bbox == [
+            min(b[0] for b in item_bboxes), min(b[1] for b in item_bboxes),
+            max(b[2] for b in item_bboxes), max(b[3] for b in item_bboxes)],
+        "coll_item_assets_ohne_geometrie": (
+            "proj:shape" not in tiles_coll["item_assets"]["data"]
+            and "proj:bbox" not in tiles_coll["item_assets"]["data"]
+            and tiles_coll["item_assets"]["data"].get("eo:bands")
+            == [{"name": "DEM"}]),
+        "per_item_proj_felder": per_item_ok,
+    }
+    for name, ok in coll_checks.items():
+        print(f"  {name:32s} [{'OK' if ok else 'MISMATCH'}]")
+        if not ok:
+            all_ok = False
+
+    try:
+        import pystac
+        from pystac.errors import STACValidationError
+        try:
+            pystac.validation.validate_dict(tiles_coll)
+            for itm, _ in items_with_urls:
+                pystac.validation.validate_dict(itm)
+            print("  pystac-Schema-Validierung: Tiles-Collection + 4 Items OK")
+        except STACValidationError as exc:
+            print(f"  pystac-Schema-Validierung FEHLGESCHLAGEN: {exc}")
+            all_ok = False
+        except Exception as exc:
+            print(f"  pystac-Validierung uebersprungen "
+                  f"(kein Netz/Schema-Download?): {type(exc).__name__}")
+    except ImportError:
+        print("  pystac/jsonschema nicht installiert - nur Pflichtfeld-Checks")
+
+    # 9. STAC-Media-Types
     _log_stac_media_types()
 
     print()

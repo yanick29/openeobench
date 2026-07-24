@@ -754,6 +754,115 @@ def _crop_to_grid(data, dst_meta: dict, target_grid: dict):
     return cropped, cropped_meta
 
 
+def _tile_grid_layout(n: int) -> tuple:
+    """Zerlegt n in (rows, cols) moeglichst quadratisch mit rows*cols == n
+    exakt (4 -> 2x2, 6 -> 2x3, Primzahl p -> 1xp). Keine leeren Kacheln,
+    keine Reste - jede Kachel existiert und traegt Daten.
+    """
+    rows = max(1, int(math.isqrt(n)))
+    while n % rows != 0:
+        rows -= 1
+    return rows, n // rows
+
+
+def _split_dem_into_tiles(data, dst_meta: dict, n: int) -> list:
+    """Zerlegt den reprojizierten Puffer in n raeumliche Kacheln
+    (row-major, rows x cols aus _tile_grid_layout). Gibt eine Liste von
+    (tile_data, tile_meta) zurueck - tile_meta ist ein vollstaendiges
+    rasterio-meta-Dict mit der Geotransform des Ausschnitts.
+
+    Reines Array-Slicing ueber _crop_to_grid, KEIN zweiter Warp - dieselbe
+    Begruendung wie bei --snap-dem-to-s2: GDALs Warp ist nicht
+    frame-invariant, nur der Crop garantiert, dass die Vereinigung der
+    Kacheln bitgenau dem Einzel-DEM entspricht. Die Kachelgrenzen sind
+    ganzzahlige Pixel-Offsets (i*H//rows bzw. i*W//cols) - luecken- und
+    ueberlappungsfrei per Konstruktion, Randkacheln tragen den Rest.
+    """
+    rows, cols = _tile_grid_layout(n)
+    height, width = int(dst_meta["height"]), int(dst_meta["width"])
+    if height < rows or width < cols:
+        raise ValueError(
+            f"_split_dem_into_tiles: DEM ({height}x{width} px) ist kleiner "
+            f"als das Kachelraster ({rows}x{cols}) - --dem-tiles verkleinern.")
+    t = dst_meta["transform"]
+    row_edges = [r * height // rows for r in range(rows + 1)]
+    col_edges = [c * width // cols for c in range(cols + 1)]
+    tiles = []
+    for r in range(rows):
+        for c in range(cols):
+            row_off, col_off = row_edges[r], col_edges[c]
+            tile_grid = {
+                "transform": t * Affine.translation(col_off, row_off),
+                "width": col_edges[c + 1] - col_off,
+                "height": row_edges[r + 1] - row_off,
+            }
+            tiles.append(_crop_to_grid(data, dst_meta, tile_grid))
+    return tiles
+
+
+def _wgs84_extent_from_meta(meta: dict) -> dict:
+    """WGS84-Extent (west/south/east/north) eines Puffers/Kachel-meta -
+    fuer geometry/bbox des per-Kachel-STAC-Items (das Region-Extent waere
+    fuer eine Einzelkachel falsch)."""
+    left, bottom, right, top = array_bounds(
+        meta["height"], meta["width"], meta["transform"])
+    w, s, e, n = transform_bounds(meta["crs"], "EPSG:4326",
+                                  left, bottom, right, top)
+    return {"west": w, "south": s, "east": e, "north": n}
+
+
+def _verify_tile_union_identity(tiles: list, data, dst_meta: dict) -> bool:
+    """Pflichttest fuer --dem-tiles: die Vereinigung der Kacheln muss dem
+    Einzel-DEM bitgenau entsprechen.
+
+    Prueft (1) lueckenlose, ueberlappungsfreie Abdeckung (Coverage-Zaehler
+    pro Pixel == 1), (2) Byte-Identitaet des zusammengesetzten Arrays
+    (SHA-unabhaengig via tobytes - NaN-sicher, vgl. crop_identity-
+    Fehlalarm: NaN != NaN laesst np.array_equal bei float-Nodata
+    fehlschlagen), (3) np.array_equal (equal_nan bei float) und (4) dass
+    die Vereinigung der Kachel-Extents exakt den Gesamt-Extent ergibt.
+    Die Fenster-Offsets werden unabhaengig aus den Geotransforms
+    hergeleitet, nicht aus der Konstruktionsreihenfolge.
+    """
+    import numpy as np
+    t0 = dst_meta["transform"]
+    height, width = int(dst_meta["height"]), int(dst_meta["width"])
+    assembled = np.zeros_like(data)
+    cover = np.zeros((height, width), dtype=np.uint8)
+    lefts, bottoms, rights, tops = [], [], [], []
+    for tile_data, tile_meta in tiles:
+        tt = tile_meta["transform"]
+        col_off = int(round((tt.c - t0.c) / t0.a))
+        row_off = int(round((tt.f - t0.f) / t0.e))
+        th, tw = int(tile_meta["height"]), int(tile_meta["width"])
+        assembled[:, row_off:row_off + th, col_off:col_off + tw] = tile_data
+        cover[row_off:row_off + th, col_off:col_off + tw] += 1
+        l, b, r, tp = array_bounds(th, tw, tt)
+        lefts.append(l); bottoms.append(b); rights.append(r); tops.append(tp)
+    coverage_ok = bool((cover == 1).all())
+    bit_ok = assembled.tobytes() == data.tobytes()
+    if np.issubdtype(data.dtype, np.floating):
+        eq_ok = np.array_equal(assembled, data, equal_nan=True)
+    else:
+        eq_ok = np.array_equal(assembled, data)
+    full_l, full_b, full_r, full_t = array_bounds(height, width, t0)
+    extent_ok = (abs(min(lefts) - full_l) < 1e-6
+                 and abs(min(bottoms) - full_b) < 1e-6
+                 and abs(max(rights) - full_r) < 1e-6
+                 and abs(max(tops) - full_t) < 1e-6)
+    shape_sum = sum(tm["height"] * tm["width"] for _, tm in tiles)
+    shape_ok = shape_sum == height * width
+    print(f"  [Tile-Verifikation] {len(tiles)} Kacheln vs. Einzel-DEM "
+          f"({height}x{width} px):")
+    print(f"    Abdeckung 1x pro Pixel   {'OK' if coverage_ok else 'MISMATCH'}")
+    print(f"    Byte-Identitaet (Union)  {'OK' if bit_ok else 'MISMATCH'}")
+    print(f"    np.array_equal           {'OK' if eq_ok else 'MISMATCH'}")
+    print(f"    Pixel-Summe der Shapes   {'OK' if shape_ok else 'MISMATCH'} "
+          f"({shape_sum} vs {height * width})")
+    print(f"    Extent-Vereinigung       {'OK' if extent_ok else 'MISMATCH'}")
+    return coverage_ok and bit_ok and eq_ok and shape_ok and extent_ok
+
+
 def _verify_snap_grid(dst_meta: dict, expected_grid: dict) -> bool:
     """Log-Block: tatsaechliches Grid des reprojizierten Puffers gegen das
     erwartete CDSE-Zielgitter (projizierter Extent, outward auf 10 m).
@@ -1919,6 +2028,82 @@ def build_dem_stac_collection(collection_id: str, collection_url: str,
     }
 
 
+def build_dem_tiles_collection(collection_id: str, collection_url: str,
+                               items_with_urls: list) -> dict:
+    """STAC Collection (1.0.0) ueber N raeumliche DEM-Kachel-Items
+    (--dem-tiles).
+
+    items_with_urls: Liste von (item, item_url) - ein Item pro Kachel,
+    jedes mit genau einem data-Asset und EIGENEN proj-Feldern fuer seinen
+    Ausschnitt.
+
+    Struktur-Begruendung (Schritt-0-Recherche): CDSEs geopyspark-Treiber
+    dedupliziert mehrere Assets gleichen Bandnamens INNERHALB eines Items
+    (NoveltyTracker in load_stac.py - nur das erste Asset wird geladen,
+    der Rest stumm verworfen); raeumlich mosaikiert wird ausschliesslich
+    UEBER Items (per-SpatialKey merge in FileLayerProvider.scala - der
+    Sentinel-2-Normalfall: Item = Kachel, Assets = Baender). Deshalb
+    Collection mit N Items statt ein Item mit N Assets.
+
+    item_assets/summaries tragen nur die kachel-INVARIANTEN Metadaten
+    (media type, Rollen, Band, EPSG). Die per-Kachel-Geometrie
+    (proj:shape/bbox/transform) steht NUR in den Items - ein
+    Collection-weiter Wert waere fuer jede Kachel falsch.
+    """
+    first_item = items_with_urls[0][0]
+    first_asset = first_item["assets"]["data"]
+    dt = first_item["properties"].get("datetime")
+
+    bboxes = [it["bbox"] for it, _ in items_with_urls]
+    union_bbox = [min(b[0] for b in bboxes), min(b[1] for b in bboxes),
+                  max(b[2] for b in bboxes), max(b[3] for b in bboxes)]
+
+    item_assets_data = {
+        "type": first_asset.get("type"),
+        "roles": first_asset.get("roles", ["data"]),
+    }
+    for key in ("proj:epsg", "eo:bands", "bands"):
+        if key in first_asset:
+            item_assets_data[key] = first_asset[key]
+
+    summaries = {}
+    if "proj:epsg" in first_asset:
+        summaries["proj:epsg"] = [first_asset["proj:epsg"]]
+    if "eo:bands" in first_asset:
+        summaries["eo:bands"] = first_asset["eo:bands"]
+
+    links = [
+        {"rel": "self", "href": collection_url, "type": "application/json"},
+        {"rel": "root", "href": collection_url, "type": "application/json"},
+    ]
+    for _item, item_url in items_with_urls:
+        links.append({"rel": "item", "href": item_url,
+                      "type": "application/geo+json"})
+
+    return {
+        "type": "Collection",
+        "stac_version": "1.0.0",
+        "stac_extensions": [
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+            "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+            "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
+        ],
+        "id": collection_id,
+        "description": ("Locally reprojected DEM split into "
+                        f"{len(items_with_urls)} spatial tiles (one item "
+                        "per tile), hosted on Hetzner for openEO "
+                        "load_stac; --dem-tiles experiment."),
+        "license": "proprietary",
+        "extent": {
+            "spatial": {"bbox": [union_bbox]},
+            "temporal": {"interval": [[dt, dt]]},
+        },
+        "item_assets": {"data": item_assets_data},
+        "summaries": summaries,
+        "links": links,
+    }
+
+
 SCP_SSH_TIMEOUT = 120  # Sekunden - haengende Uploads/Logs hart abbrechen
 
 
@@ -2438,6 +2623,17 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         print(f"  [warn] --dem-layout={dem_layout} wird bei "
               f"--dem-format={dem_format} ignoriert (nur fuer gtiff relevant).")
 
+    # --dem-tiles: DEM in N raeumliche Kacheln zerlegen, je Kachel ein
+    # eigenes STAC-Item (ein Asset) in einer Collection. Nur gtiff - die
+    # zarr/netcdf-Experimente bleiben unangetastet.
+    dem_tiles = int(getattr(args, "dem_tiles", 1) or 1)
+    if dem_tiles < 1:
+        raise ValueError(f"--dem-tiles muss >= 1 sein (ist {dem_tiles}).")
+    if dem_tiles > 1 and dem_format != "gtiff":
+        raise ValueError(
+            f"--dem-tiles {dem_tiles} ist nur mit --dem-format=gtiff "
+            f"kombinierbar (ist {dem_format!r}).")
+
     # Optionale Pakete FRUEH pruefen - klare Fehlermeldung bevor der DEM-
     # Download laeuft.
     _check_dem_format_deps(dem_format)
@@ -2466,12 +2662,21 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     remote_stac_name = f"stac_item_{region}_{run_ts}.json"
     asset_url = f"{HETZNER_URL_BASE}{remote_asset_name}"
     stac_url = f"{HETZNER_URL_BASE}{remote_stac_name}"
-    # Nur zarr: Item wird zusaetzlich in eine minimale STAC COLLECTION
+    # zarr: Item wird zusaetzlich in eine minimale STAC COLLECTION
     # eingebettet und load_stac zeigt auf die Collection statt aufs Item
     # (CDSE-Codepfad Collection vs. Item ist verschieden; Versuch 4 gegen
     # "Collected 0 projection metadata entries", s. build_dem_stac_collection).
+    # --dem-tiles>1: Collection ueber N Kachel-Items (nur gtiff, daher
+    # kein Namenskonflikt mit dem zarr-Fall).
     remote_coll_name = f"stac_collection_{region}_{run_ts}.json"
     collection_url = f"{HETZNER_URL_BASE}{remote_coll_name}"
+    # Pro-Kachel-Namen (nur bei --dem-tiles>1 benutzt); row-major Index.
+    tile_asset_names = [
+        f"dem_reprojected_{region}_{run_ts}_tile{i}{asset_ext}"
+        for i in range(dem_tiles)]
+    tile_item_names = [
+        f"stac_item_{region}_{run_ts}_tile{i}.json"
+        for i in range(dem_tiles)]
     cache_dir = Path(args.output_dir) / "dem_cache"
     strategy_label = "local_pp_cached" if args.dem_cache else "local_preprocessing"
 
@@ -2479,6 +2684,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     print(f"  Strategie: {strategy_label}  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
     print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}  |  DEM-Format: {dem_format}"
           + (f"  |  Layout: {dem_layout}" if dem_format == "gtiff" else "")
+          + (f"  |  Tiles: {dem_tiles} "
+             f"({'x'.join(map(str, _tile_grid_layout(dem_tiles)))})"
+             if dem_tiles > 1 else "")
           + ("  |  Snap: s2" if snap_to_s2 else "")
           + ("  |  Gitter-Hoheit: DEM (resample_cube_spatial S2->DEM)"
              if getattr(args, "resample_s2_to_dem", False) else ""))
@@ -2523,7 +2731,21 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                   f"(origin {meta_full['transform'].c},"
                   f"{meta_full['transform'].f} -> "
                   f"{dst_meta['transform'].c},{dst_meta['transform'].f})")
-        if dem_format == "gtiff":
+        tiles = None
+        tile_local_paths = []
+        if dem_format == "gtiff" and dem_tiles > 1:
+            # Zerlegung NACH Reprojektion (und ggf. Snap-Crop): reines
+            # Slicing desselben Puffers, kein zweiter Warp. Jede Kachel
+            # wird mit demselben Layout-Profil geschrieben wie sonst das
+            # Einzel-DEM.
+            tiles = _split_dem_into_tiles(data, dst_meta, dem_tiles)
+            for i, (tile_data, tile_meta) in enumerate(tiles):
+                tile_path = base / f"step2_reprojected_tile{i}{asset_ext}"
+                _write_dem_with_layout(tile_data, tile_meta, str(tile_path),
+                                       layout=dem_layout)
+                _log_tif_layout(_inspect_tif_layout(str(tile_path)))
+                tile_local_paths.append(tile_path)
+        elif dem_format == "gtiff":
             _write_dem_with_layout(data, dst_meta, str(local_asset_path),
                                    layout=dem_layout)
             _log_tif_layout(_inspect_tif_layout(str(local_asset_path)))
@@ -2537,7 +2759,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             info = _inspect_asset_size(str(local_asset_path))
             print(f"  NetCDF: {info['size_bytes'] / (1024**2):.2f} MB")
         t_reproject = time.time() - t_reproj_start
-        print(f"  Reprojektion + Write abgeschlossen: {local_asset_path}  "
+        write_target = (f"{len(tile_local_paths)} Kacheln in {base}"
+                        if tiles is not None else str(local_asset_path))
+        print(f"  Reprojektion + Write abgeschlossen: {write_target}  "
               f"({t_reproject:.2f} s)")
 
         # --snap-dem-to-s2 Pflicht-Verifikation (NICHT in preprocessing_time:
@@ -2565,57 +2789,127 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                     "Abbruch vor Upload/CDSE."
                 )
 
-        # Schritt 3: Asset nach Hetzner hochladen (Datei oder Verzeichnis)
-        print(f"\n  [Schritt 3/5] Asset auf Hetzner hochladen -> {remote_asset_name}...")
-        if dem_format == "zarr":
-            t_scp_asset = scp_upload_dir(str(local_asset_path), remote_asset_name)
-        else:
-            t_scp_asset = scp_upload(str(local_asset_path), remote_asset_name)
-        print(f"  Asset Upload fertig: {asset_url}  ({t_scp_asset:.2f} s)")
+        # --dem-tiles Pflicht-Verifikation (NICHT in preprocessing_time):
+        # die Vereinigung der Kacheln muss bitgenau dem Einzel-DEM
+        # entsprechen (Abdeckung, Byte-Identitaet, Extent-/Shape-Summe).
+        # Bei Verletzung Abbruch vor Upload - ein Lauf mit fehlerhafter
+        # Zerlegung wuerde nur CDSE-Zeit verbrennen.
+        if tiles is not None:
+            if not _verify_tile_union_identity(tiles, data, dst_meta):
+                raise RuntimeError(
+                    "--dem-tiles Verifikation fehlgeschlagen (Vereinigung "
+                    "der Kacheln != Einzel-DEM) - Abbruch vor Upload/CDSE."
+                )
 
-        # Schritt 4: STAC Item generieren + hochladen (media_type haengt am dem_format)
-        print(f"\n  [Schritt 4/5] STAC Item generieren + hochladen "
-              f"(media_type={_DEM_FORMAT_MEDIA_TYPE[dem_format]})...")
-        t_stac_start = time.time()
-        stac_item = build_stac_item(
-            region=region,
-            asset_href=asset_url,
-            epsg=target_epsg,
-            item_id=f"dem_reprojected_{region}_{run_ts}",
-            extent=_compute_extent(region, args.extent_size),
-            dem_format=dem_format,
-            grid=_grid_from_dst_meta(dst_meta),
-        )
-        _stac_asset = stac_item["assets"]["data"]
-        print(f"  STAC data-Asset: href={_stac_asset['href']}")
-        print(f"                   proj:epsg={_stac_asset['proj:epsg']}  "
-              f"proj:shape={_stac_asset.get('proj:shape')}  "
-              f"proj:bbox={_stac_asset.get('proj:bbox')}")
-        print(f"                   proj:transform={_stac_asset.get('proj:transform')}  "
-              f"eo:bands={_stac_asset.get('eo:bands')}")
-        stac_collection = None
-        if dem_format == "zarr":
+        # Schritt 3: Asset(s) nach Hetzner hochladen (Datei oder Verzeichnis)
+        if tiles is not None:
+            print(f"\n  [Schritt 3/5] {dem_tiles} Kachel-Assets auf Hetzner "
+                  f"hochladen...")
+            t_scp_asset = 0.0
+            for tile_path, tile_name in zip(tile_local_paths,
+                                            tile_asset_names):
+                t_scp_asset += scp_upload(str(tile_path), tile_name)
+            print(f"  Asset Upload fertig: {dem_tiles} Kacheln -> "
+                  f"{HETZNER_URL_BASE}dem_reprojected_{region}_{run_ts}_"
+                  f"tile*{asset_ext}  ({t_scp_asset:.2f} s)")
+        else:
+            print(f"\n  [Schritt 3/5] Asset auf Hetzner hochladen -> {remote_asset_name}...")
+            if dem_format == "zarr":
+                t_scp_asset = scp_upload_dir(str(local_asset_path), remote_asset_name)
+            else:
+                t_scp_asset = scp_upload(str(local_asset_path), remote_asset_name)
+            print(f"  Asset Upload fertig: {asset_url}  ({t_scp_asset:.2f} s)")
+
+        # Schritt 4: STAC Item(s) generieren + hochladen (media_type haengt
+        # am dem_format). Bei --dem-tiles>1: ein Item PRO KACHEL (eigene
+        # proj-Felder + eigener WGS84-Extent je Ausschnitt) in einer
+        # Collection - der Treiber mosaikiert nur ueber Items, mehrere
+        # Assets gleichen Bandnamens in EINEM Item wuerden bis auf das
+        # erste stumm verworfen (s. build_dem_tiles_collection).
+        if tiles is not None:
+            print(f"\n  [Schritt 4/5] {dem_tiles} STAC Kachel-Items + "
+                  f"Collection generieren + hochladen...")
+            t_stac_start = time.time()
             collection_id = f"dem_collection_{region}_{run_ts}"
-            _link_item_into_collection(stac_item, stac_url,
-                                       collection_id, collection_url)
-            stac_collection = build_dem_stac_collection(
-                collection_id, collection_url, stac_item, stac_url)
-        local_stac_path = str(base / remote_stac_name)
-        with open(local_stac_path, "w") as f:
-            json.dump(stac_item, f, indent=2)
-        t_stac_build = time.time() - t_stac_start
-        t_scp_stac = scp_upload(local_stac_path, remote_stac_name)
-        if stac_collection is not None:
+            items_with_urls = []
+            for i, (_tile_data, tile_meta) in enumerate(tiles):
+                item_url_i = f"{HETZNER_URL_BASE}{tile_item_names[i]}"
+                tile_item = build_stac_item(
+                    region=region,
+                    asset_href=f"{HETZNER_URL_BASE}{tile_asset_names[i]}",
+                    epsg=target_epsg,
+                    item_id=f"dem_reprojected_{region}_{run_ts}_tile{i}",
+                    extent=_wgs84_extent_from_meta(tile_meta),
+                    dem_format=dem_format,
+                    grid=_grid_from_dst_meta(tile_meta),
+                )
+                _link_item_into_collection(tile_item, item_url_i,
+                                           collection_id, collection_url)
+                items_with_urls.append((tile_item, item_url_i))
+                _a = tile_item["assets"]["data"]
+                print(f"  Kachel {i}: href={_a['href']}")
+                print(f"            proj:shape={_a.get('proj:shape')}  "
+                      f"proj:bbox={_a.get('proj:bbox')}")
+            stac_collection = build_dem_tiles_collection(
+                collection_id, collection_url, items_with_urls)
+            t_stac_build = time.time() - t_stac_start
+            t_scp_stac = 0.0
+            for (tile_item, _u), item_name in zip(items_with_urls,
+                                                  tile_item_names):
+                local_item_path = str(base / item_name)
+                with open(local_item_path, "w") as f:
+                    json.dump(tile_item, f, indent=2)
+                t_scp_stac += scp_upload(local_item_path, item_name)
             local_coll_path = str(base / remote_coll_name)
             with open(local_coll_path, "w") as f:
                 json.dump(stac_collection, f, indent=2)
             t_scp_stac += scp_upload(local_coll_path, remote_coll_name)
-        t_stac = t_stac_build + t_scp_stac
-        print(f"  STAC Item Upload fertig: {stac_url}  ({t_stac:.2f} s)")
-        if stac_collection is not None:
-            print(f"  STAC Collection Upload fertig: {collection_url}  "
-                  f"(Item via rel=item verlinkt, item_assets+summaries "
-                  f"tragen proj/eo:bands)")
+            t_stac = t_stac_build + t_scp_stac
+            print(f"  STAC Upload fertig: {dem_tiles} Items + Collection "
+                  f"{collection_url}  ({t_stac:.2f} s)")
+        else:
+            print(f"\n  [Schritt 4/5] STAC Item generieren + hochladen "
+                  f"(media_type={_DEM_FORMAT_MEDIA_TYPE[dem_format]})...")
+            t_stac_start = time.time()
+            stac_item = build_stac_item(
+                region=region,
+                asset_href=asset_url,
+                epsg=target_epsg,
+                item_id=f"dem_reprojected_{region}_{run_ts}",
+                extent=_compute_extent(region, args.extent_size),
+                dem_format=dem_format,
+                grid=_grid_from_dst_meta(dst_meta),
+            )
+            _stac_asset = stac_item["assets"]["data"]
+            print(f"  STAC data-Asset: href={_stac_asset['href']}")
+            print(f"                   proj:epsg={_stac_asset['proj:epsg']}  "
+                  f"proj:shape={_stac_asset.get('proj:shape')}  "
+                  f"proj:bbox={_stac_asset.get('proj:bbox')}")
+            print(f"                   proj:transform={_stac_asset.get('proj:transform')}  "
+                  f"eo:bands={_stac_asset.get('eo:bands')}")
+            stac_collection = None
+            if dem_format == "zarr":
+                collection_id = f"dem_collection_{region}_{run_ts}"
+                _link_item_into_collection(stac_item, stac_url,
+                                           collection_id, collection_url)
+                stac_collection = build_dem_stac_collection(
+                    collection_id, collection_url, stac_item, stac_url)
+            local_stac_path = str(base / remote_stac_name)
+            with open(local_stac_path, "w") as f:
+                json.dump(stac_item, f, indent=2)
+            t_stac_build = time.time() - t_stac_start
+            t_scp_stac = scp_upload(local_stac_path, remote_stac_name)
+            if stac_collection is not None:
+                local_coll_path = str(base / remote_coll_name)
+                with open(local_coll_path, "w") as f:
+                    json.dump(stac_collection, f, indent=2)
+                t_scp_stac += scp_upload(local_coll_path, remote_coll_name)
+            t_stac = t_stac_build + t_scp_stac
+            print(f"  STAC Item Upload fertig: {stac_url}  ({t_stac:.2f} s)")
+            if stac_collection is not None:
+                print(f"  STAC Collection Upload fertig: {collection_url}  "
+                      f"(Item via rel=item verlinkt, item_assets+summaries "
+                      f"tragen proj/eo:bands)")
 
         # preprocessing_time = Reprojektion + SCP Upload + STAC (OHNE DEM Download)
         preprocessing_time = t_reproject + t_scp_asset + t_stac
@@ -2623,12 +2917,13 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         if t_download is not None and t_download > 0.0:
             print(f"  (DEM Download {t_download:.1f} s separat, nicht in preprocessing_time)")
 
-        # Schritt 5: load_stac Szenario ausfuehren. Nur bei zarr zeigt
-        # load_stac auf die Collection-URL, gtiff/netcdf unveraendert
-        # weiter direkt auf die Item-URL.
-        load_stac_url = collection_url if dem_format == "zarr" else stac_url
+        # Schritt 5: load_stac Szenario ausfuehren. Bei zarr und bei
+        # --dem-tiles>1 zeigt load_stac auf die Collection-URL,
+        # gtiff-Einzeldatei/netcdf unveraendert direkt auf die Item-URL.
+        use_collection = dem_format == "zarr" or tiles is not None
+        load_stac_url = collection_url if use_collection else stac_url
         print(f"\n  [Schritt 5/5] load_stac Szenario auf CDSE ausfuehren "
-              f"(url={'Collection' if dem_format == 'zarr' else 'Item'})...")
+              f"(url={'Collection' if use_collection else 'Item'})...")
         scenario_filename = f"{strategy_label}_{region}.json"
         local_pp_scenario = build_local_pp_scenario(
             region, load_stac_url, base / scenario_filename,
@@ -2675,13 +2970,22 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             dem_layout=dem_layout,
             dem_format=dem_format,
             dem_snap="s2" if snap_to_s2 else None,
+            dem_tiles=dem_tiles,
         )
 
-        # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf Asset + STAC)
+        # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf
+        # Asset(s) + STAC). Bei --dem-tiles>1 alle Kachel-Assets + -Items
+        # + Collection - die ZEITLICHE VERTEILUNG der Range-Requests ueber
+        # die Kacheln ist dort die Messgroesse fuer Parallelitaet.
+        if tiles is not None:
+            log_filenames = (tile_asset_names + tile_item_names
+                             + [remote_coll_name])
+        else:
+            log_filenames = [remote_asset_name, remote_stac_name]
         print(f"\n  [Logs] Hole nginx Access-Logs vom Hetzner-Server...")
         try:
             import_nginx_access_log(
-                run_id, filenames=[remote_asset_name, remote_stac_name],
+                run_id, filenames=log_filenames,
                 ssh_host=HETZNER_HOST,
             )
         except Exception as exc:
@@ -4256,6 +4560,27 @@ def main() -> None:
                              "Machbarkeitstest ob CDSE ueber load_stac andere "
                              "Formate als GeoTIFF akzeptiert - kann vom Backend "
                              "abgelehnt werden.")
+    parser.add_argument("--dem-tiles", type=int, default=1,
+                        help="(nur local_preprocessing, nur "
+                             "--dem-format=gtiff) Anzahl raeumlicher "
+                             "Kacheln, in die das reprojizierte DEM zerlegt "
+                             "wird (Default 1 = bisheriges Verhalten, 4 = "
+                             "2x2-Raster). Bei N>1 wird jede Kachel als "
+                             "eigene GeoTIFF-Datei hochgeladen und als "
+                             "EIGENES STAC-Item (je ein Asset, eigene "
+                             "proj-Felder) in einer Collection verlinkt; "
+                             "load_stac zeigt auf die Collection. Mehrere "
+                             "Assets in EINEM Item gehen nicht: der "
+                             "geopyspark-Treiber laedt pro Item und "
+                             "Bandnamen nur das erste Asset, mosaikiert "
+                             "wird nur ueber Items. Die Kacheln stammen "
+                             "aus demselben reprojizierten Puffer (reines "
+                             "Slicing, kein zweiter Warp), ihre "
+                             "Vereinigung ist bitgenau das Einzel-DEM "
+                             "(lokale Pflicht-Verifikation vor Upload). "
+                             "Experiment: laedt CDSE die Kacheln parallel? "
+                             "Das Datenvolumen sinkt durch die Zerlegung "
+                             "NICHT - nur Parallelitaet kann Zeit sparen.")
     parser.add_argument("--snap-dem-to-s2", action="store_true",
                         help="(nur local_preprocessing) DEM pixelgenau auf "
                              "das erwartete CDSE/S2-Zielgitter bringen: "
