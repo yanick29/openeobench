@@ -249,6 +249,14 @@ def calculate_categorical_metrics(reference, test, nodata=None,
     nur GUELTIG vs NODATA (2 Klassen). Fuer lc_mask - dort steckt die
     Aussage in der Maskenkante, die Werte innerhalb der Maske sind ohnehin
     identisch, und ein Vergleich der Werte wuerde die Kante ausblenden.
+
+    nodata: einzelner Wert ODER eine Sammlung von Werten. Mehrere sind der
+    Normalfall, weil Referenz und Test unterschiedliche Sentinels tragen
+    koennen - local_reference schreibt uint8 mit 0, CDSE liefert dieselbe
+    Klassenkarte als int16 mit -32768. Wird nur EIN Wert beruecksichtigt,
+    zaehlen die Nodata-Pixel des anderen Rasters als Klassenpaar mit und
+    schoenen die Quote (gemessen: 3600 statt 3136 gueltiger Pixel, und
+    -32768 taucht als eigene "Klasse" in der Verwechslungsmatrix auf).
     """
     ref = np.asarray(reference)
     tst = np.asarray(test)
@@ -257,13 +265,21 @@ def calculate_categorical_metrics(reference, test, nodata=None,
     if tst.ndim == 3:
         tst = tst[0]
 
+    # nodata auf eine Werteliste normalisieren (Skalar, Sammlung oder None).
+    if nodata is None:
+        nodata_values = []
+    elif isinstance(nodata, (list, tuple, set, frozenset)):
+        nodata_values = [v for v in nodata if v is not None]
+    else:
+        nodata_values = [nodata]
+
     if validity_only:
         # NaN und (falls angegeben) nodata gelten als ungueltig.
         ref_valid = np.isfinite(ref)
         tst_valid = np.isfinite(tst)
-        if nodata is not None:
-            ref_valid &= (ref != nodata)
-            tst_valid &= (tst != nodata)
+        for nv in nodata_values:
+            ref_valid &= (ref != nv)
+            tst_valid &= (tst != nv)
         ref_cls = ref_valid.astype(np.int64)
         tst_cls = tst_valid.astype(np.int64)
         mask = np.ones(ref_cls.shape, dtype=bool)
@@ -272,8 +288,10 @@ def calculate_categorical_metrics(reference, test, nodata=None,
         tst_cls = tst.astype(np.int64)
         mask = np.isfinite(ref.astype(np.float64)) & np.isfinite(
             tst.astype(np.float64))
-        if nodata is not None:
-            mask &= (ref_cls != nodata) & (tst_cls != nodata)
+        # Ein Pixel ist nur gueltig, wenn es in BEIDEN Rastern kein Nodata
+        # ist - egal welchen Sentinel das jeweilige Raster benutzt.
+        for nv in nodata_values:
+            mask &= (ref_cls != nv) & (tst_cls != nv)
 
     total_px = int(mask.size)
     valid_px = int(mask.sum())

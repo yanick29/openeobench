@@ -328,6 +328,30 @@ def verify_lc_overlay_graph(pg: dict, dataset: str = "landcover") -> list:
     return problems
 
 
+# Uebliche Nodata-Sentinels. CDSE schreibt das Ergebnis nicht zwingend im
+# dtype der Quelle: ein uint8-Klassenraster kommt als int16 mit -32768
+# zurueck. Diese Werte sind daher KEINE Fremdwerte, sondern "kein Pixel".
+NODATA_SENTINELS = (-32768, -32767, -9999, -999, 0, 255, 65535)
+
+
+def _ignorable_nodata(values, file_nodata=None) -> set:
+    """Menge der Werte, die als Nodata gelten und nicht als Klasse zaehlen.
+
+    Enthaelt den in der Datei deklarierten Nodata-Wert plus die ueblichen
+    Sentinels, aber nur soweit sie tatsaechlich im Raster vorkommen - es
+    wird nichts pauschal weggeworfen.
+    """
+    ignorable = set()
+    if file_nodata is not None:
+        try:
+            ignorable.add(int(file_nodata))
+        except (TypeError, ValueError):
+            pass
+    present = {int(v) for v in values}
+    ignorable |= {s for s in NODATA_SENTINELS if s in present}
+    return ignorable
+
+
 def verify_categorical_result(result_dir, dataset: str,
                               label: str = "") -> bool:
     """Prueft NACH dem CDSE-Job, ob das Ergebnis wirklich Klassen enthaelt.
@@ -339,13 +363,19 @@ def verify_categorical_result(result_dir, dataset: str,
     Pruefung faengt genau das ab, direkt nach dem Job und mit klarer
     Meldung, statt es in eine unerklaerliche Metrik laufen zu lassen.
 
-    Prueft je Ergebnis-TIF: (1) Werte liegen in der Klassenmenge des
-    Datensatzes, (2) keine negativen Werte, (3) Anzahl verschiedener Werte
-    ist klein (eine Klassenkarte hat Dutzende, kein Kontinuum).
+    UNTERSCHEIDUNGSMERKMAL ist nicht der Wertebereich, sondern (a) ob die
+    NICHT-Nodata-Werte alle in der Klassenmenge liegen und (b) wie viele
+    verschiedene Werte es ueberhaupt gibt. Ein korrektes Ergebnis darf
+    negativ aussehen: CDSE liefert die Klassenkarte als int16 mit -32768
+    als Nodata, also z.B. 8 Werte im Bereich -32768..90. Das echte
+    Fehlerbild sah dagegen so aus: 106 verschiedene Werte im Bereich
+    -20..85, davon fast keiner eine Klasse. Ein Nodata-Sentinel allein
+    darf also nie eine Diagnose ausloesen.
 
     Gibt True zurueck wenn plausibel, sonst False (und meldet laut). Wirft
-    NICHT - der Lauf soll seine Zeitmessungen behalten, das Ergebnis wird
-    nur unmissverstaendlich als unbrauchbar markiert.
+    NICHT, und der Rueckgabewert wird von den Strategien bewusst NICHT
+    ausgewertet: die Diagnose meldet, blockiert aber weder den Lauf noch
+    den nachfolgenden Accuracy-Check.
     """
     import numpy as np
     info = DATASETS.get(dataset, {})
@@ -363,26 +393,34 @@ def verify_categorical_result(result_dir, dataset: str,
             with rasterio.open(tif) as src:
                 arr = src.read(1)
                 dt = src.dtypes[0]
+                file_nodata = src.nodata
         except Exception as exc:
             print(f"  [warn] {tif.name} nicht lesbar: {exc}")
             continue
-        vals = np.unique(arr[np.isfinite(arr)] if arr.dtype.kind == "f" else arr)
-        fremd = sorted(int(v) for v in vals if int(v) not in classes)
+        finite = arr[np.isfinite(arr)] if arr.dtype.kind == "f" else arr
+        vals = np.unique(finite)
+        if vals.size == 0:
+            print(f"  [warn] {tif.name}: keine auswertbaren Pixel.")
+            continue
+        ignorable = _ignorable_nodata(vals, file_nodata)
+        rest = [int(v) for v in vals if int(v) not in ignorable]
+        fremd = sorted(v for v in rest if v not in classes)
+        nod_txt = (f", Nodata {sorted(ignorable)}" if ignorable else "")
         if fremd:
             ok = False
             print(f"\n  [DIAGNOSE] {label}{tif.name}: Ergebnis ist KEINE "
                   f"Klassenkarte.")
             print(f"      dtype={dt}, {len(vals)} verschiedene Werte, "
-                  f"Bereich {int(vals.min())}..{int(vals.max())}")
-            print(f"      Werte ausserhalb der {dataset}-Klassen "
-                  f"{sorted(classes)}: {fremd[:12]}"
-                  f"{' ...' if len(fremd) > 12 else ''}")
-            print(f"      Erwartet: uint8 mit ausschliesslich diesen Klassen. "
-                  f"Typische Ursache: der Graph liefert den falschen Cube "
-                  f"(s. verify_lc_overlay_graph).")
+                  f"Bereich {int(vals.min())}..{int(vals.max())}{nod_txt}")
+            print(f"      davon {len(rest)} Nicht-Nodata-Werte, {len(fremd)} "
+                  f"ausserhalb der {dataset}-Klassen {sorted(classes)}: "
+                  f"{fremd[:12]}{' ...' if len(fremd) > 12 else ''}")
+            print(f"      Erwartet: ausschliesslich diese Klassen (plus "
+                  f"Nodata). Typische Ursache: der Graph liefert den "
+                  f"falschen Cube (s. verify_lc_overlay_graph).")
         else:
-            print(f"  Inhaltspruefung {tif.name}: OK "
-                  f"({len(vals)} Klassen, dtype={dt})")
+            print(f"  Inhaltspruefung {tif.name}: OK ({len(rest)} Klassen "
+                  f"{sorted(rest)}, dtype={dt}{nod_txt})")
     return ok
 
 
@@ -3213,6 +3251,10 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
         _write_run_meta(outdir, resolution, dataset=dataset)
         results = run_openeo(args.api_url, str(scenario_path), str(outdir),
                              job_timeout=args.job_timeout)
+        # Nur Diagnose: der Rueckgabewert wird bewusst NICHT ausgewertet.
+        # Die Meldung darf weder den Lauf abbrechen noch den spaeteren
+        # Accuracy-Check verhindern - sonst fehlt bei einem Fehlalarm auch
+        # noch die Metrik.
         if _is_categorical(dataset) and results.get("status") == "success":
             verify_categorical_result(outdir, dataset, label="onthefly ")
         total_time = results.get("total_time")
@@ -3650,6 +3692,10 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         _write_run_meta(base, resolution, dataset=dataset)
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
                                    job_timeout=args.job_timeout)
+        # Nur Diagnose: der Rueckgabewert wird bewusst NICHT ausgewertet.
+        # Die Meldung darf weder den Lauf abbrechen noch den spaeteren
+        # Accuracy-Check verhindern - sonst fehlt bei einem Fehlalarm auch
+        # noch die Metrik.
         if _is_categorical(dataset) and results_step5.get("status") == "success":
             verify_categorical_result(step3_dir, dataset, label="local_pp ")
         t_main = results_step5.get("total_time") or 0.0
@@ -4007,6 +4053,10 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         )
         results_main = run_openeo(args.api_url, str(scenario_path), str(main_dir),
                                   job_timeout=args.job_timeout)
+        # Nur Diagnose: der Rueckgabewert wird bewusst NICHT ausgewertet.
+        # Die Meldung darf weder den Lauf abbrechen noch den spaeteren
+        # Accuracy-Check verhindern - sonst fehlt bei einem Fehlalarm auch
+        # noch die Metrik.
         if _is_categorical(dataset) and results_main.get("status") == "success":
             verify_categorical_result(main_dir, dataset, label="full_pp ")
         t_main = results_main.get("total_time") or 0.0
@@ -4872,6 +4922,13 @@ def _compare_tif_pair_categorical(ref_tif: Path, test_tif: Path,
     Gibt das Dict von calculate_categorical_metrics zurueck (oder None bei
     Fehler). Das Alignment laeuft IMMER mit nearest - alles andere wuerde
     Klassen-IDs mischen.
+
+    Die Nodata-Werte werden aus BEIDEN Dateien gelesen und zusammen mit dem
+    uebergebenen Registry-Wert ausgeschlossen. Nur den Registry-Wert zu
+    nehmen reicht nicht: dort steht 0, die CDSE-Datei traegt aber -32768.
+    Ohne das zaehlen Nodata-Pixel als perfekt uebereinstimmendes
+    Klassenpaar mit und -32768 landet als eigene "Klasse" in der
+    Verwechslungsmatrix.
     """
     try:
         from accuracy_calculator import (align_rasters,
@@ -4879,12 +4936,27 @@ def _compare_tif_pair_categorical(ref_tif: Path, test_tif: Path,
     except Exception as exc:
         print(f"  Import-Fehler fuer accuracy_calculator: {exc}")
         return None
+
+    nodata_values = set()
+    if isinstance(nodata, (list, tuple, set, frozenset)):
+        nodata_values |= {v for v in nodata if v is not None}
+    elif nodata is not None:
+        nodata_values.add(nodata)
+    for path in (ref_tif, test_tif):
+        try:
+            with rasterio.open(path) as src:
+                if src.nodata is not None:
+                    nodata_values.add(src.nodata)
+        except Exception:
+            pass
+
     try:
         ref_data, test_data, _ = align_rasters(
             str(ref_tif), str(test_tif), resampling_method="nearest",
         )
         return calculate_categorical_metrics(
-            ref_data, test_data, nodata=nodata, validity_only=validity_only)
+            ref_data, test_data, nodata=sorted(nodata_values) or None,
+            validity_only=validity_only)
     except Exception as exc:
         print(f"  Vergleich fehlgeschlagen ({ref_tif.name}): {exc}")
         return None
@@ -5509,7 +5581,10 @@ def _run_accuracy_check_categorical(common, reference_tifs, test_tifs,
               f"({res['valid_pixels']:,}/{res['total_pixels']:,} Pixel)")
 
     if not n_files or not total_valid:
-        print("  Skip: kein valider Pixel-Vergleich moeglich.")
+        print(f"  Skip: kein valider Pixel-Vergleich moeglich "
+              f"({n_files} vergleichbare Datei(en), {total_valid} gueltige "
+              f"Pixel nach Nodata-Ausschluss) - es wird KEINE Zeile in die "
+              f"accuracy-Tabelle geschrieben.")
         return None
 
     overall = total_agree / total_valid
@@ -5542,8 +5617,9 @@ def _run_accuracy_check_categorical(common, reference_tifs, test_tifs,
                           confusion_json=confusion_json,
                           metric_kind=metric_kind)
     else:
-        print(f"  WARNUNG: kein run_id fuer {test_strategy} gefunden, "
-              f"nicht in DB geschrieben.")
+        print(f"  WARNUNG: kein run_id fuer {test_strategy} gefunden - es "
+              f"wird KEINE Zeile in die accuracy-Tabelle geschrieben "
+              f"(die Metriken unten sind trotzdem gueltig).")
 
     kappa_str = f"{kappa:.6f}" if kappa is not None else "n/a"
     print(f"\n  Accuracy-Check ({metric_kind}): "
