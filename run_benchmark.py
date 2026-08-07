@@ -106,6 +106,10 @@ DATASETS = {
         "workflows": CONTINUOUS_WORKFLOWS,
         "default_workflow": "merge_add",
         "label": "COPERNICUS_30 (Hoehe, kontinuierlich)",
+        # Unveraendert die bisherige Auswahl. 'mode' ist hier NICHT sinnvoll:
+        # eine Mehrheitsentscheidung ueber Hoehenwerte verwirft Information,
+        # statt zu mitteln.
+        "resampling": ("nearest", "bilinear", "cubic"),
     },
     "landcover": {
         "collection": "ESA_WORLDCOVER_10M_2021_V2",
@@ -116,6 +120,12 @@ DATASETS = {
         "workflows": CATEGORICAL_WORKFLOWS,
         "default_workflow": "lc_overlay",
         "label": "ESA_WORLDCOVER_10M_2021_V2 (Landbedeckung, kategorial)",
+        # nearest (jedes Zielpixel uebernimmt genau eine Quellklasse) und
+        # mode (haeufigste Klasse im Quellfenster). mode ist beim
+        # VERGROEBERN das fachlich richtige Verfahren - nearest greift dort
+        # willkuerlich einen einzelnen Quellpixel heraus. bilinear/cubic
+        # bleiben ausgeschlossen: sie mitteln Klassen-IDs.
+        "resampling": ("nearest", "mode"),
         # uint8, nodata 0, 1 Band, nativ EPSG:4326 @ 8.333e-05 Grad (~10 m).
         # Gegen CDSE verifiziert; beobachtete Klassen im Testausschnitt:
         # 10 Baum, 30 Gras, 40 Acker, 50 bebaut, 60 vegetationsarm, 80 Wasser.
@@ -174,19 +184,31 @@ def _validate_dataset_workflow(dataset: str, workflow: str) -> None:
 
 
 def _validate_dataset_resampling(dataset: str, resampling: str) -> None:
-    """Kategoriale Daten duerfen NUR nearest interpoliert werden.
+    """Prueft, ob die Resampling-Methode zum Datensatz passt.
 
-    bilinear/cubic mitteln Klassen-IDs und erfinden dabei Klassen, die es
-    nicht gibt (zwischen 10 Baum und 50 bebaut laege 30 Gras). Harte
-    Ablehnung, nicht stille Korrektur - sonst stuende in der DB eine
+    Kategorial: nur 'nearest' und 'mode'. bilinear/cubic mitteln Klassen-IDs
+    und erfinden dabei Klassen, die es nicht gibt (zwischen 10 Baum und
+    50 bebaut laege 30 Gras). 'mode' waehlt dagegen die haeufigste Klasse im
+    Quellfenster und ist beim Vergroebern das fachlich richtige Verfahren.
+
+    Kontinuierlich: unveraendert nearest/bilinear/cubic.
+
+    Harte Ablehnung, nicht stille Korrektur - sonst stuende in der DB eine
     Laufkonfiguration, die nicht gefahren wurde.
     """
-    if _is_categorical(dataset) and resampling != "nearest":
+    allowed = DATASETS[dataset]["resampling"]
+    if resampling not in allowed:
+        if _is_categorical(dataset):
+            grund = ("kategoriale Daten duerfen nicht interpoliert werden - "
+                     "bilinear/cubic mischen Klassen-IDs zu nicht "
+                     "existierenden Klassen")
+        else:
+            grund = ("'mode' ist eine Mehrheitsentscheidung und fuer "
+                     "kontinuierliche Messwerte nicht sinnvoll")
         raise ValueError(
-            f"--local-resampling {resampling!r} ist mit --dataset {dataset!r} "
-            f"nicht zulaessig: kategoriale Daten duerfen nur mit 'nearest' "
-            f"resampelt werden, bilinear/cubic mischen Klassen-IDs zu "
-            f"nicht existierenden Klassen.")
+            f"--local-resampling {resampling!r} ist mit --dataset "
+            f"{dataset!r} nicht zulaessig ({grund}). "
+            f"Erlaubt: {', '.join(allowed)}.")
 
 
 def _apply_dataset_to_pg(pg: dict, dataset: str) -> None:
@@ -242,13 +264,49 @@ def _is_default_resolution(res: float) -> bool:
     """
     return abs(float(res) - DEFAULT_RESOLUTION_M) < 1e-9
 
-# Lokale DEM-Resampling-Methoden. CDSE intern nutzt immer NearestNeighbor;
-# bilinear/cubic lokal erzeugen messbare Abweichungen zum onthefly-Output.
+# Lokale Resampling-Methoden fuer die Reprojektion des zweiten Rasters.
+# 'mode' (Mehrheitsentscheidung) ist das fachlich richtige Verfahren fuer
+# KATEGORIALE Daten: es waehlt die haeufigste Klasse im Quellfenster, statt
+# wie bilinear/cubic/average Klassen-IDs zu mitteln und dabei nicht
+# existierende Klassen zu erfinden. Lokal per GDAL-Warp verifiziert.
 LOCAL_RESAMPLING = {
     "nearest":  Resampling.nearest,
     "bilinear": Resampling.bilinear,
     "cubic":    Resampling.cubic,
+    "mode":     Resampling.mode,
 }
+
+# Abbildung lokaler Methodennamen (rasterio) auf die openEO-Namen, die CDSE
+# fuer resample_spatial / resample_cube_spatial akzeptiert (laut
+# describe_process: average, bilinear, cubic, cubicspline, lanczos, max, med,
+# min, mode, near, q1, q3, rms, sum).
+#
+# WARUM ueberhaupt: --local-resampling steuerte bisher NUR die lokale
+# Reprojektion, waehrend die serverseitigen Resample-Knoten fest auf "near"
+# standen. Bei --resolution != 10 vergroebern damit beide Seiten
+# UNTERSCHIEDLICH - gemessen berlin/medium/60 m: MAE 402 (nearest) bzw. 322
+# (bilinear) gegenueber 0,0014 bei nativer Aufloesung. Der Graph leitet die
+# Methode jetzt aus derselben Quelle ab.
+#
+# 'nearest' -> 'near' ist der einzige Namensunterschied und zugleich der
+# Default - dadurch bleiben die Graphen bei Default-Konfiguration
+# byte-identisch zum bisherigen Stand.
+OPENEO_RESAMPLE_METHOD = {
+    "nearest":  "near",
+    "bilinear": "bilinear",
+    "cubic":    "cubic",
+    "mode":     "mode",
+}
+
+
+def _pg_resample_method(resampling: str) -> str:
+    """openEO-Methodenname fuer einen lokalen Resampling-Namen.
+
+    Unbekannte Werte fallen auf 'near' zurueck, damit ein Graph niemals mit
+    einer vom Backend abgelehnten Methode gebaut wird (die CLI validiert die
+    Auswahl ohnehin vorher ueber die choices von --local-resampling).
+    """
+    return OPENEO_RESAMPLE_METHOD.get(resampling, "near")
 
 # ---------------------------------------------------------------------------
 # DEM-Layout Experiment (Nebenkapitel): interne Struktur des extern
@@ -1464,7 +1522,8 @@ def _load_bench_template(region: str, extent_size: str = "medium") -> dict:
 
 def _build_workflow_pg(template: dict, workflow: str, region: str = None,
                        resolution: float = DEFAULT_RESOLUTION_M,
-                       dataset: str = DEFAULT_DATASET) -> dict:
+                       dataset: str = DEFAULT_DATASET,
+                       resampling: str = "nearest") -> dict:
     """Baut den process_graph fuer den gewuenschten Workflow.
 
     Alle Workflows starten von der merge_add-Baseline (bench_onthefly_{region}.json)
@@ -1714,7 +1773,7 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
                 "projection": 3035,
                 "resolution": _pg_resolution(
                     resolution * RESAMPLE_DETOUR_FACTOR),
-                "method": "near",
+                "method": _pg_resample_method(resampling),
             },
             "process_id": "resample_spatial",
         }
@@ -1723,7 +1782,7 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
                 "data": {"from_node": "resamplespatial1"},
                 "projection": target_epsg,
                 "resolution": _pg_resolution(resolution),
-                "method": "near",
+                "method": _pg_resample_method(resampling),
             },
             "process_id": "resample_spatial",
         }
@@ -1771,9 +1830,10 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
 
 
 def _force_onthefly_target_crs(pg: dict, target_epsg: int,
-                               resolution: float = DEFAULT_RESOLUTION_M) -> None:
-    """In-place: haengt resample_spatial(target_epsg, resolution, near) hinter
-    loadcollection1 (S2) und biegt alle Verbraucher darauf um.
+                               resolution: float = DEFAULT_RESOLUTION_M,
+                               resampling: str = "nearest") -> None:
+    """In-place: haengt resample_spatial(target_epsg, resolution, method)
+    hinter loadcollection1 (S2) und biegt alle Verbraucher darauf um.
 
     Zweck: Ueberspannt der Extent eine UTM-Zonengrenze, liegen die S2-Daten
     in zwei Zonen (z.B. 32632+32633) und CDSE bricht ohne Ziel-CRS-Vorgabe
@@ -1810,7 +1870,7 @@ def _force_onthefly_target_crs(pg: dict, target_epsg: int,
             "data": {"from_node": "loadcollection1"},
             "projection": target_epsg,
             "resolution": _pg_resolution(resolution),
-            "method": "near",
+            "method": _pg_resample_method(resampling),
         },
         "process_id": "resample_spatial",
     }
@@ -1821,7 +1881,8 @@ def build_onthefly_scenario(region: str, target_path: Path,
                             workflow: str = "merge_add",
                             force_target_crs: bool = False,
                             resolution: float = DEFAULT_RESOLUTION_M,
-                            dataset: str = DEFAULT_DATASET) -> Path:
+                            dataset: str = DEFAULT_DATASET,
+                            resampling: str = "nearest") -> Path:
     """Onthefly = Workflow-PG aus bench_onthefly_{region}.json gebaut.
 
     Ueberspannt der Extent mehrere UTM-Zonen (oder ist force_target_crs
@@ -1835,7 +1896,8 @@ def build_onthefly_scenario(region: str, target_path: Path,
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
-                            resolution=resolution, dataset=dataset)
+                            resolution=resolution, dataset=dataset,
+                            resampling=resampling)
     extent = template["process_graph"]["loadcollection1"]["arguments"][
         "spatial_extent"]
     spans_zones = _extent_spans_multiple_utm_zones(extent)
@@ -1852,7 +1914,8 @@ def build_onthefly_scenario(region: str, target_path: Path,
             reason = f"--resolution {resolution:g} m"
         print(f"  onthefly: explizites Ziel-CRS EPSG:{target_epsg} "
               f"@ {resolution:g} m ({reason})")
-        _force_onthefly_target_crs(pg, target_epsg, resolution=resolution)
+        _force_onthefly_target_crs(pg, target_epsg, resolution=resolution,
+                                   resampling=resampling)
     with open(target_path, "w") as f:
         json.dump({"process_graph": pg}, f, indent=2)
     return target_path
@@ -1894,7 +1957,8 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
                             workflow: str = "merge_add",
                             resample_s2_to_dem: bool = False,
                             resolution: float = DEFAULT_RESOLUTION_M,
-                            dataset: str = DEFAULT_DATASET) -> Path:
+                            dataset: str = DEFAULT_DATASET,
+                            resampling: str = "nearest") -> Path:
     """
     Erzeugt das load_stac Szenario fuer den gewuenschten Workflow:
     Workflow-PG (s. _build_workflow_pg) wird gebaut, dann wird
@@ -1909,9 +1973,12 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     ausgerichtet. Per openEO-Spec uebernimmt data dabei Aufloesung/CRS/
     Alignment des target-Cubes; NUR S2 wird resampled, das DEM (der
     zeitlose reducedimension_dem-Cube) laeuft durch KEIN Resample.
-    method='near': konsistent zur Repo-Konvention (nearest ist der
-    pixelwert-erhaltende Default der lokalen Pipeline; bilinear/cubic
-    wuerden S2-Werte glaetten und den MAE-Vergleich verfaelschen).
+    method: wird aus --local-resampling abgeleitet (nearest -> near), damit
+    die serverseitige Vergroeberung dieselbe ist wie die lokale. Vorher
+    stand hier fest 'near', waehrend lokal z.B. bilinear lief - bei
+    --resolution != 10 vergroebern beide Seiten dann unterschiedlich, was
+    sich als grosser MAE niederschlaegt (berlin/medium/60 m: 402 bzw. 322
+    gegenueber 0,0014 bei nativer Aufloesung).
     Ob CDSE das DEM-Gitter dann wirklich uebernimmt, zeigt erst der
     Serverlauf (Ursprung des Ergebnis-Grids).
 
@@ -1925,7 +1992,8 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
-                            resolution=resolution, dataset=dataset)
+                            resolution=resolution, dataset=dataset,
+                            resampling=resampling)
 
     # loadcollection2 entfernen und durch loadstac1 ersetzen
     pg.pop("loadcollection2", None)
@@ -1974,7 +2042,7 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
             "arguments": {
                 "data": {"from_node": "loadcollection1"},
                 "target": {"from_node": "reducedimension_dem"},
-                "method": "near",
+                "method": _pg_resample_method(resampling),
             },
             "process_id": "resample_cube_spatial",
         }
@@ -1984,7 +2052,8 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
         target_epsg = REGIONS[region]["epsg"]
         print(f"  local_pp: S2 explizit auf EPSG:{target_epsg} "
               f"@ {resolution:g} m resamplen (--resolution)")
-        _force_onthefly_target_crs(pg, target_epsg, resolution=resolution)
+        _force_onthefly_target_crs(pg, target_epsg, resolution=resolution,
+                                   resampling=resampling)
 
     scenario = {"process_graph": pg}
     with open(target_path, "w") as f:
@@ -2205,7 +2274,8 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
                            workflow: str = "merge_add",
                            save_format: str = "GTiff",
                            resolution: float = DEFAULT_RESOLUTION_M,
-                           dataset: str = DEFAULT_DATASET) -> Path:
+                           dataset: str = DEFAULT_DATASET,
+                           resampling: str = "nearest") -> Path:
     """
     Process Graph fuer full_preprocessing: ZWEI load_stac Aufrufe
     (loadstac1=S2, loadstac2=DEM) + Workflow-Verknuepfung.
@@ -2229,7 +2299,8 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
-                            resolution=resolution, dataset=dataset)
+                            resolution=resolution, dataset=dataset,
+                            resampling=resampling)
 
     pg.pop("loadcollection1", None)
     pg.pop("loadcollection2", None)
@@ -2956,6 +3027,7 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
             force_target_crs=getattr(args, "force_target_crs", False),
             resolution=resolution,
             dataset=dataset,
+            resampling=args.local_resampling,
         )
         _write_run_meta(outdir, resolution, dataset=dataset)
         results = run_openeo(args.api_url, str(scenario_path), str(outdir),
@@ -3390,6 +3462,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             resample_s2_to_dem=getattr(args, "resample_s2_to_dem", False),
             resolution=resolution,
             dataset=dataset,
+            resampling=args.local_resampling,
         )
         _write_run_meta(base, resolution, dataset=dataset)
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
@@ -3745,6 +3818,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             save_format=fullpp_save_format,
             resolution=resolution,
             dataset=dataset,
+            resampling=args.local_resampling,
         )
         results_main = run_openeo(args.api_url, str(scenario_path), str(main_dir),
                                   job_timeout=args.job_timeout)
@@ -4025,7 +4099,8 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
     marker_scenario_path = base / f"local_reference_{region}.json"
     template = _load_bench_template(region, args.extent_size)
     marker_pg = _build_workflow_pg(template, args.workflow, region=region,
-                                   resolution=resolution, dataset=dataset)
+                                   resolution=resolution, dataset=dataset,
+                                   resampling=args.local_resampling)
     with open(marker_scenario_path, "w") as f:
         json.dump({
             "process_graph": marker_pg,
@@ -5404,12 +5479,22 @@ def main() -> None:
                              "verwendet.")
     parser.add_argument("--local-resampling", default="nearest",
                         choices=tuple(LOCAL_RESAMPLING.keys()),
-                        help="Resampling-Methode fuer die lokale DEM-Reprojektion "
-                             "(nur local_preprocessing). nearest (Default) ist "
+                        help="Resampling-Methode fuer die Reprojektion des "
+                             "zweiten Rasters. nearest (Default) ist "
                              "pixelidentisch zu CDSE - der Accuracy-Check liefert "
                              "dann MAE=RMSE=0. bilinear/cubic weichen vom "
                              "CDSE-Output ab und machen den Accuracy-Check "
-                             "aussagekraeftig.")
+                             "aussagekraeftig. mode (Mehrheitsentscheidung) "
+                             "nur mit --dataset landcover: das fachlich "
+                             "richtige Vergroeberungsverfahren fuer Klassen, "
+                             "weil es keine Klassen-IDs mittelt. "
+                             "WIRKT AUF BEIDE SEITEN: der Wert bestimmt "
+                             "seit dieser Aenderung auch die method der "
+                             "serverseitigen resample_spatial-/"
+                             "resample_cube_spatial-Knoten (nearest -> near). "
+                             "Vorher stand dort fest 'near', wodurch lokale "
+                             "und CDSE-seitige Vergroeberung bei "
+                             "--resolution != 10 auseinanderliefen.")
     parser.add_argument("--resolution", type=float, default=DEFAULT_RESOLUTION_M,
                         help=f"Ziel-Zellgroesse in METERN fuer ALLE Pfade "
                              f"(Default {DEFAULT_RESOLUTION_M:g} = Sentinel-2 "

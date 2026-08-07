@@ -44,6 +44,10 @@ RESAMPLING_METHODS = {
     "nearest":  Resampling.nearest,
     "bilinear": Resampling.bilinear,
     "cubic":    Resampling.cubic,
+    # Mehrheitsentscheidung - fuer kategoriale Raster. Muss hier mitgefuehrt
+    # werden, weil run_benchmark den Wert von --local-resampling direkt an
+    # align_rasters durchreicht.
+    "mode":     Resampling.mode,
 }
 
 
