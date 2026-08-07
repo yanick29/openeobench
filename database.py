@@ -152,6 +152,11 @@ def create_database():
         c.execute("ALTER TABLE runs ADD COLUMN dem_snap TEXT")
     if "dem_tiles" not in existing_run_cols:
         c.execute("ALTER TABLE runs ADD COLUMN dem_tiles INTEGER")
+    # Ziel-Zellgroesse in Metern (--resolution). Ohne diese Spalte sind
+    # Laeufe mit unterschiedlicher Aufloesung in der Auswertung nicht
+    # trennbar - Laufzeit/Datenvolumen/Genauigkeit haengen direkt daran.
+    if "resolution_m" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN resolution_m DOUBLE")
 
     conn.commit()
     conn.close()
@@ -180,13 +185,15 @@ def _ensure_run_extra_columns(conn):
             conn.execute(f"ALTER TABLE runs ADD COLUMN {col} TEXT")
     if "dem_tiles" not in cols:
         conn.execute("ALTER TABLE runs ADD COLUMN dem_tiles INTEGER")
+    if "resolution_m" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN resolution_m DOUBLE")
 
 
 def import_run(output_directory, crs_strategy=None, run_type=None,
                preprocessing_time=None, extent_size=None, dem_download_time=None,
                s2_download_time=None, workflow=None, local_resampling=None,
                target_crs=None, dem_layout=None, dem_format=None,
-               dem_snap=None, dem_tiles=None):
+               dem_snap=None, dem_tiles=None, resolution_m=None):
     """Importiert einen Run aus results.json und job-results.json in die DB."""
     conn = duckdb.connect(DB_PATH)
     _ensure_run_extra_columns(conn)
@@ -306,11 +313,11 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         crs_strategy, run_type, preprocessing_time, dem_download_time,
         s2_download_time, extent_size,
         workflow, local_resampling, target_crs, dem_layout, dem_format,
-        dem_snap, dem_tiles,
+        dem_snap, dem_tiles, resolution_m,
         credits, cpu_seconds, duration_backend, input_pixels_mp, max_memory_gb,
         git_commit, openeo_version, rasterio_version, numpy_version,
         proj_version, environment_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
         run_id,
         results.get("backend_url"),
         results.get("backend_name"),
@@ -344,6 +351,7 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         dem_format,
         dem_snap,
         dem_tiles,
+        resolution_m,
         results.get("credits"),
         results.get("cpu_seconds"),
         results.get("duration_backend"),

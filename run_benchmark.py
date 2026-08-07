@@ -59,6 +59,43 @@ SIZE_KM = {"small": 5.0, "medium": 10.0, "large": 50.0, "xlarge": 100.0, "xxlarg
 WORKFLOWS = ("merge_add", "subtract", "mask", "aggregation", "focal", "resample",
              "filter_bbox")
 
+# Ziel-Zellgroesse in Metern. 10 m = Sentinel-2 B04 nativ und damit das
+# bisherige, fest verdrahtete Verhalten. Ueber --resolution steuerbar
+# (Experimentdimension Zellgroesse -> Laufzeit/Datenvolumen/Genauigkeit).
+DEFAULT_RESOLUTION_M = 10.0
+
+# Faktor fuer den Zwischenschritt von workflow=resample: das PG resampelt
+# nach EPSG:3035 @ (Faktor x Zielaufloesung) und wieder zurueck. Bei der
+# Default-Aufloesung ergibt das exakt die bisherigen 30 m.
+RESAMPLE_DETOUR_FACTOR = 3
+
+
+def _pg_resolution(res: float):
+    """Aufloesungswert wie er in einen openEO-Process-Graph geschrieben wird.
+
+    Ganzzahlige Werte werden als int serialisiert - so bleibt der Graph bei
+    der Default-Aufloesung BYTE-identisch zu den bisherigen Szenarien
+    ("resolution": 10, nicht 10.0).
+    """
+    return int(res) if float(res).is_integer() else float(res)
+
+
+def _resolution_of(args) -> float:
+    """Ziel-Zellgroesse aus den CLI-Args, mit Default und Plausibilitaets-
+    pruefung. Zentral, damit jeder Strategie-Pfad denselben Wert sieht."""
+    res = float(getattr(args, "resolution", DEFAULT_RESOLUTION_M)
+                or DEFAULT_RESOLUTION_M)
+    if res <= 0:
+        raise ValueError(f"--resolution muss > 0 sein (ist {res}).")
+    return res
+
+
+def _is_default_resolution(res: float) -> bool:
+    """True, wenn die Aufloesung der historischen 10 m entspricht. Nur dann
+    bleiben Prozessgraphen unveraendert (kein zusaetzlicher Resample-Knoten).
+    """
+    return abs(float(res) - DEFAULT_RESOLUTION_M) < 1e-9
+
 # Lokale DEM-Resampling-Methoden. CDSE intern nutzt immer NearestNeighbor;
 # bilinear/cubic lokal erzeugen messbare Abweichungen zum onthefly-Output.
 LOCAL_RESAMPLING = {
@@ -123,6 +160,13 @@ def _parse_epsg(crs_str: str) -> int:
 def _is_utm_epsg(epsg: int) -> bool:
     """True wenn EPSG ein UTM-CRS ist (32601-32660 N, 32701-32760 S)."""
     return (32601 <= epsg <= 32660) or (32701 <= epsg <= 32760)
+
+
+def _crs_is_geographic(crs_str: str) -> bool:
+    """True wenn das CRS in Grad rechnet (WGS84 & Co). Nur fuer die Warnung,
+    dass eine in Metern gemeinte --resolution dort keine Meter sind."""
+    from rasterio.crs import CRS as _RIOCRS
+    return bool(_RIOCRS.from_user_input(crs_str).is_geographic)
 
 # ---------------------------------------------------------------------------
 # Hetzner-Konfiguration (per ENV ueberschreibbar; CLI-Flags --host / --web-path
@@ -194,6 +238,29 @@ def _make_outdir(base: str, strategy: str) -> Path:
     p = Path(base) / f"run_{_ts()}_{label}"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+RUN_META_FILENAME = "run_meta.json"
+
+
+def _write_run_meta(run_dir: Path, resolution: float, **extra) -> Path:
+    """Schreibt run_meta.json in einen Run-Ordner (Zielaufloesung + optionale
+    Zusatzfelder).
+
+    Bewusst eine EIGENE Datei und kein Feld im Szenario-JSON: der
+    Process-Graph muss bei Default-Aufloesung byte-identisch zu den
+    bisherigen Szenarien bleiben. Gelesen wird sie von
+    _detect_folder_resolution, damit der Accuracy-Check Referenz und Test
+    nach Aufloesung paart statt Gitter unterschiedlicher Zellgroesse zu
+    vergleichen.
+    """
+    meta = {"resolution_m": float(resolution)}
+    meta.update(extra)
+    path = Path(run_dir) / RUN_META_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(meta, f, indent=2)
+    return path
 
 
 def _compute_overview_factors(width: int, height: int, min_size: int = 256) -> list:
@@ -648,7 +715,7 @@ def _inspect_asset_size(path) -> dict:
 
 def _reproject_dem_to_array(input_tif: str, dst_crs: str,
                             resampling: str = "nearest",
-                            target_resolution: float = 10.0):
+                            target_resolution: float = DEFAULT_RESOLUTION_M):
     """Reprojiziert ein Quell-GeoTIFF in einen In-Memory Numpy-Puffer.
 
     Gibt (data, dst_meta) zurueck. data ist shape (count, height, width)
@@ -665,7 +732,8 @@ def _reproject_dem_to_array(input_tif: str, dst_crs: str,
     import numpy as np
     method = LOCAL_RESAMPLING[resampling]
 
-    # UTM-Detection: nur dann 10 m erzwingen + auf S2-Grid snappen.
+    # UTM-Detection: nur dort target_resolution erzwingen + auf das
+    # Vielfachen-Raster snappen (S2-Gitter-Semantik gibt es nur in UTM).
     is_utm = False
     try:
         is_utm = _is_utm_epsg(_parse_epsg(dst_crs))
@@ -691,12 +759,31 @@ def _reproject_dem_to_array(input_tif: str, dst_crs: str,
             width  = int(round((snapped_right - snapped_left) / res))
             height = int(round((snapped_top - snapped_bottom) / res))
             transform = Affine(res, 0, snapped_left, 0, -res, snapped_top)
-        else:
+        elif _is_default_resolution(target_resolution):
             # Nicht-UTM (LAEA, WGS84, Web Mercator, ...): native Reprojektions-
             # Aufloesung, kein S2-Snap. CDSE bekommt damit ein "echtes"
             # cross-CRS Resampling-Problem zu loesen.
             transform, width, height = calculate_default_transform(
                 src.crs, dst_crs, src.width, src.height, *src.bounds,
+            )
+        else:
+            # Nicht-UTM MIT explizit gesetzter --resolution: die Zellgroesse
+            # wird vorgegeben, aber NICHT gesnappt - der Snap auf Vielfache
+            # ist S2-Gitter-Semantik und in LAEA/WGS84 bedeutungslos. Ohne
+            # diesen Zweig wuerde --resolution bei Nicht-UTM-Zielen still
+            # wirkungslos bleiben. In WGS84 ist die Einheit Grad, nicht
+            # Meter - dort ist ein Meterwert als Zellgroesse sinnlos, daher
+            # die Warnung.
+            try:
+                if _crs_is_geographic(dst_crs):
+                    print(f"  [warn] --resolution {target_resolution:g} wird "
+                          f"in {dst_crs} als GRAD interpretiert (geographisches "
+                          f"CRS), nicht als Meter.")
+            except Exception:
+                pass
+            transform, width, height = calculate_default_transform(
+                src.crs, dst_crs, src.width, src.height, *src.bounds,
+                resolution=target_resolution,
             )
 
         dst_meta = src.meta.copy()
@@ -735,7 +822,7 @@ def _grid_from_dst_meta(dst_meta: dict) -> dict:
 
 
 def _s2_grid_from_extent(extent: dict, epsg: int,
-                         resolution: float = 10.0) -> dict:
+                         resolution: float = DEFAULT_RESOLUTION_M) -> dict:
     """Erwartetes CDSE-Zielgitter aus dem angefragten Extent ableiten
     (--snap-dem-to-s2), OHNE S2-Datei und OHNE CDSE-Aufruf.
 
@@ -1043,7 +1130,7 @@ def _verify_snap_crop_identity(data_snapped, meta_snapped,
 def reproject_dem_local(input_tif: str, output_tif: str,
                         dst_crs: str = "EPSG:32633",
                         resampling: str = "nearest",
-                        target_resolution: float = 10.0,
+                        target_resolution: float = DEFAULT_RESOLUTION_M,
                         layout: str = "striped") -> float:
     """Reprojiziert ein GeoTIFF lokal und resampelt auf target_resolution.
 
@@ -1218,7 +1305,8 @@ def _load_bench_template(region: str, extent_size: str = "medium") -> dict:
     return template
 
 
-def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dict:
+def _build_workflow_pg(template: dict, workflow: str, region: str = None,
+                       resolution: float = DEFAULT_RESOLUTION_M) -> dict:
     """Baut den process_graph fuer den gewuenschten Workflow.
 
     Alle Workflows starten von der merge_add-Baseline (bench_onthefly_{region}.json)
@@ -1393,13 +1481,18 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
             raise ValueError("workflow=resample benoetigt 'region' fuer das Ziel-UTM.")
         target_epsg = REGIONS[region]["epsg"]
         # DEM (bereits umbenannt auf B04 + t-Dimension entfernt) nach EPSG:3035
-        # @ 30m und zurueck nach UTM @ 10m resamplen. Reine CDSE-Operation -
-        # testet das interne Resampling.
+        # @ (3x Zielaufloesung) und zurueck nach UTM @ Zielaufloesung
+        # resamplen. Reine CDSE-Operation - testet das interne Resampling.
+        # Der Umweg skaliert MIT der Zielaufloesung (RESAMPLE_DETOUR_FACTOR),
+        # damit er auch bei grober Zellgroesse ein echter Groebungsschritt
+        # bleibt und nicht zum Hochsampeln wird; bei 10 m ergibt das exakt
+        # die bisherigen 30 m.
         pg["resamplespatial1"] = {
             "arguments": {
                 "data": {"from_node": "reducedimension_dem"},
                 "projection": 3035,
-                "resolution": 30,
+                "resolution": _pg_resolution(
+                    resolution * RESAMPLE_DETOUR_FACTOR),
                 "method": "near",
             },
             "process_id": "resample_spatial",
@@ -1408,7 +1501,7 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
             "arguments": {
                 "data": {"from_node": "resamplespatial1"},
                 "projection": target_epsg,
-                "resolution": 10,
+                "resolution": _pg_resolution(resolution),
                 "method": "near",
             },
             "process_id": "resample_spatial",
@@ -1456,8 +1549,9 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None) -> dic
     raise ValueError(f"Unbekannter Workflow: {workflow}")
 
 
-def _force_onthefly_target_crs(pg: dict, target_epsg: int) -> None:
-    """In-place: haengt resample_spatial(target_epsg, 10 m, near) hinter
+def _force_onthefly_target_crs(pg: dict, target_epsg: int,
+                               resolution: float = DEFAULT_RESOLUTION_M) -> None:
+    """In-place: haengt resample_spatial(target_epsg, resolution, near) hinter
     loadcollection1 (S2) und biegt alle Verbraucher darauf um.
 
     Zweck: Ueberspannt der Extent eine UTM-Zonengrenze, liegen die S2-Daten
@@ -1466,6 +1560,11 @@ def _force_onthefly_target_crs(pg: dict, target_epsg: int) -> None:
     CRSes across input"). Das explizite Ziel-CRS zwingt alle S2-Eingaben in
     die primaere Zone der Region; das DEM (EPSG:4326) folgt danach wie
     bisher implizit dem cube1-Grid im merge_cubes.
+
+    Zweiter Verwendungszweck (--resolution != 10): derselbe Knoten gibt CDSE
+    die Zellgroesse explizit vor, sonst liefert das Backend sein natives
+    10-m-S2-Gitter und der Aufloesungs-Vergleich waere wirkungslos. Deshalb
+    'resolution' als Parameter statt fest verdrahtet.
 
     Knotenname bewusst NICHT resamplespatial1/2 - diese Namen sind die
     Workflow-Signatur von workflow=resample (_detect_pg_workflow).
@@ -1489,7 +1588,7 @@ def _force_onthefly_target_crs(pg: dict, target_epsg: int) -> None:
         "arguments": {
             "data": {"from_node": "loadcollection1"},
             "projection": target_epsg,
-            "resolution": 10,
+            "resolution": _pg_resolution(resolution),
             "method": "near",
         },
         "process_id": "resample_spatial",
@@ -1499,27 +1598,39 @@ def _force_onthefly_target_crs(pg: dict, target_epsg: int) -> None:
 def build_onthefly_scenario(region: str, target_path: Path,
                             extent_size: str = "medium",
                             workflow: str = "merge_add",
-                            force_target_crs: bool = False) -> Path:
+                            force_target_crs: bool = False,
+                            resolution: float = DEFAULT_RESOLUTION_M) -> Path:
     """Onthefly = Workflow-PG aus bench_onthefly_{region}.json gebaut.
 
     Ueberspannt der Extent mehrere UTM-Zonen (oder ist force_target_crs
     gesetzt), bekommt der Graph ein explizites Ziel-CRS (primaere UTM-Zone
     der Region, s. _force_onthefly_target_crs). Ein-Zonen-Extents bleiben
     byte-identisch zum bisherigen Graphen.
+
+    Bei --resolution != 10 wird derselbe Knoten gesetzt, dann aber wegen der
+    Zellgroesse: ohne ihn liefert CDSE sein natives 10-m-S2-Gitter und die
+    Aufloesung waere im Ergebnis nicht wirksam.
     """
     template = _load_bench_template(region, extent_size)
-    pg = _build_workflow_pg(template, workflow, region=region)
+    pg = _build_workflow_pg(template, workflow, region=region,
+                            resolution=resolution)
     extent = template["process_graph"]["loadcollection1"]["arguments"][
         "spatial_extent"]
     spans_zones = _extent_spans_multiple_utm_zones(extent)
-    if force_target_crs or spans_zones:
+    custom_res = not _is_default_resolution(resolution)
+    if force_target_crs or spans_zones or custom_res:
         target_epsg = REGIONS[region]["epsg"]
-        reason = ("Extent ueberspannt UTM-Zonen "
-                  f"{_utm_zone_for_lon(extent['west'])}+"
-                  f"{_utm_zone_for_lon(extent['east'])}"
-                  if spans_zones else "--force-target-crs")
-        print(f"  onthefly: explizites Ziel-CRS EPSG:{target_epsg} ({reason})")
-        _force_onthefly_target_crs(pg, target_epsg)
+        if spans_zones:
+            reason = ("Extent ueberspannt UTM-Zonen "
+                      f"{_utm_zone_for_lon(extent['west'])}+"
+                      f"{_utm_zone_for_lon(extent['east'])}")
+        elif force_target_crs:
+            reason = "--force-target-crs"
+        else:
+            reason = f"--resolution {resolution:g} m"
+        print(f"  onthefly: explizites Ziel-CRS EPSG:{target_epsg} "
+              f"@ {resolution:g} m ({reason})")
+        _force_onthefly_target_crs(pg, target_epsg, resolution=resolution)
     with open(target_path, "w") as f:
         json.dump({"process_graph": pg}, f, indent=2)
     return target_path
@@ -1556,7 +1667,8 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
                             target_path: Path,
                             extent_size: str = "medium",
                             workflow: str = "merge_add",
-                            resample_s2_to_dem: bool = False) -> Path:
+                            resample_s2_to_dem: bool = False,
+                            resolution: float = DEFAULT_RESOLUTION_M) -> Path:
     """
     Erzeugt das load_stac Szenario fuer den gewuenschten Workflow:
     Workflow-PG (s. _build_workflow_pg) wird gebaut, dann wird
@@ -1576,9 +1688,18 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     wuerden S2-Werte glaetten und den MAE-Vergleich verfaelschen).
     Ob CDSE das DEM-Gitter dann wirklich uebernimmt, zeigt erst der
     Serverlauf (Ursprung des Ergebnis-Grids).
+
+    resolution != 10: das lokal reprojizierte DEM traegt die Zellgroesse
+    bereits, S2 kommt aber weiterhin nativ mit 10 m - und beim merge_cubes
+    gibt cube1 (S2) das Gitter vor, wuerde das DEM also wieder auf 10 m
+    ziehen. Deshalb bekommt S2 denselben resample_spatial-Knoten wie in
+    build_onthefly_scenario (resampletargetcrs1). Mit --resample-s2-to-dem
+    ist das unnoetig: dort wird S2 ohnehin per resample_cube_spatial auf das
+    DEM-Gitter gezogen, das die Aufloesung schon traegt.
     """
     template = _load_bench_template(region, extent_size)
-    pg = _build_workflow_pg(template, workflow, region=region)
+    pg = _build_workflow_pg(template, workflow, region=region,
+                            resolution=resolution)
 
     # loadcollection2 entfernen und durch loadstac1 ersetzen
     pg.pop("loadcollection2", None)
@@ -1631,6 +1752,13 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
             },
             "process_id": "resample_cube_spatial",
         }
+    elif not _is_default_resolution(resolution):
+        # S2 explizit auf die Zielaufloesung bringen, sonst zwingt das
+        # native 10-m-S2-Gitter beim merge_cubes das DEM zurueck auf 10 m.
+        target_epsg = REGIONS[region]["epsg"]
+        print(f"  local_pp: S2 explizit auf EPSG:{target_epsg} "
+              f"@ {resolution:g} m resamplen (--resolution)")
+        _force_onthefly_target_crs(pg, target_epsg, resolution=resolution)
 
     scenario = {"process_graph": pg}
     with open(target_path, "w") as f:
@@ -1738,15 +1866,21 @@ def reproject_dem_to_grid(input_tif: str, output_tif: str, grid: dict,
 
 
 def reproject_s2_local(input_tif: str, output_tif: str,
-                       dst_crs: str, resampling: str = "nearest") -> float:
+                       dst_crs: str, resampling: str = "nearest",
+                       target_resolution: float = None) -> float:
     """Reprojiziert ein S2-TIF lokal nach dst_crs (Szenario 3: BEIDE Raster
-    in Nicht-UTM-CRS). Default-Aufloesung aus calculate_default_transform.
+    in Nicht-UTM-CRS). Ohne target_resolution die Default-Aufloesung aus
+    calculate_default_transform (bisheriges Verhalten); mit gesetztem Wert
+    die vorgegebene Zellgroesse, damit S2 und DEM bei --resolution auf
+    derselben Aufloesung landen.
     """
     method = LOCAL_RESAMPLING.get(resampling, Resampling.nearest)
     t0 = time.time()
     with rasterio.open(input_tif) as src:
+        extra = ({"resolution": target_resolution}
+                 if target_resolution is not None else {})
         transform, width, height = calculate_default_transform(
-            src.crs, dst_crs, src.width, src.height, *src.bounds,
+            src.crs, dst_crs, src.width, src.height, *src.bounds, **extra,
         )
         meta = src.meta.copy()
         meta.update({"crs": dst_crs, "transform": transform,
@@ -1843,7 +1977,8 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
                            target_path: Path,
                            extent_size: str = "medium",
                            workflow: str = "merge_add",
-                           save_format: str = "GTiff") -> Path:
+                           save_format: str = "GTiff",
+                           resolution: float = DEFAULT_RESOLUTION_M) -> Path:
     """
     Process Graph fuer full_preprocessing: ZWEI load_stac Aufrufe
     (loadstac1=S2, loadstac2=DEM) + Workflow-Verknuepfung.
@@ -1858,9 +1993,16 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     wie bisher. Alternative 'netCDF' fuer die Diagnose ob die beobachtete
     Output-Korruption GTiff-spezifisch beim CDSE-Writer ist (Schritt 4 der
     Ursachensuche).
+
+    resolution: wirkt hier NICHT ueber einen Resample-Knoten - bei full_pp
+    kommen BEIDE Cubes per load_stac von Hetzner und tragen die Zellgroesse
+    schon aus der lokalen Reprojektion (s. run_strategy_full_preprocessing).
+    Der Parameter geht nur an _build_workflow_pg weiter, damit
+    workflow=resample seinen Umweg passend skaliert.
     """
     template = _load_bench_template(region, extent_size)
-    pg = _build_workflow_pg(template, workflow, region=region)
+    pg = _build_workflow_pg(template, workflow, region=region,
+                            resolution=resolution)
 
     pg.pop("loadcollection1", None)
     pg.pop("loadcollection2", None)
@@ -2576,18 +2718,22 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
     print(f"  Output: {outdir}")
 
     try:
+        resolution = _resolution_of(args)
         scenario_path = build_onthefly_scenario(
             args.region, outdir / "scenario_onthefly.json",
             extent_size=args.extent_size,
             workflow=args.workflow,
             force_target_crs=getattr(args, "force_target_crs", False),
+            resolution=resolution,
         )
+        _write_run_meta(outdir, resolution)
         results = run_openeo(args.api_url, str(scenario_path), str(outdir),
                              job_timeout=args.job_timeout)
         total_time = results.get("total_time")
         run_id = import_run(str(outdir), crs_strategy="onthefly",
                             run_type=run_type, extent_size=args.extent_size,
-                            workflow=args.workflow)
+                            workflow=args.workflow,
+                            resolution_m=resolution)
         return {
             "strategy": "onthefly", "repeat": repeat_idx + 1, "run_type": run_type,
             "status": results.get("status", "unknown"),
@@ -2707,13 +2853,14 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     # Puffer auf dieses Grid gecroppt. Nur bei UTM-Ziel sinnvoll - die
     # S2-10-m-Grid-Semantik existiert nur dort (gleiche Regel wie der
     # bestehende 10-m-Snap in _reproject_dem_to_array).
+    resolution = _resolution_of(args)
     snap_to_s2 = getattr(args, "snap_dem_to_s2", False)
     snap_grid = None
     if snap_to_s2:
         if _is_utm_epsg(target_epsg):
             snap_grid = _s2_grid_from_extent(
                 _compute_extent(region, args.extent_size), target_epsg,
-                resolution=10.0,
+                resolution=resolution,
             )
         else:
             print(f"  [warn] --snap-dem-to-s2 wird bei Nicht-UTM-Ziel-CRS "
@@ -2746,7 +2893,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
 
     print(f"\n{'='*60}")
     print(f"  Strategie: {strategy_label}  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
-    print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}  |  DEM-Format: {dem_format}"
+    print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}  |  Aufloesung: "
+          f"{resolution:g} m  |  DEM-Format: {dem_format}"
           + (f"  |  Layout: {dem_layout}" if dem_format == "gtiff" else "")
           + (f"  |  Tiles: {dem_tiles} "
              f"({'x'.join(map(str, _tile_grid_layout(dem_tiles)))})"
@@ -2767,11 +2915,13 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         # In-Memory-Reprojektion garantiert dass Pixelwerte identisch sind,
         # egal ob GeoTIFF/Zarr/NetCDF - nur der Write unterscheidet sich.
         if snap_to_s2:
-            grid_info = "10 m, Extent-Snap auf S2/CDSE-Zielgitter"
+            grid_info = f"{resolution:g} m, Extent-Snap auf S2/CDSE-Zielgitter"
         elif _is_utm_epsg(target_epsg):
-            grid_info = "10 m, S2-snap"
-        else:
+            grid_info = f"{resolution:g} m, S2-snap"
+        elif _is_default_resolution(resolution):
             grid_info = "native res"
+        else:
+            grid_info = f"{resolution:g} m, kein Snap (Nicht-UTM)"
         print(f"\n  [Schritt 2/5] Lokal reprojizieren nach {dst_crs} "
               f"({args.local_resampling}, {grid_info}, dem_format={dem_format})...")
         t_reproj_start = time.time()
@@ -2785,7 +2935,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         # unterscheidet sich.
         data, dst_meta = _reproject_dem_to_array(
             dem_tif, dst_crs, resampling=args.local_resampling,
-            target_resolution=10.0,
+            target_resolution=resolution,
         )
         if snap_to_s2:
             data_full, meta_full = data, dst_meta
@@ -2994,7 +3144,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             extent_size=args.extent_size,
             workflow=args.workflow,
             resample_s2_to_dem=getattr(args, "resample_s2_to_dem", False),
+            resolution=resolution,
         )
+        _write_run_meta(base, resolution)
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
                                    job_timeout=args.job_timeout)
         t_main = results_step5.get("total_time") or 0.0
@@ -3035,6 +3187,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             dem_format=dem_format,
             dem_snap="s2" if snap_to_s2 else None,
             dem_tiles=dem_tiles,
+            resolution_m=resolution,
         )
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf
@@ -3114,8 +3267,10 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         target_info += " (nur DEM reprojiziert)"
     else:
         target_info += " (DEM auf S2-Grid gesnapped)"
+    resolution = _resolution_of(args)
     print(f"  Strategie: full_preprocessing  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
-    print(f"  Output: {base}  |  {target_info}")
+    print(f"  Output: {base}  |  {target_info}  |  Aufloesung: {resolution:g} m")
+    _write_run_meta(base, resolution)
 
     try:
         # Schritt 1: S2 von CDSE
@@ -3155,6 +3310,30 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         # target_crs ohne reproject_s2: DEM nach target_crs (S2 unveraendert).
         # target_crs + reproject_s2: BEIDE nach target_crs.
         if target_crs_str is None:
+            # --resolution != 10: die von CDSE gelieferten S2-TIFs sind
+            # nativ 10 m. Das S2-Grid gibt hier aber die Zellgroesse des
+            # ganzen Runs vor (das DEM wird gleich exakt darauf gezogen),
+            # also muss ZUERST S2 lokal auf die Zielaufloesung gebracht
+            # werden - sonst bliebe --resolution in full_pp wirkungslos.
+            if not _is_default_resolution(resolution):
+                print(f"\n  [Schritt 3a/7] S2 lokal auf {resolution:g} m "
+                      f"resamplen ({len(s2_tifs)} TIFs, --resolution)...")
+                s2_res_dir = base / "step3a_s2_resampled"
+                s2_res_dir.mkdir(exist_ok=True)
+                resampled = []
+                for stif in s2_tifs:
+                    out = s2_res_dir / stif.name
+                    with rasterio.open(stif) as _src:
+                        _s2_crs = _src.crs.to_string()
+                    t_s2_reproject_res = reproject_dem_local(
+                        str(stif), str(out), dst_crs=_s2_crs,
+                        resampling=args.local_resampling,
+                        target_resolution=resolution,
+                    )
+                    resampled.append(out)
+                s2_tifs = resampled
+                print(f"  S2 auf {resolution:g} m gebracht "
+                      f"({len(s2_tifs)} TIFs)")
             print(f"\n  [Schritt 3/7] DEM auf S2-Grid reprojizieren (lese Grid aus {s2_tifs[0].name})...")
             s2_grid = read_s2_grid(str(s2_tifs[0]))
             print(f"    S2-Grid: EPSG:{s2_grid['epsg']}, shape={s2_grid['shape']}, transform={s2_grid['transform']}")
@@ -3164,10 +3343,12 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             )
             dem_epsg = s2_grid["epsg"]
         else:
-            print(f"\n  [Schritt 3/7] DEM nach {target_crs_str} reprojizieren ({args.local_resampling})...")
+            print(f"\n  [Schritt 3/7] DEM nach {target_crs_str} reprojizieren "
+                  f"({args.local_resampling}, {resolution:g} m)...")
             t_dem_reproject = reproject_dem_local(
                 dem_tif, dem_repro_tif, dst_crs=target_crs_str,
                 resampling=args.local_resampling,
+                target_resolution=resolution,
             )
             dem_epsg = target_epsg
         print(f"  DEM Reprojektion fertig: {dem_repro_tif}  ({t_dem_reproject:.2f} s)")
@@ -3184,6 +3365,9 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
                 t_s2_reproject += reproject_s2_local(
                     str(stif), str(out), dst_crs=target_crs_str,
                     resampling=args.local_resampling,
+                    target_resolution=(
+                        None if _is_default_resolution(resolution)
+                        else resolution),
                 )
                 new_tifs.append(out)
             s2_for_upload = new_tifs
@@ -3312,6 +3496,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             base / f"full_preprocessing_{region}.json",
             extent_size=args.extent_size, workflow=args.workflow,
             save_format=fullpp_save_format,
+            resolution=resolution,
         )
         results_main = run_openeo(args.api_url, str(scenario_path), str(main_dir),
                                   job_timeout=args.job_timeout)
@@ -3330,6 +3515,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             workflow=args.workflow,
             local_resampling=args.local_resampling,
             target_crs=target_crs_str,
+            resolution_m=resolution,
         )
 
         # Nginx-Logs fuer ALLE relevanten Dateien (TIFs + STAC Items + Collection + DEM)
@@ -3554,23 +3740,27 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
     # plus ein _local_reference-Metadaten-Objekt. Wird von
     # _detect_folder_region / _detect_folder_workflow gefunden, ohne dass das
     # Backend ihn ausgefuehrt hat.
+    resolution = _resolution_of(args)
     marker_scenario_path = base / f"local_reference_{region}.json"
     template = _load_bench_template(region, args.extent_size)
-    marker_pg = _build_workflow_pg(template, args.workflow, region=region)
+    marker_pg = _build_workflow_pg(template, args.workflow, region=region,
+                                   resolution=resolution)
     with open(marker_scenario_path, "w") as f:
         json.dump({
             "process_graph": marker_pg,
             "_local_reference": {
                 "target_crs": target_crs_str,
                 "resampling": args.local_resampling,
-                "target_resolution_m": 10.0,
+                "target_resolution_m": resolution,
                 "workflow": args.workflow,
             },
         }, f, indent=2)
+    _write_run_meta(base, resolution)
 
     print(f"\n{'='*60}")
     print(f"  Strategie: local_reference  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
-    print(f"  Output: {base}  |  Target-CRS: {target_crs_str}  |  Resampling: {args.local_resampling}")
+    print(f"  Output: {base}  |  Target-CRS: {target_crs_str}  |  "
+          f"Aufloesung: {resolution:g} m  |  Resampling: {args.local_resampling}")
 
     try:
         # Schritt 1: S2 von CDSE
@@ -3616,7 +3806,7 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
         # (1136,1044) Shape-Mismatches fuehrte und _apply_local_workflow zum
         # Crash brachte.
         print(f"\n  [Schritt 3/4] Lokale Reprojektion (rasterio, "
-              f"{args.local_resampling}, 10 m, {target_crs_str})...")
+              f"{args.local_resampling}, {resolution:g} m, {target_crs_str})...")
         repro_dir = base / "step3_reprojected"
         repro_dir.mkdir()
         t_repro_start = time.time()
@@ -3627,7 +3817,7 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
             reproject_dem_local(
                 str(s2_tif), str(out),
                 dst_crs=target_crs_str, resampling=args.local_resampling,
-                target_resolution=10.0,
+                target_resolution=resolution,
             )
             s2_repro_tifs.append(out)
 
@@ -3709,6 +3899,7 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
             workflow=args.workflow,
             local_resampling=args.local_resampling,
             target_crs=target_crs_str,
+            resolution_m=resolution,
         )
 
         return {
@@ -3930,9 +4121,66 @@ def _detect_folder_workflow(folder: Path):
     return None
 
 
+def _detect_folder_resolution(folder: Path):
+    """Ziel-Zellgroesse eines Run-Ordners in Metern, oder None.
+
+    Reihenfolge:
+      1. run_meta.json (von allen Runs seit --resolution geschrieben)
+      2. _local_reference.target_resolution_m im Marker-Szenario
+      3. Pixelgroesse des ersten gefundenen Ergebnis-TIF (Fallback fuer
+         Runs, die vor --resolution entstanden sind - dort ist die
+         tatsaechliche Zellgroesse die verlaesslichste Quelle)
+    None heisst "unbekannt", nicht "10".
+    """
+    meta_path = folder / RUN_META_FILENAME
+    if meta_path.is_file():
+        try:
+            val = json.loads(meta_path.read_text()).get("resolution_m")
+            if val is not None:
+                return float(val)
+        except Exception:
+            pass
+    for cand in sorted(folder.glob("*.json")):
+        try:
+            doc = json.loads(cand.read_text())
+        except Exception:
+            continue
+        if isinstance(doc, dict):
+            ref = doc.get("_local_reference")
+            if isinstance(ref, dict) and ref.get("target_resolution_m"):
+                try:
+                    return float(ref["target_resolution_m"])
+                except (TypeError, ValueError):
+                    pass
+    for tif in sorted(folder.rglob("*.tif")):
+        try:
+            with rasterio.open(tif) as src:
+                return abs(float(src.transform.a))
+        except Exception:
+            continue
+    return None
+
+
+def _folder_matches_resolution(folder: Path, resolution: float) -> bool:
+    """Passt der Run-Ordner zur geforderten Zellgroesse?
+
+    Unbekannte Aufloesung (weder run_meta.json noch Marker noch lesbares
+    TIF) wird NUR fuer die historische Default-Aufloesung akzeptiert: alle
+    Laeufe vor dieser Experimentdimension liefen mit 10 m. Bei einer
+    abweichenden Anfrage lieber keinen Kandidaten als den falschen - sonst
+    vergleicht der Accuracy-Check zwei verschiedene Gitter und die
+    MAE-Werte waeren wertlos.
+    """
+    detected = _detect_folder_resolution(folder)
+    if detected is None:
+        return _is_default_resolution(resolution)
+    return abs(detected - float(resolution)) < 1e-6
+
+
 def _find_latest_run_dir(base: str, suffix: str, region: str,
                           extent_size: str = None,
-                          workflow: str = None):
+                          workflow: str = None,
+                          resolution: float = None):
     """Neuesten outputs/run_*_{suffix} fuer Region zurueckgeben, oder None.
 
     Wenn extent_size gesetzt ist, werden nur Ordner beruecksichtigt, deren
@@ -3940,6 +4188,8 @@ def _find_latest_run_dir(base: str, suffix: str, region: str,
     Wenn workflow gesetzt ist, muss zusaetzlich der im Process Graph
     erkannte Workflow uebereinstimmen - das verhindert das versehentliche
     Vergleichen verschiedener Workflow-Varianten der gleichen Region/Extent.
+    Wenn resolution gesetzt ist, muss auch die Zellgroesse uebereinstimmen -
+    ohne das wuerde ein 60-m-Run gegen eine 10-m-Referenz verglichen.
     """
     base_p = Path(base)
     if not base_p.is_dir():
@@ -3959,6 +4209,8 @@ def _find_latest_run_dir(base: str, suffix: str, region: str,
         if target_extent is not None and not _folder_matches_extent(d, target_extent):
             continue
         if workflow is not None and _detect_folder_workflow(d) != workflow:
+            continue
+        if resolution is not None and not _folder_matches_resolution(d, resolution):
             continue
         candidates.append(d)
     if not candidates:
@@ -4357,7 +4609,8 @@ def run_accuracy_check(output_base: str, region: str,
                        test_run_id=None, extent_size: str = None,
                        workflow: str = None,
                        resampling_method: str = "nearest",
-                       reference_strategy: str = "onthefly"):
+                       reference_strategy: str = "onthefly",
+                       resolution: float = None):
     """Neuesten {reference_strategy}-Run vs neuesten {test_strategy}-Run vergleichen.
 
     reference_strategy: "onthefly" (Default) oder "local_reference" (lokale
@@ -4390,13 +4643,15 @@ def run_accuracy_check(output_base: str, region: str,
     print(f"\n{'='*60}")
     extent_info = f"  |  Extent: {extent_size}" if extent_size else ""
     workflow_info = f"  |  Workflow: {workflow}" if workflow else ""
+    res_info = f"  |  Aufloesung: {resolution:g} m" if resolution else ""
     print(f"  Accuracy-Check vs '{reference_strategy}'"
-          f"  |  Region: {region}{extent_info}{workflow_info}")
+          f"  |  Region: {region}{extent_info}{workflow_info}{res_info}")
 
     ref_suffix, _ = _ACCURACY_LAYOUT[reference_strategy]
     reference_dir = _find_latest_run_dir(output_base, ref_suffix, region,
                                          extent_size=extent_size,
-                                         workflow=workflow)
+                                         workflow=workflow,
+                                         resolution=resolution)
 
     # test_strategy auto-detecten: bevorzugt full_pp, dann local_pp, dann
     # (wenn reference != onthefly) auch onthefly. reference selbst ist
@@ -4412,7 +4667,8 @@ def run_accuracy_check(output_base: str, region: str,
             suf, _ = _ACCURACY_LAYOUT[cand]
             if _find_latest_run_dir(output_base, suf, region,
                                     extent_size=extent_size,
-                                    workflow=workflow) is not None:
+                                    workflow=workflow,
+                                    resolution=resolution) is not None:
                 test_strategy = cand
                 break
 
@@ -4427,14 +4683,16 @@ def run_accuracy_check(output_base: str, region: str,
     test_suffix, _ = _ACCURACY_LAYOUT[test_strategy]
     test_dir = _find_latest_run_dir(output_base, test_suffix, region,
                                     extent_size=extent_size,
-                                    workflow=workflow)
+                                    workflow=workflow,
+                                    resolution=resolution)
 
     if not reference_dir or not test_dir:
         miss = reference_strategy if not reference_dir else test_strategy
         extent_msg = f" mit extent_size='{extent_size}'" if extent_size else ""
         wf_msg = f" und workflow='{workflow}'" if workflow else ""
+        res_msg = f" und Aufloesung {resolution:g} m" if resolution else ""
         print(f"  Skip: kein {miss}-Run fuer Region '{region}'"
-              f"{extent_msg}{wf_msg} gefunden.")
+              f"{extent_msg}{wf_msg}{res_msg} gefunden.")
         return None
 
     reference_tif_dir = _tif_dir(reference_dir, reference_strategy)
@@ -4600,6 +4858,26 @@ def main() -> None:
                              "dann MAE=RMSE=0. bilinear/cubic weichen vom "
                              "CDSE-Output ab und machen den Accuracy-Check "
                              "aussagekraeftig.")
+    parser.add_argument("--resolution", type=float, default=DEFAULT_RESOLUTION_M,
+                        help=f"Ziel-Zellgroesse in METERN fuer ALLE Pfade "
+                             f"(Default {DEFAULT_RESOLUTION_M:g} = Sentinel-2 "
+                             f"B04 nativ, bisheriges Verhalten byte-identisch). "
+                             f"Steuert die lokale Reprojektion (Pixelgroesse + "
+                             f"outward-Snap auf Vielfache dieses Werts), das "
+                             f"aus dem Extent rekonstruierte Zielgitter "
+                             f"(--snap-dem-to-s2) und die local_reference-"
+                             f"Pipeline. Bei Werten != "
+                             f"{DEFAULT_RESOLUTION_M:g} bekommt der openEO-"
+                             f"Graph zusaetzlich ein explizites "
+                             f"resample_spatial(projection, resolution) hinter "
+                             f"loadcollection1, damit CDSE nicht sein natives "
+                             f"10-m-Gitter erzwingt. Experimentdimension fuer "
+                             f"den Einfluss der Zellgroesse auf Laufzeit, "
+                             f"Datenvolumen und Genauigkeit; wird als "
+                             f"resolution_m in die DB geschrieben. Referenz- "
+                             f"und Test-Run muessen dieselbe Aufloesung haben - "
+                             f"der Accuracy-Check waehlt die Referenz danach "
+                             f"aus.")
     parser.add_argument("--dem-layout", default="striped",
                         choices=DEM_LAYOUTS,
                         help="Interne Struktur des reprojizierten DEM-GeoTIFF "
@@ -4870,7 +5148,8 @@ def main() -> None:
                            extent_size=args.extent_size,
                            workflow=args.workflow,
                            resampling_method=args.local_resampling,
-                           reference_strategy="onthefly")
+                           reference_strategy="onthefly",
+                           resolution=_resolution_of(args))
 
     if args.reference_check:
         # Pro CDSE-Strategie (onthefly, local_pp, full_pp) einen Vergleich
@@ -4890,11 +5169,13 @@ def main() -> None:
         candidate_strategies = ("onthefly", "local_preprocessing",
                                 "full_preprocessing")
         any_run = False
+        resolution = _resolution_of(args)
         for s in candidate_strategies:
             suf, _ = _ACCURACY_LAYOUT[s]
             if _find_latest_run_dir(args.output_dir, suf, args.region,
                                     extent_size=args.extent_size,
-                                    workflow=args.workflow) is None:
+                                    workflow=args.workflow,
+                                    resolution=resolution) is None:
                 continue
             any_run = True
             run_accuracy_check(
@@ -4905,6 +5186,7 @@ def main() -> None:
                 workflow=args.workflow,
                 resampling_method=args.local_resampling,
                 reference_strategy="local_reference",
+                resolution=resolution,
             )
         if not any_run:
             print("\n[--reference-check] Keine CDSE-Strategie-Runs gefunden "
