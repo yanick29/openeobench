@@ -102,7 +102,12 @@ def _read_xarray_asset(path: Path) -> tuple:
     int16-Werte fuer den Byte-Vergleich."""
     import xarray as xr
     if path.is_dir():
-        ds = xr.open_zarr(str(path), mask_and_scale=False)
+        # consolidated=False: liest bewusst die EINZELDATEIEN des Stores,
+        # nicht die .zmetadata. Damit prueft der Pixel- und Georeferenz-
+        # Vergleich den Store selbst - unabhaengig davon, was Versuch 6 in
+        # die konsolidierte Kopie hineinschreibt. Der konsolidierte Lesepfad
+        # wird in Schritt 6 separat geprueft.
+        ds = xr.open_zarr(str(path), mask_and_scale=False, consolidated=False)
     else:
         ds = xr.open_dataset(str(path), engine="netcdf4",
                              mask_and_scale=False)
@@ -127,6 +132,20 @@ def _read_xarray_asset(path: Path) -> tuple:
     return arr, crs, transform
 
 
+class _RangeHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer mit grosszuegigem Listen-Backlog.
+
+    Der Default (request_queue_size=5) reicht GDAL nicht: /vsicurl oeffnet
+    beim Store-Open mehrere Verbindungen dicht hintereinander, ueberlaufende
+    SYNs werden verworfen und der Client wartet den TCP-Retransmit ab. Das
+    zeigte sich als ~15 s Haenger MITTEN im Open - reproduzierbar-zufaellig
+    und unabhaengig vom Store-Inhalt, weshalb einzelne Messungen sonst
+    grundlos als "Read failed" durchfielen."""
+
+    request_queue_size = 128
+    daemon_threads = True
+
+
 class _RangeHTTPHandler(SimpleHTTPRequestHandler):
     """SimpleHTTPRequestHandler + HTTP-Range-Support (206 Partial Content).
 
@@ -136,13 +155,35 @@ class _RangeHTTPHandler(SimpleHTTPRequestHandler):
     Dateien, single-range ("bytes=start-end"), mehr braucht GDAL nicht.
     """
 
+    # HTTP/1.1 + Keep-Alive. Mit dem Default HTTP/1.0 baut curl fuer JEDEN
+    # der ~20 Requests eines Store-Opens eine neue TCP-Verbindung auf; unter
+    # Windows fuehrte das sporadisch zu ~15 s Haengern mitten im Open (die
+    # Anfrage erreichte den Handler nie) und damit zu zufaelligen
+    # "Read failed"-Fehlschlaegen unabhaengig vom Store-Inhalt. Der
+    # Benchmark-Host liefert ebenfalls HTTP/1.1 - das ist also zugleich der
+    # realistischere Testpfad. Voraussetzung: JEDE Antwort braucht ein
+    # korrektes Content-Length, sonst laeuft der Client aus dem Tritt.
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, *args):  # kein Request-Spam im Testlog
         pass
+
+    def _not_found(self, head: bool):
+        """404 OHNE Body. send_error() haengt auch bei HEAD einen Body an -
+        curl (also /vsicurl) verliert dadurch den Connection-Sync und laeuft
+        in seinen Timeout statt sofort weiterzumachen. Das kostete pro
+        GDAL-Open ~10 s Stillstand und machte die Messungen unzuverlaessig."""
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", "0" if head else "9")
+        self.end_headers()
+        if not head:
+            self.wfile.write(b"not found")
 
     def do_HEAD(self):
         path = Path(self.translate_path(self.path))
         if not path.is_file():
-            self.send_error(404)
+            self._not_found(head=True)
             return
         size = path.stat().st_size
         self.send_response(200)
@@ -154,7 +195,7 @@ class _RangeHTTPHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = Path(self.translate_path(self.path))
         if not path.is_file():
-            self.send_error(404)
+            self._not_found(head=False)
             return
         size = path.stat().st_size
         start, end, status = 0, size - 1, 200
@@ -185,26 +226,39 @@ class _RangeHTTPHandler(SimpleHTTPRequestHandler):
             self.wfile.write(f.read(length))
 
 
-def _read_zarr_via_vsicurl(store: Path) -> tuple:
+def _read_zarr_via_vsicurl(store: Path, subpath: bool = True) -> tuple:
     """Oeffnet den Zarr-Store per GDAL /vsicurl/ ueber einen lokalen
-    Range-HTTP-Server - OHNE STAC-Item, die Georeferenz muss also aus dem
+    Range-HTTP-Server - OHNE STAC-Item, die Georeferenz muesste also aus dem
     Store selbst kommen. Gibt (crs, transform_tuple, data_3d) zurueck.
+    Pfad case-sensitiv wie auf dem nginx.
 
-    Seit Versuch 5 (Store ohne .zmetadata) geht der Open ueber den
-    direkten ARRAY-Subpfad ZARR:"...":/DEM: ohne konsolidierte Metadaten
-    kann GDAL den Store-ROOT ueber HTTP nicht oeffnen (404 - kein
-    Directory-Listing), der Subpfad braucht nur die einzelnen
-    .zarray/.zattrs und liefert CRS+Transform weiterhin aus dem Store
-    (lokal belegt, GDAL 3.12). Pfad case-sensitiv wie auf dem nginx."""
+    Die 'shape'-Injektion aus Versuch 6 laesst die .zmetadata vollstaendig,
+    also findet GDAL die CF-/GeoZarr-Attribute weiter: Root-Open wie
+    Array-Subpfad liefern EPSG:32633 + korrekten Transform + bitgenaue
+    Pixel (GDAL 3.12). Das ist hier wieder Pflichtkriterium.
+
+    Achtung fuer kuenftige Varianten: WERDEN Eintraege aus der .zmetadata
+    entfernt statt ergaenzt, faellt genau das weg - GDAL behandelt eine
+    vorhandene .zmetadata als vollstaendige Auskunft und fragt dort
+    fehlende Attribute nicht mehr einzeln nach (gemessen: crs=None,
+    Identitaets-Transform, Pixel aber weiterhin bitgenau)."""
     handler = partial(_RangeHTTPHandler, directory=str(store.parent))
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server = _RangeHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         port = server.server_address[1]
-        url = f'ZARR:"/vsicurl/http://127.0.0.1:{port}/{store.name}":/DEM'
-        with rasterio.open(url) as ds:
-            arr = ds.read()
-            return ds.crs, tuple(ds.transform)[:6], arr
+        base = f"/vsicurl/http://127.0.0.1:{port}/{store.name}"
+        url = f'ZARR:"{base}":/DEM' if subpath else f'ZARR:"{base}"'
+        # Timeout als Reissleine: mit vollstaendiger .zmetadata laeuft der
+        # Open in unter einer Sekunde durch. Bei einer defekten Variante
+        # kann GDAL dagegen unbegrenzt warten (bei der verworfenen
+        # Beschneidung nachweislich exakt GDAL_HTTP_TIMEOUT lang, ohne dass
+        # ein Request beim Server ankommt). Gesetzt scheitert der Test dann
+        # schnell, statt zu haengen.
+        with rasterio.Env(GDAL_HTTP_TIMEOUT=20, GDAL_HTTP_MAX_RETRY=0):
+            with rasterio.open(url) as ds:
+                arr = ds.read()
+                return ds.crs, tuple(ds.transform)[:6], arr
     finally:
         server.shutdown()
         server.server_close()
@@ -315,26 +369,78 @@ def main() -> int:
             all_ok = False
 
     # 6. Zarr: Georeferenz muss aus dem STORE ALLEIN kommen (kein STAC-Item).
-    #    6a. Konventions-Attribute liegen wirklich in den .zattrs
-    #    6b. GDAL /vsicurl/-Open ueber lokalen Range-HTTP-Server liefert
-    #        CRS + Transform + identische Pixel
+    #    6a. .zmetadata ist vollstaendig UND jeder Eintrag hat ein 'shape'
+    #    6b. die Einzeldateien im Store tragen die Konventions-Attribute
+    #        unveraendert weiter - die Injektion trifft nur die Kopie
+    #    6c. GDAL /vsicurl/-Open (Root + Array-Subpfad) liefert CRS +
+    #        Transform + identische Pixel
+    #    6d. der konsolidierte Lesepfad funktioniert weiterhin
     print("\n[test] zarr-Georeferenz OHNE STAC-Item (GeoZarr/CF + GDAL _CRS)")
 
-    # 6c (Versuch 5): Store ist UNKONSOLIDIERT - kein .zmetadata, und
-    # 'shape' liegt in jeder einzelnen .zarray (Kern der Hypothese gegen
-    # CDSEs "missing key: 'shape'").
-    zmeta_absent = not (paths["zarr"] / ".zmetadata").exists()
+    # 6a (Versuch 6): .zmetadata ist VORHANDEN und VOLLSTAENDIG (alle
+    # .zarray/.zattrs/.zgroup-Eintraege), aber jeder Eintrag traegt ein
+    # 'shape' - Kern der Hypothese gegen CDSEs "missing key: 'shape'".
+    # Die .zgroup/.zattrs-Eintraege bekommen es injiziert, und zwar den
+    # Shape des DEM-Arrays.
+    zmeta_path = paths["zarr"] / ".zmetadata"
+    zmeta_present = zmeta_path.exists()
+    zmeta_keys, zmeta_ok = [], False
+    if zmeta_present:
+        zdoc = json.loads(zmeta_path.read_text())
+        zmeta = zdoc.get("metadata", {})
+        zmeta_keys = sorted(zmeta)
+        # Referenz: was der Store selbst an Metadatendateien hergibt.
+        store_keys = sorted(p.relative_to(paths["zarr"]).as_posix()
+                            for p in paths["zarr"].rglob(".z*")
+                            if p.name != ".zmetadata")
+        dem_shape = json.loads(
+            (paths["zarr"] / "DEM" / ".zarray").read_text())["shape"]
+        injected = {k: v.get("shape") for k, v in zmeta.items()
+                    if not k.endswith(".zarray")}
+        zmeta_ok = (
+            zmeta_keys == store_keys
+            and all("shape" in v for v in zmeta.values())
+            and all(s == dem_shape for s in injected.values())
+            and zdoc.get("zarr_consolidated_format") == 1
+        )
+        print(f"  .zmetadata: {len(zmeta_keys)} Eintraege, vollstaendig "
+              f"(== Store-Dateien)={zmeta_keys == store_keys}")
+        print(f"  'shape' in JEDEM Eintrag="
+              f"{all('shape' in v for v in zmeta.values())}  "
+              f"injiziert in {sorted(injected)} als {dem_shape}")
+        print(f"  zarr_consolidated_format="
+              f"{zdoc.get('zarr_consolidated_format')}"
+              f"  [{'OK' if zmeta_ok else 'MISMATCH'}]")
+    else:
+        print("  .zmetadata FEHLT - Versuch 6 erwartet sie aber!")
+    if not (zmeta_present and zmeta_ok):
+        all_ok = False
+
+    # 6b: die Einzeldateien bleiben unangetastet - .zgroup/.zattrs existieren
+    # weiter im Store und OHNE das injizierte 'shape'; angefasst wurde nur
+    # die konsolidierte Kopie.
+    raw_attrs_clean = all(
+        "shape" not in json.loads(p.read_text())
+        for p in paths["zarr"].rglob(".zattrs"))
+    files_ok = (paths["zarr"] / ".zgroup").exists()
     shape_ok = True
     for arr_dir in sorted(p for p in paths["zarr"].iterdir() if p.is_dir()):
         zarray = arr_dir / ".zarray"
         has_shape = (zarray.exists()
                      and "shape" in json.loads(zarray.read_text()))
+        has_attrs = (arr_dir / ".zattrs").exists()
         if not has_shape:
             shape_ok = False
-        print(f"  {arr_dir.name}/.zarray: shape={'OK' if has_shape else 'FEHLT'}")
-    print(f"  .zmetadata abwesend={zmeta_absent}  "
-          f"[{'OK' if zmeta_absent and shape_ok else 'MISMATCH'}]")
-    if not (zmeta_absent and shape_ok):
+        if not has_attrs:
+            files_ok = False
+        print(f"  {arr_dir.name}/: .zarray shape="
+              f"{'OK' if has_shape else 'FEHLT'}  "
+              f".zattrs={'vorhanden' if has_attrs else 'FEHLT'}")
+    print(f"  Store-Einzeldateien unveraendert (Root-.zgroup + alle .zattrs)="
+          f"{files_ok}, echte .zattrs OHNE injiziertes 'shape'="
+          f"{raw_attrs_clean}  "
+          f"[{'OK' if files_ok and shape_ok and raw_attrs_clean else 'MISMATCH'}]")
+    if not (files_ok and shape_ok and raw_attrs_clean):
         all_ok = False
 
     dem_attrs = json.loads((paths["zarr"] / "DEM" / ".zattrs").read_text())
@@ -354,12 +460,20 @@ def main() -> int:
     if not conv_ok:
         all_ok = False
 
-    try:
-        vs_crs, vs_tr, vs_arr = _read_zarr_via_vsicurl(paths["zarr"])
-    except Exception as exc:
-        print(f"  /vsicurl-Open FEHLGESCHLAGEN: {type(exc).__name__}: {exc}")
-        all_ok = False
-    else:
+    # 6c: GDAL ueber /vsicurl, Store-Root UND Array-Subpfad. CRS, Transform
+    # UND Pixel sind Pflicht - genau das ist die Absicherung, die die
+    # 'shape'-Injektion (im Gegensatz zum Beschneiden der .zmetadata)
+    # erhaelt. Faellt eine der drei Zusagen, ist der Store fuer jeden
+    # GDAL-basierten Leser kaputt, nicht nur fuer CDSE.
+    for kind, use_sub in (("root  ", False), ("/DEM  ", True)):
+        try:
+            vs_crs, vs_tr, vs_arr = _read_zarr_via_vsicurl(paths["zarr"],
+                                                           subpath=use_sub)
+        except Exception as exc:
+            print(f"  /vsicurl {kind}: OPEN FEHLGESCHLAGEN "
+                  f"{type(exc).__name__}: {exc}")
+            all_ok = False
+            continue
         epsg_ok = vs_crs is not None and vs_crs.to_epsg() == 32633
         a, b, c, d, e, f = vs_tr
         tr_ok = (abs(a - src_a) < 1e-6 and abs(e - src_e) < 1e-6
@@ -367,11 +481,53 @@ def main() -> int:
                  and abs(b) < 1e-6 and abs(d) < 1e-6)
         px_ok = np.array_equal(vs_arr, data) and _sha256(vs_arr) == ref_hash
         marker = "OK" if epsg_ok and tr_ok and px_ok else "MISMATCH"
-        print(f"  /vsicurl: crs={vs_crs}  epsg_ok={epsg_ok}  "
+        print(f"  /vsicurl {kind}: crs={vs_crs}  epsg_ok={epsg_ok}  "
               f"transform=({a}, {e}, origin=({c}, {f}))  transform_ok={tr_ok}  "
               f"pixel_identisch={px_ok}  [{marker}]")
         if not (epsg_ok and tr_ok and px_ok):
             all_ok = False
+
+    # 6d: BEIDE xarray-Lesepfade muessen tragen. consolidated=True liest
+    # ausschliesslich die .zmetadata und faellt NICHT auf die Einzeldateien
+    # zurueck - der Pfad belegt also, dass die Map nach der Injektion noch
+    # ein gueltiges konsolidiertes Dokument ist. (Beim verworfenen
+    # Beschneiden scheiterte genau er mit PathNotFoundError, weil das
+    # Root-.zgroup fehlte.) consolidated=False liest die Einzeldateien und
+    # belegt, dass der Store selbst unangetastet blieb.
+    import xarray as xr
+    for label, kwargs in (("unkonsolidiert", {"consolidated": False}),
+                          ("konsolidiert  ", {"consolidated": True})):
+        try:
+            zds = xr.open_zarr(str(paths["zarr"]), mask_and_scale=False,
+                               **kwargs)
+        except Exception as exc:
+            print(f"  xarray {label}: LESEN FEHLGESCHLAGEN "
+                  f"{type(exc).__name__}: {exc}")
+            all_ok = False
+            continue
+        try:
+            zarr_arr = zds["DEM"].values
+            if zarr_arr.ndim == 2:
+                zarr_arr = zarr_arr[np.newaxis, :, :]
+            sr = zds["spatial_ref"].attrs if "spatial_ref" in zds else {}
+            geot = sr.get("GeoTransform", "")
+            parts = [float(v) for v in geot.split()] if geot else []
+            c, a, b, f, d, e = parts if len(parts) == 6 else [None] * 6
+            read_ok = (
+                len(parts) == 6
+                and abs(a - src_a) < 1e-6 and abs(e - src_e) < 1e-6
+                and abs(c - src_c) < 1e-6 and abs(f - src_f) < 1e-6
+                and "32633" in (sr.get("crs_wkt") or "")
+                and _sha256(zarr_arr) == ref_hash
+            )
+            print(f"  xarray {label}: crs_wkt vorhanden="
+                  f"{bool(sr.get('crs_wkt'))}  GeoTransform={geot or '(keine)'}"
+                  f"  pixel_identisch={_sha256(zarr_arr) == ref_hash}  "
+                  f"[{'OK' if read_ok else 'MISMATCH'}]")
+            if not read_ok:
+                all_ok = False
+        finally:
+            zds.close()
 
     # 7. zarr: STAC-Collection-Wrapper. Bei dem_format=zarr zeigt load_stac
     #    auf eine Collection statt aufs Item - hier wird lokal geprueft,

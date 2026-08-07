@@ -512,6 +512,79 @@ def _apply_geozarr_metadata(ds, dst_meta) -> None:
         var.attrs["_CRS"] = crs_attr
 
 
+def _inject_shape_into_consolidated_zarr_metadata(store_path) -> dict:
+    """Ergaenzt in der .zmetadata eines Zarr-v2-Stores jeden Eintrag, der kein
+    'shape' hat (die auf ".zgroup"/".zattrs" endenden Schluessel), um genau
+    dieses Feld - mit dem Shape des DEM-Arrays. Die Eintraege selbst bleiben
+    vollstaendig erhalten, es kommt nur ein Schluessel hinzu.
+
+    WARUM (Versuch 6, hergeleitet aus zwei gemessenen CDSE-Laeufen mit
+    identischem Store-Inhalt und nur unterschiedlicher Konsolidierung):
+      MIT .zmetadata  (Versuch 4): CDSE sammelt 1 projection metadata entry,
+        leitet das target_grid ab und scheitert erst DANACH beim Oeffnen mit
+        "Can't parse the zarr array metadata, missing key: 'shape'".
+      OHNE .zmetadata (Versuch 5): CDSE sammelt 0 projection metadata entries,
+        target_grid=None, Abbruch mit "Unable to derive a spatial extent".
+    Daraus folgt: CDSE liest die .zmetadata zwingend - ohne sie sieht es den
+    Store gar nicht. Mit ihr sieht es ihn, iteriert dann aber die
+    metadata-Map und greift auf jedem Eintrag auf 'shape' zu; ".zgroup" und
+    ".zattrs" haben das nicht. Die Meldung traegt die Python-KeyError-
+    Signatur ('shape' mit Quotes) und stammt damit aus CDSE-eigenem Code,
+    nicht aus GDALs C++-Zarr-Treiber (der meldet "shape missing or not an
+    array", zarr_v2_array.cpp).
+
+    Hypothese: hat JEDER Eintrag der Map ein 'shape', findet CDSEs Parser den
+    Schluessel ueberall und laeuft nicht mehr in den KeyError. Injizieren
+    statt Entfernen, weil die Map dabei ein gueltiges, vollstaendiges
+    konsolidiertes Dokument bleibt - ein Reader, der die Georeferenz aus den
+    .zattrs zieht, findet sie weiterhin. Der Shape des DEM-Arrays (statt
+    eines Dummy-Werts) sorgt dafuer, dass ein daraus abgeleitetes Grid
+    konsistent zum Datenarray waere.
+
+    Angefasst wird NUR die konsolidierte Kopie: die einzelnen .zarray-,
+    .zattrs- und .zgroup-Dateien im Store bleiben unveraendert. Das Feld
+    zarr_consolidated_format bleibt wie geschrieben. Rueckbau = diesen
+    Aufruf entfernen, dann steht wieder Versuch 4.
+
+    LOKAL GEMESSEN (GDAL 3.12 ueber /vsicurl gegen einen Range-HTTP-Server):
+    Store-Root wie Array-Subpfad ZARR:"...":/DEM oeffnen, liefern
+    EPSG:32633 und den korrekten Transform, die Pixel sind bitgenau, und der
+    Open laeuft ohne Verzoegerung durch. xarray liest den Store normal -
+    konsolidiert wie unkonsolidiert. Die Georeferenz bleibt also lokal voll
+    ueberpruefbar; ob CDSE den Store akzeptiert, entscheidet erst der
+    Serverlauf.
+
+    Gibt {"injected": [...], "shape": [...]} zurueck (fuer Test/Log).
+    """
+    zmeta_path = Path(store_path) / ".zmetadata"
+    if not zmeta_path.exists():
+        return {"injected": [], "shape": None}
+    doc = json.loads(zmeta_path.read_text(encoding="utf-8"))
+    meta = doc.get("metadata")
+    if not isinstance(meta, dict):
+        return {"injected": [], "shape": None}
+    # Shape des DEM-Arrays; falls es das (wider Erwarten) nicht gibt, den
+    # ersten .zarray-Eintrag nehmen. Ohne jeden Shape gibt es nichts zu tun.
+    shape = None
+    for key in ("DEM/.zarray",):
+        if isinstance(meta.get(key), dict) and "shape" in meta[key]:
+            shape = meta[key]["shape"]
+    if shape is None:
+        for key in sorted(meta):
+            if key.endswith(".zarray") and "shape" in meta[key]:
+                shape = meta[key]["shape"]
+                break
+    if shape is None:
+        return {"injected": [], "shape": None}
+    injected = []
+    for key, entry in meta.items():
+        if isinstance(entry, dict) and "shape" not in entry:
+            entry["shape"] = shape
+            injected.append(key)
+    zmeta_path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+    return {"injected": sorted(injected), "shape": shape}
+
+
 def _write_dem_as_zarr(data, dst_meta, target_path) -> None:
     """Schreibt data als Zarr-Verzeichnis-Store nach target_path.
     Ueberschreibt einen existierenden Store idempotent.
@@ -539,23 +612,14 @@ def _write_dem_as_zarr(data, dst_meta, target_path) -> None:
     # wuerde die in _build_xarray_dataset gesetzte _FillValue verwerfen.
     for name in ds.variables:
         ds[name].encoding["compressor"] = None
-    # Versuch 5: OHNE konsolidierte Metadaten (.zmetadata) schreiben.
-    # CDSE scheitert an diesem Store mit "Can't parse the zarr array
-    # metadata, missing key: 'shape'". Die Meldung ist eine Python-
-    # KeyError-Signatur ('shape' mit Quotes) und stammt damit NICHT aus
-    # GDALs C++-Zarr-Treiber (der meldet "shape missing or not an
-    # array", zarr_v2_array.cpp) - sondern aus einem CDSE-seitigen
-    # Parser. Hypothese: der stolpert beim Iterieren der konsolidierten
-    # metadata-Map ueber Eintraege ohne 'shape' (".zgroup"/".zattrs").
-    # Ohne .zmetadata liegt 'shape' garantiert (nur) in jeder einzelnen
-    # .zarray. TRADE-OFF (lokal belegt, GDAL 3.12): ohne .zmetadata kann
-    # GDAL den Store-ROOT per /vsicurl NICHT mehr oeffnen (404, kein
-    # Directory-Listing ueber HTTP); der direkte Array-Subpfad
-    # ZARR:"/vsicurl/...":/DEM liefert weiterhin CRS+Transform+Pixel
-    # (test_dem_format Schritt 6). Ob CDSE damit klarkommt, entscheidet
-    # der Serverlauf - bleibt "missing key: 'shape'", ist die Hypothese
-    # widerlegt und zarr fuenffach belegte Backend-Grenze.
-    ds.to_zarr(str(target), mode="w", consolidated=False)
+    # Versuch 6: wieder MIT konsolidierten Metadaten schreiben (Versuch 5,
+    # consolidated=False, ist damit zurueckgenommen - CDSE sah den Store
+    # dann gar nicht mehr: "Collected 0 projection metadata entries" ->
+    # "Unable to derive a spatial extent"). Direkt danach in der .zmetadata
+    # jedem Eintrag ohne 'shape' eines verpassen; die Herleitung steht in
+    # _inject_shape_into_consolidated_zarr_metadata.
+    ds.to_zarr(str(target), mode="w", consolidated=True)
+    _inject_shape_into_consolidated_zarr_metadata(target)
 
 
 def _write_dem_as_netcdf(data, dst_meta, target_path) -> None:
