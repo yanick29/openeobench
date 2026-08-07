@@ -55,9 +55,155 @@ LARGE_EXTENTS_FOR_FULL_PP = ("xlarge", "xxlarge")
 # 'medium' bleibt Backward-Compat = unveraenderter REGIONS-Extent.
 SIZE_KM = {"small": 5.0, "medium": 10.0, "large": 50.0, "xlarge": 100.0, "xxlarge": 200.0}
 
-# Verfuegbare openEO-Workflows. 'merge_add' = bisheriges Verhalten.
-WORKFLOWS = ("merge_add", "subtract", "mask", "aggregation", "focal", "resample",
-             "filter_bbox")
+# Workflows fuer KONTINUIERLICHE Zweitraster (DEM). 'merge_add' = bisheriges
+# Verhalten. Rechnen alle arithmetisch auf beiden Cubes.
+CONTINUOUS_WORKFLOWS = ("merge_add", "subtract", "mask", "aggregation", "focal",
+                        "resample", "filter_bbox")
+
+# Workflows fuer KATEGORIALE Zweitraster (Landbedeckung). Arithmetik ueber
+# Klassen-IDs ist bedeutungslos (Klasse 10 + Reflektanz 2742 ist keine
+# Groesse), deshalb ein eigener Satz:
+#   lc_overlay - merge_cubes bleibt erhalten, damit dieselbe Gitter-
+#                Aushandlung zwischen S2- und Zweitcube stattfindet wie im
+#                bisherigen Benchmark; der overlap_resolver reicht aber den
+#                Zweitcube durch statt zu addieren. Ergebnis ist die
+#                KLASSENKARTE auf dem S2-Gitter - jedes abweichende Pixel
+#                ist ein Transformationsartefakt, unvermischt. Primaerbeleg.
+#   lc_mask    - B04 auf eine Zielklasse maskiert (realistischer
+#                Anwendungsfall). Gemessen wird die VALIDITAET (Maske
+#                getroffen ja/nein), nicht der B04-Wert: wo beide Laeufe
+#                gueltig sind, sind die Werte ohnehin identisch, und ein
+#                MAE ueber die gueltigen Pixel wuerde die Maskenkante -
+#                also genau das Signal - strukturell ausblenden.
+CATEGORICAL_WORKFLOWS = ("lc_overlay", "lc_mask")
+
+WORKFLOWS = CONTINUOUS_WORKFLOWS + CATEGORICAL_WORKFLOWS
+
+# ---------------------------------------------------------------------------
+# Datensatz-Paare (--dataset). Das erste Raster ist immer Sentinel-2 B04;
+# variabel ist das ZWEITE Raster.
+#
+# 'dem' ist der historische, fest verdrahtete Fall - die Werte hier
+# entsprechen exakt dem, was in scenarios/bench_onthefly_{region}.json
+# steht. Deshalb wird bei dataset='dem' KEINE Substitution ausgefuehrt
+# (_apply_dataset_to_pg steigt sofort aus) und der Graph bleibt
+# byte-identisch.
+#
+# Namens-Hinweis: viele Funktionen und DB-Spalten heissen historisch
+# "dem_*" (dem_layout, dem_format, dem_tiles, _get_or_download_dem, ...).
+# Sie meinen seit --dataset generisch DAS ZWEITE RASTER. Bewusst nicht
+# umbenannt: das erzeugte einen riesigen Diff und braeche die
+# DB-Kompatibilitaet zu allen bisherigen Laeufen, ohne Evidenz zu liefern.
+# ---------------------------------------------------------------------------
+DATASETS = {
+    "dem": {
+        "collection": "COPERNICUS_30",
+        "band": "DEM",
+        # identisch zum Template - siehe Kommentar oben
+        "temporal_extent": ["2010-12-12", "2015-01-16"],
+        "categorical": False,
+        "stac_datetime": "2011-01-06T00:00:00Z",
+        "workflows": CONTINUOUS_WORKFLOWS,
+        "default_workflow": "merge_add",
+        "label": "COPERNICUS_30 (Hoehe, kontinuierlich)",
+    },
+    "landcover": {
+        "collection": "ESA_WORLDCOVER_10M_2021_V2",
+        "band": "MAP",
+        "temporal_extent": ["2021-01-01", "2021-12-31"],
+        "categorical": True,
+        "stac_datetime": "2021-01-01T00:00:00Z",
+        "workflows": CATEGORICAL_WORKFLOWS,
+        "default_workflow": "lc_overlay",
+        "label": "ESA_WORLDCOVER_10M_2021_V2 (Landbedeckung, kategorial)",
+        # uint8, nodata 0, 1 Band, nativ EPSG:4326 @ 8.333e-05 Grad (~10 m).
+        # Gegen CDSE verifiziert; beobachtete Klassen im Testausschnitt:
+        # 10 Baum, 30 Gras, 40 Acker, 50 bebaut, 60 vegetationsarm, 80 Wasser.
+        "dtype": "uint8",
+        "nodata": 0,
+    },
+}
+
+DEFAULT_DATASET = "dem"
+
+# Zielklasse fuer lc_mask: 10 = Tree cover (ESA WorldCover). Bewusst eine
+# haeufige Klasse - eine seltene liefert zu wenig Maskenkante, um den
+# Transformationsfehler sichtbar zu machen.
+LC_MASK_CLASS = 10
+
+
+def _dataset_of(args) -> str:
+    """Datensatz-Paar aus den CLI-Args, mit Default und Pruefung."""
+    ds = getattr(args, "dataset", None) or DEFAULT_DATASET
+    if ds not in DATASETS:
+        raise ValueError(
+            f"Unbekanntes --dataset: {ds!r}. Erlaubt: {sorted(DATASETS)}")
+    return ds
+
+
+def _is_categorical(dataset: str) -> bool:
+    """True, wenn das zweite Raster Klassen statt Messwerte traegt."""
+    return bool(DATASETS[dataset]["categorical"])
+
+
+def _categorical_output(dataset: str, workflow: str) -> bool:
+    """True, wenn der ERGEBNIS-Raster des Workflows kategorial zu vergleichen
+    ist (Uebereinstimmungsquote statt MAE/RMSE).
+
+    Gilt fuer beide Landcover-Workflows: lc_overlay liefert Klassen-IDs,
+    lc_mask liefert zwar B04-Werte, aber die Aussage steckt in der
+    Maskenkante - s. Kommentar bei CATEGORICAL_WORKFLOWS.
+    """
+    return _is_categorical(dataset) and workflow in CATEGORICAL_WORKFLOWS
+
+
+def _validate_dataset_workflow(dataset: str, workflow: str) -> None:
+    """Bricht ab, wenn Datensatz und Workflow nicht zusammenpassen.
+
+    Harte Ablehnung statt stiller Korrektur: ein arithmetischer Workflow auf
+    Klassen-IDs (oder umgekehrt) wuerde durchlaufen und plausibel aussehende,
+    aber bedeutungslose Zahlen liefern.
+    """
+    allowed = DATASETS[dataset]["workflows"]
+    if workflow not in allowed:
+        raise ValueError(
+            f"--workflow {workflow!r} ist mit --dataset {dataset!r} nicht "
+            f"kombinierbar. Erlaubt: {', '.join(allowed)}. "
+            f"(Arithmetik auf Klassen-IDs bzw. kategoriale Workflows auf "
+            f"kontinuierlichen Daten ergeben keine sinnvollen Werte.)")
+
+
+def _validate_dataset_resampling(dataset: str, resampling: str) -> None:
+    """Kategoriale Daten duerfen NUR nearest interpoliert werden.
+
+    bilinear/cubic mitteln Klassen-IDs und erfinden dabei Klassen, die es
+    nicht gibt (zwischen 10 Baum und 50 bebaut laege 30 Gras). Harte
+    Ablehnung, nicht stille Korrektur - sonst stuende in der DB eine
+    Laufkonfiguration, die nicht gefahren wurde.
+    """
+    if _is_categorical(dataset) and resampling != "nearest":
+        raise ValueError(
+            f"--local-resampling {resampling!r} ist mit --dataset {dataset!r} "
+            f"nicht zulaessig: kategoriale Daten duerfen nur mit 'nearest' "
+            f"resampelt werden, bilinear/cubic mischen Klassen-IDs zu "
+            f"nicht existierenden Klassen.")
+
+
+def _apply_dataset_to_pg(pg: dict, dataset: str) -> None:
+    """Ersetzt in-place die Zweitraster-Kollektion in loadcollection2.
+
+    Bei dataset='dem' passiert NICHTS - die Templates tragen diesen Fall
+    bereits, und ein No-Op garantiert byte-identische Graphen.
+    """
+    if dataset == DEFAULT_DATASET:
+        return
+    info = DATASETS[dataset]
+    node = pg.get("loadcollection2")
+    if not isinstance(node, dict):
+        return
+    args = node.setdefault("arguments", {})
+    args["id"] = info["collection"]
+    args["temporal_extent"] = list(info["temporal_extent"])
 
 # Ziel-Zellgroesse in Metern. 10 m = Sentinel-2 B04 nativ und damit das
 # bisherige, fest verdrahtete Verhalten. Ueber --resolution steuerbar
@@ -243,18 +389,20 @@ def _make_outdir(base: str, strategy: str) -> Path:
 RUN_META_FILENAME = "run_meta.json"
 
 
-def _write_run_meta(run_dir: Path, resolution: float, **extra) -> Path:
-    """Schreibt run_meta.json in einen Run-Ordner (Zielaufloesung + optionale
-    Zusatzfelder).
+def _write_run_meta(run_dir: Path, resolution: float,
+                    dataset: str = DEFAULT_DATASET, **extra) -> Path:
+    """Schreibt run_meta.json in einen Run-Ordner (Zielaufloesung,
+    Datensatz-Paar + optionale Zusatzfelder).
 
     Bewusst eine EIGENE Datei und kein Feld im Szenario-JSON: der
     Process-Graph muss bei Default-Aufloesung byte-identisch zu den
     bisherigen Szenarien bleiben. Gelesen wird sie von
-    _detect_folder_resolution, damit der Accuracy-Check Referenz und Test
-    nach Aufloesung paart statt Gitter unterschiedlicher Zellgroesse zu
-    vergleichen.
+    _detect_folder_resolution und _detect_folder_dataset, damit der
+    Accuracy-Check Referenz und Test nach Aufloesung UND Datensatz-Paar
+    paart, statt Gitter unterschiedlicher Zellgroesse oder gar
+    Hoehendaten gegen Landbedeckung zu vergleichen.
     """
-    meta = {"resolution_m": float(resolution)}
+    meta = {"resolution_m": float(resolution), "dataset": str(dataset)}
     meta.update(extra)
     path = Path(run_dir) / RUN_META_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -281,7 +429,8 @@ def _compute_overview_factors(width: int, height: int, min_size: int = 256) -> l
 
 def _write_dem_with_layout(data, dst_meta: dict, output_tif: str,
                            layout: str = "striped",
-                           block: int = _COG_BLOCK_SIZE) -> None:
+                           block: int = _COG_BLOCK_SIZE,
+                           categorical: bool = False) -> None:
     """Schreibt ein reprojiziertes DEM-Array mit einem der 3 Layout-Profile.
 
     data: 3D numpy Array (bands, height, width) - die Pixelwerte sind
@@ -300,6 +449,12 @@ def _write_dem_with_layout(data, dst_meta: dict, output_tif: str,
                              keine Overviews
       cog                  - tiled=True, block x block, deflate, interne
                              Overviews via rasterio.build_overviews
+
+    categorical: bei kategorialen Rastern (Landbedeckungsklassen) werden die
+    COG-Overviews per MODUS statt per Mittelwert gebaut. Der Mittelwert ueber
+    Klassen-IDs erfindet Klassen, die es nicht gibt (zwischen 10 Baum und
+    50 bebaut laege 30 Gras) - und zwar unbemerkt, weil Overviews erst
+    backend-seitig gelesen werden. Betrifft nur layout='cog'.
     """
     if layout not in DEM_LAYOUTS:
         raise ValueError(
@@ -343,9 +498,11 @@ def _write_dem_with_layout(data, dst_meta: dict, output_tif: str,
     if layout == "cog":
         factors = _compute_overview_factors(profile["width"], profile["height"])
         if factors:
+            ov_method = Resampling.mode if categorical else Resampling.average
+            ov_name = "mode" if categorical else "average"
             with rasterio.open(output_tif, "r+") as dst:
-                dst.build_overviews(factors, Resampling.average)
-                dst.update_tags(ns="rio_overview", resampling="average")
+                dst.build_overviews(factors, ov_method)
+                dst.update_tags(ns="rio_overview", resampling=ov_name)
 
 
 def _inspect_tif_layout(path: str) -> dict:
@@ -1306,7 +1463,8 @@ def _load_bench_template(region: str, extent_size: str = "medium") -> dict:
 
 
 def _build_workflow_pg(template: dict, workflow: str, region: str = None,
-                       resolution: float = DEFAULT_RESOLUTION_M) -> dict:
+                       resolution: float = DEFAULT_RESOLUTION_M,
+                       dataset: str = DEFAULT_DATASET) -> dict:
     """Baut den process_graph fuer den gewuenschten Workflow.
 
     Alle Workflows starten von der merge_add-Baseline (bench_onthefly_{region}.json)
@@ -1344,17 +1502,20 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
                  -> merge1.cube2
     """
     pg = copy.deepcopy(template["process_graph"])
+    # Zweitraster-Kollektion setzen (No-Op bei dataset='dem').
+    _apply_dataset_to_pg(pg, dataset)
 
     # rename_labels: cube2 Bandname auf "B04" -> ueberlappt mit cube1.
-    # source=["DEM"] ist der COPERNICUS_30 Bandname; bei load_stac
-    # (local_pp / full_pp) ueberschreiben die Builder source=[], weil
-    # der vom Backend vergebene Bandname nicht garantiert "DEM" ist.
+    # source ist der Bandname des Zweitrasters ("DEM" fuer COPERNICUS_30,
+    # "MAP" fuer ESA_WORLDCOVER); bei load_stac (local_pp / full_pp)
+    # ueberschreiben die Builder source=[], weil der vom Backend vergebene
+    # Bandname nicht garantiert derselbe ist.
     pg["renamelabels1"] = {
         "arguments": {
             "data": {"from_node": "loadcollection2"},
             "dimension": "bands",
             "target": ["B04"],
-            "source": ["DEM"],
+            "source": [DATASETS[dataset]["band"]],
         },
         "process_id": "rename_labels",
     }
@@ -1382,6 +1543,66 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
     pg["merge1"]["arguments"]["cube2"] = {"from_node": "reducedimension_dem"}
 
     if workflow == "merge_add":
+        return pg
+
+    if workflow == "lc_overlay":
+        # merge_cubes BLEIBT - genau dieselbe Gitter-Aushandlung zwischen
+        # S2-Cube und Zweitcube wie bei merge_add, nur reicht der
+        # overlap_resolver den Zweitcube (y) durch statt zu addieren.
+        # Ergebnis: die Klassenkarte auf dem S2-Gitter.
+        #
+        # "y + 0" statt eines echten Durchreich-Prozesses, weil openEO
+        # keinen "nimm y"-Prozess kennt und der overlap_resolver einen
+        # Ergebnisknoten braucht. Der Knotenname lcpassthrough1 ist die
+        # Workflow-Signatur fuer _detect_pg_workflow - ohne ihn waere der
+        # Graph von merge_add nicht zu unterscheiden (beide nutzen 'add').
+        pg["merge1"]["arguments"]["overlap_resolver"] = {
+            "process_graph": {
+                "lcpassthrough1": {
+                    "arguments": {"x": {"from_parameter": "y"}, "y": 0},
+                    "process_id": "add",
+                    "result": True,
+                }
+            }
+        }
+        return pg
+
+    if workflow == "lc_mask":
+        # B04 auf eine Landbedeckungsklasse maskieren. merge_cubes entfaellt;
+        # der Gitterabgleich zwischen beiden Cubes passiert stattdessen im
+        # mask-Prozess, der ebenfalls ein gemeinsames Gitter erzwingt.
+        #
+        # mask() maskiert dort, wo der Mask-Cube WAHR ist -> die Bedingung
+        # ist "Klasse != Zielklasse".
+        pg["lcmaskbuild1"] = {
+            "arguments": {
+                "data": {"from_node": "reducedimension_dem"},
+                "process": {
+                    "process_graph": {
+                        "eq1": {
+                            "arguments": {"x": {"from_parameter": "x"},
+                                          "y": LC_MASK_CLASS},
+                            "process_id": "eq",
+                        },
+                        "not1": {
+                            "arguments": {"x": {"from_node": "eq1"}},
+                            "process_id": "not",
+                            "result": True,
+                        },
+                    }
+                },
+            },
+            "process_id": "apply",
+        }
+        pg["lcmask1"] = {
+            "arguments": {
+                "data": {"from_node": "loadcollection1"},
+                "mask": {"from_node": "lcmaskbuild1"},
+            },
+            "process_id": "mask",
+        }
+        pg.pop("merge1", None)
+        pg["saveresult1"]["arguments"]["data"] = {"from_node": "lcmask1"}
         return pg
 
     if workflow == "subtract":
@@ -1599,7 +1820,8 @@ def build_onthefly_scenario(region: str, target_path: Path,
                             extent_size: str = "medium",
                             workflow: str = "merge_add",
                             force_target_crs: bool = False,
-                            resolution: float = DEFAULT_RESOLUTION_M) -> Path:
+                            resolution: float = DEFAULT_RESOLUTION_M,
+                            dataset: str = DEFAULT_DATASET) -> Path:
     """Onthefly = Workflow-PG aus bench_onthefly_{region}.json gebaut.
 
     Ueberspannt der Extent mehrere UTM-Zonen (oder ist force_target_crs
@@ -1613,7 +1835,7 @@ def build_onthefly_scenario(region: str, target_path: Path,
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
-                            resolution=resolution)
+                            resolution=resolution, dataset=dataset)
     extent = template["process_graph"]["loadcollection1"]["arguments"][
         "spatial_extent"]
     spans_zones = _extent_spans_multiple_utm_zones(extent)
@@ -1637,9 +1859,12 @@ def build_onthefly_scenario(region: str, target_path: Path,
 
 
 def build_dem_download_scenario(region: str, target_path: Path,
-                                extent_size: str = "medium") -> Path:
-    """Baut ein Szenario das nur COPERNICUS_30 fuer die Region herunterlaedt."""
+                                extent_size: str = "medium",
+                                dataset: str = DEFAULT_DATASET) -> Path:
+    """Baut ein Szenario das nur das ZWEITE Raster fuer die Region
+    herunterlaedt (COPERNICUS_30 bzw. die Kollektion aus --dataset)."""
     template = _load_bench_template(region, extent_size)
+    _apply_dataset_to_pg(template["process_graph"], dataset)
     dem_args = template["process_graph"]["loadcollection2"]["arguments"]
     scenario = {
         "process_graph": {
@@ -1668,7 +1893,8 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
                             extent_size: str = "medium",
                             workflow: str = "merge_add",
                             resample_s2_to_dem: bool = False,
-                            resolution: float = DEFAULT_RESOLUTION_M) -> Path:
+                            resolution: float = DEFAULT_RESOLUTION_M,
+                            dataset: str = DEFAULT_DATASET) -> Path:
     """
     Erzeugt das load_stac Szenario fuer den gewuenschten Workflow:
     Workflow-PG (s. _build_workflow_pg) wird gebaut, dann wird
@@ -1699,7 +1925,7 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
-                            resolution=resolution)
+                            resolution=resolution, dataset=dataset)
 
     # loadcollection2 entfernen und durch loadstac1 ersetzen
     pg.pop("loadcollection2", None)
@@ -1978,7 +2204,8 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
                            extent_size: str = "medium",
                            workflow: str = "merge_add",
                            save_format: str = "GTiff",
-                           resolution: float = DEFAULT_RESOLUTION_M) -> Path:
+                           resolution: float = DEFAULT_RESOLUTION_M,
+                           dataset: str = DEFAULT_DATASET) -> Path:
     """
     Process Graph fuer full_preprocessing: ZWEI load_stac Aufrufe
     (loadstac1=S2, loadstac2=DEM) + Workflow-Verknuepfung.
@@ -2002,7 +2229,7 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
-                            resolution=resolution)
+                            resolution=resolution, dataset=dataset)
 
     pg.pop("loadcollection1", None)
     pg.pop("loadcollection2", None)
@@ -2064,7 +2291,8 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
 def build_stac_item(region: str, asset_href: str, epsg: int,
                     item_id: str, extent: dict = None,
                     dem_format: str = "gtiff",
-                    grid: dict = None) -> dict:
+                    grid: dict = None,
+                    dataset: str = DEFAULT_DATASET) -> dict:
     """STAC Item passend zum reprojizierten DEM-Asset.
 
     `extent` ueberschreibt REGIONS[region]['extent'] (z.B. fuer small/large
@@ -2109,7 +2337,7 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     # hat dann nichts zum Umbenennen und das DEM faellt still aus
     # merge_cubes raus. eo:bands (STAC 1.0 ueblich) + bands (STAC 1.1)
     # parallel, damit jeder Reader-Pfad eine Bandnamen-Quelle findet.
-    band_meta = [{"name": "DEM"}]
+    band_meta = [{"name": DATASETS[dataset]["band"]}]
     asset = {
         "href": href,
         "type": media_type,
@@ -2118,7 +2346,8 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
         "eo:bands": band_meta,
         "bands": band_meta,
     }
-    properties = {"datetime": "2011-01-06T00:00:00Z", "proj:epsg": epsg}
+    properties = {"datetime": DATASETS[dataset]["stac_datetime"],
+                  "proj:epsg": epsg}
     if grid is not None:
         t = grid["transform"]
         left, bottom, right, top = grid["bounds"]
@@ -2719,21 +2948,23 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
 
     try:
         resolution = _resolution_of(args)
+        dataset = _dataset_of(args)
         scenario_path = build_onthefly_scenario(
             args.region, outdir / "scenario_onthefly.json",
             extent_size=args.extent_size,
             workflow=args.workflow,
             force_target_crs=getattr(args, "force_target_crs", False),
             resolution=resolution,
+            dataset=dataset,
         )
-        _write_run_meta(outdir, resolution)
+        _write_run_meta(outdir, resolution, dataset=dataset)
         results = run_openeo(args.api_url, str(scenario_path), str(outdir),
                              job_timeout=args.job_timeout)
         total_time = results.get("total_time")
         run_id = import_run(str(outdir), crs_strategy="onthefly",
                             run_type=run_type, extent_size=args.extent_size,
                             workflow=args.workflow,
-                            resolution_m=resolution)
+                            resolution_m=resolution, dataset=dataset)
         return {
             "strategy": "onthefly", "repeat": repeat_idx + 1, "run_type": run_type,
             "status": results.get("status", "unknown"),
@@ -2750,7 +2981,8 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
 
 
 def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
-                         use_cache: bool) -> tuple:
+                         use_cache: bool,
+                         dataset: str = DEFAULT_DATASET) -> tuple:
     """
     Liefert (dem_tif_path, t_download). Die Download-Zeit zaehlt bewusst NICHT
     zur preprocessing_time und wird hier nur zu Info-Zwecken zurueckgegeben.
@@ -2762,18 +2994,23 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
                      base/step1_dem_download herunterladen.
     """
     extent_size = getattr(args, "extent_size", "medium")
+    # Cache-Key MUSS das Datensatz-Paar enthalten: sonst liefert ein
+    # vorhandener DEM-Cache-Eintrag stumm ein Hoehenraster fuer einen
+    # Landcover-Lauf. Der Default behaelt den historischen Dateinamen,
+    # damit bestehende Caches weiter greifen.
+    ds_suffix = "" if dataset == DEFAULT_DATASET else f"_{dataset}"
     if use_cache:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        cached = cache_dir / f"dem_{region}_{extent_size}.tif"
+        cached = cache_dir / f"dem_{region}_{extent_size}{ds_suffix}.tif"
         if cached.exists():
             print(f"  Cache-Hit: {cached}  (Download uebersprungen)")
             return str(cached), None
 
-        dl_dir = cache_dir / f"_dl_{region}_{extent_size}_{_ts()}"
+        dl_dir = cache_dir / f"_dl_{region}_{extent_size}{ds_suffix}_{_ts()}"
         dl_dir.mkdir()
         dem_scenario = build_dem_download_scenario(
             region, dl_dir / "scenario_dem_download.json",
-            extent_size=extent_size,
+            extent_size=extent_size, dataset=dataset,
         )
         results = run_openeo(args.api_url, str(dem_scenario), str(dl_dir),
                              job_timeout=getattr(args, "job_timeout", 3600))
@@ -2791,7 +3028,7 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
     step1_dir.mkdir()
     dem_scenario = build_dem_download_scenario(
         region, base / "scenario_dem_download.json",
-        extent_size=extent_size,
+        extent_size=extent_size, dataset=dataset,
     )
     results = run_openeo(args.api_url, str(dem_scenario), str(step1_dir),
                          job_timeout=getattr(args, "job_timeout", 3600))
@@ -2854,6 +3091,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     # S2-10-m-Grid-Semantik existiert nur dort (gleiche Regel wie der
     # bestehende 10-m-Snap in _reproject_dem_to_array).
     resolution = _resolution_of(args)
+    dataset = _dataset_of(args)
+    categorical = _is_categorical(dataset)
     snap_to_s2 = getattr(args, "snap_dem_to_s2", False)
     snap_grid = None
     if snap_to_s2:
@@ -2908,7 +3147,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         cache_mode = "Cache aktiv" if args.dem_cache else "Cache deaktiviert (frischer Download)"
         print(f"\n  [Schritt 1/5] DEM bereitstellen ({region}, {cache_mode})...")
         dem_tif, t_download = _get_or_download_dem(
-            args, region, base, cache_dir, use_cache=args.dem_cache
+            args, region, base, cache_dir, use_cache=args.dem_cache,
+            dataset=dataset,
         )
 
         # Schritt 2: Lokal reprojizieren + im Ziel-Format schreiben.
@@ -2956,12 +3196,14 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             for i, (tile_data, tile_meta) in enumerate(tiles):
                 tile_path = base / f"step2_reprojected_tile{i}{asset_ext}"
                 _write_dem_with_layout(tile_data, tile_meta, str(tile_path),
-                                       layout=dem_layout)
+                                       layout=dem_layout,
+                                       categorical=categorical)
                 _log_tif_layout(_inspect_tif_layout(str(tile_path)))
                 tile_local_paths.append(tile_path)
         elif dem_format == "gtiff":
             _write_dem_with_layout(data, dst_meta, str(local_asset_path),
-                                   layout=dem_layout)
+                                   layout=dem_layout,
+                                   categorical=categorical)
             _log_tif_layout(_inspect_tif_layout(str(local_asset_path)))
         elif dem_format == "zarr":
             _write_dem_as_zarr(data, dst_meta, str(local_asset_path))
@@ -3056,6 +3298,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                     extent=_wgs84_extent_from_meta(tile_meta),
                     dem_format=dem_format,
                     grid=_grid_from_dst_meta(tile_meta),
+                    dataset=dataset,
                 )
                 _link_item_into_collection(tile_item, item_url_i,
                                            collection_id, collection_url)
@@ -3093,6 +3336,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                 extent=_compute_extent(region, args.extent_size),
                 dem_format=dem_format,
                 grid=_grid_from_dst_meta(dst_meta),
+                dataset=dataset,
             )
             _stac_asset = stac_item["assets"]["data"]
             print(f"  STAC data-Asset: href={_stac_asset['href']}")
@@ -3145,8 +3389,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             workflow=args.workflow,
             resample_s2_to_dem=getattr(args, "resample_s2_to_dem", False),
             resolution=resolution,
+            dataset=dataset,
         )
-        _write_run_meta(base, resolution)
+        _write_run_meta(base, resolution, dataset=dataset)
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
                                    job_timeout=args.job_timeout)
         t_main = results_step5.get("total_time") or 0.0
@@ -3188,6 +3433,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             dem_snap="s2" if snap_to_s2 else None,
             dem_tiles=dem_tiles,
             resolution_m=resolution,
+            dataset=dataset,
         )
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf
@@ -3268,9 +3514,10 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
     else:
         target_info += " (DEM auf S2-Grid gesnapped)"
     resolution = _resolution_of(args)
+    dataset = _dataset_of(args)
     print(f"  Strategie: full_preprocessing  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
     print(f"  Output: {base}  |  {target_info}  |  Aufloesung: {resolution:g} m")
-    _write_run_meta(base, resolution)
+    _write_run_meta(base, resolution, dataset=dataset)
 
     try:
         # Schritt 1: S2 von CDSE
@@ -3294,7 +3541,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         print(f"\n  [Schritt 2/7] DEM von CDSE herunterladen ({region}, {args.extent_size})...")
         dem_scenario = build_dem_download_scenario(
             region, base / "scenario_dem_download.json",
-            extent_size=args.extent_size,
+            extent_size=args.extent_size, dataset=dataset,
         )
         dem_results = run_openeo(args.api_url, str(dem_scenario), str(dem_dl_dir),
                                  job_timeout=args.job_timeout)
@@ -3461,7 +3708,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         dem_item = build_stac_item(
             region=region, asset_href=dem_asset_url, epsg=dem_epsg,
             item_id=f"full_pp_dem_{region}_{run_ts}", extent=geo_extent,
-            grid=read_s2_grid(dem_repro_tif),
+            grid=read_s2_grid(dem_repro_tif), dataset=dataset,
         )
         local_dem_stac = str(base / dem_stac_remote_name)
         with open(local_dem_stac, "w") as f:
@@ -3497,6 +3744,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             extent_size=args.extent_size, workflow=args.workflow,
             save_format=fullpp_save_format,
             resolution=resolution,
+            dataset=dataset,
         )
         results_main = run_openeo(args.api_url, str(scenario_path), str(main_dir),
                                   job_timeout=args.job_timeout)
@@ -3516,6 +3764,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             local_resampling=args.local_resampling,
             target_crs=target_crs_str,
             resolution_m=resolution,
+            dataset=dataset,
         )
 
         # Nginx-Logs fuer ALLE relevanten Dateien (TIFs + STAC Items + Collection + DEM)
@@ -3578,14 +3827,23 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
       focal                -> (S2[B04] + DEM) -> 3x3 Mittelwert-Kernel
       aggregation          -> mean_t(S2[B04] + DEM) ueber alle Dates
       filter_bbox          -> (S2[B04] + DEM) -> mittlere 50% des Extents
+      lc_overlay           -> die Klassenkarte auf dem S2-Gitter (das lokale
+                              Gegenstueck zum durchreichenden overlap_resolver)
+      lc_mask              -> S2[B04], maskiert auf LC_MASK_CLASS
 
     Schreibt openEO_*.tif unter denselben Dateinamen wie die S2-Eingaben in
     out_dir und gibt deren Pfade zurueck.
+
+    dtype des Outputs: float32 fuer alle rechnenden Workflows; bei
+    lc_overlay bleibt das Raster im Quell-dtype (uint8), weil Klassen-IDs
+    keine Fliesskommazahlen sind - sonst wuerden spaeter Klassen ueber
+    float-Gleichheit verglichen.
     """
     import numpy as np
 
     with rasterio.open(str(dem_tif)) as dem_src:
-        dem_data = dem_src.read(1).astype(np.float64)
+        dem_raw = dem_src.read(1)
+        dem_data = dem_raw.astype(np.float64)
         ref_meta = dem_src.meta.copy()
         ref_transform = dem_src.transform
 
@@ -3594,6 +3852,13 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
         m.update({"count": 1, "dtype": "float32"})
         with rasterio.open(out_path, "w", **m) as dst:
             dst.write(data.astype(np.float32), 1)
+
+    def _write_categorical(out_path: Path, data, meta=None):
+        """Klassenraster im Quell-dtype schreiben (kein float-Cast)."""
+        m = (meta if meta is not None else ref_meta).copy()
+        m.update({"count": 1, "dtype": str(dem_raw.dtype)})
+        with rasterio.open(out_path, "w", **m) as dst:
+            dst.write(data.astype(dem_raw.dtype), 1)
 
     output_tifs = []
     per_date_results = []
@@ -3623,7 +3888,22 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
                     f"werden, nicht unabhaengig via reproject_dem_local."
                 )
 
-            if workflow in ("merge_add", "resample"):
+            if workflow == "lc_overlay":
+                # Gegenstueck zum durchreichenden overlap_resolver: das
+                # Ergebnis IST die Klassenkarte auf dem gemeinsamen Gitter.
+                # S2 wird nur gelesen, um den Shape-Check zu fahren.
+                _write_categorical(out_dir / s2_tif.name, dem_raw)
+                output_tifs.append(out_dir / s2_tif.name)
+
+            elif workflow == "lc_mask":
+                # B04 behalten, wo die Klasse getroffen ist, sonst NaN.
+                # Gegenstueck zu mask(data=B04, mask=NOT(klasse==ziel)).
+                keep = (dem_raw == LC_MASK_CLASS)
+                result = np.where(keep, s2_data[0], np.nan)
+                _write_single(out_dir / s2_tif.name, result)
+                output_tifs.append(out_dir / s2_tif.name)
+
+            elif workflow in ("merge_add", "resample"):
                 result = s2_data[0] + dem_data
                 _write_single(out_dir / s2_tif.name, result)
                 output_tifs.append(out_dir / s2_tif.name)
@@ -3741,10 +4021,11 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
     # _detect_folder_region / _detect_folder_workflow gefunden, ohne dass das
     # Backend ihn ausgefuehrt hat.
     resolution = _resolution_of(args)
+    dataset = _dataset_of(args)
     marker_scenario_path = base / f"local_reference_{region}.json"
     template = _load_bench_template(region, args.extent_size)
     marker_pg = _build_workflow_pg(template, args.workflow, region=region,
-                                   resolution=resolution)
+                                   resolution=resolution, dataset=dataset)
     with open(marker_scenario_path, "w") as f:
         json.dump({
             "process_graph": marker_pg,
@@ -3753,9 +4034,10 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
                 "resampling": args.local_resampling,
                 "target_resolution_m": resolution,
                 "workflow": args.workflow,
+                "dataset": dataset,
             },
         }, f, indent=2)
-    _write_run_meta(base, resolution)
+    _write_run_meta(base, resolution, dataset=dataset)
 
     print(f"\n{'='*60}")
     print(f"  Strategie: local_reference  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
@@ -3785,7 +4067,7 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
         dem_dl_dir.mkdir()
         dem_scenario = build_dem_download_scenario(
             region, base / "scenario_dem_download.json",
-            extent_size=args.extent_size,
+            extent_size=args.extent_size, dataset=dataset,
         )
         dem_results = run_openeo(args.api_url, str(dem_scenario), str(dem_dl_dir),
                                  job_timeout=args.job_timeout)
@@ -3900,6 +4182,7 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
             local_resampling=args.local_resampling,
             target_crs=target_crs_str,
             resolution_m=resolution,
+            dataset=dataset,
         )
 
         return {
@@ -4061,6 +4344,9 @@ def _detect_pg_workflow(pg: dict):
     root = pg.get("process_graph", pg)
     if not isinstance(root, dict):
         return None
+    # lc_mask ZUERST: der Graph hat kein merge1, dafuer die eigenen Knoten.
+    if "lcmask1" in root or "lcmaskbuild1" in root:
+        return "lc_mask"
     if "applykernel1" in root:
         return "focal"
     if "resamplespatial1" in root or "resamplespatial2" in root:
@@ -4075,7 +4361,12 @@ def _detect_pg_workflow(pg: dict):
     if isinstance(merge, dict):
         ov = merge.get("arguments", {}).get("overlap_resolver")
         if isinstance(ov, dict):
-            for node in ov.get("process_graph", {}).values():
+            resolver = ov.get("process_graph", {})
+            # lc_overlay VOR der 'add'-Pruefung: sein Durchreich-Resolver
+            # benutzt ebenfalls 'add' und waere sonst merge_add.
+            if "lcpassthrough1" in resolver:
+                return "lc_overlay"
+            for node in resolver.values():
                 if not isinstance(node, dict):
                     continue
                 pid = node.get("process_id")
@@ -4088,9 +4379,10 @@ def _detect_pg_workflow(pg: dict):
 
 def _detect_folder_workflow(folder: Path):
     """Workflow eines Run-Ordners ueber den gespeicherten Process Graph
-    bestimmen, oder None. Nur Graphen mit merge1 (oder applykernel1)
-    werden ausgewertet, damit reine S2-/DEM-Download-Szenarien (die in
-    full_pp Runs ebenfalls als JSON liegen) ignoriert werden.
+    bestimmen, oder None. Nur Graphen mit merge1 (oder applykernel1 bzw.
+    dem lc_mask-Knoten) werden ausgewertet, damit reine S2-/DEM-Download-
+    Szenarien (die in full_pp Runs ebenfalls als JSON liegen) ignoriert
+    werden.
     """
     candidates = [
         folder / "step5_main" / "processgraph.json",
@@ -4113,7 +4405,8 @@ def _detect_folder_workflow(folder: Path):
         root = pg.get("process_graph", pg)
         if not isinstance(root, dict):
             continue
-        if "merge1" not in root and "applykernel1" not in root:
+        if ("merge1" not in root and "applykernel1" not in root
+                and "lcmask1" not in root):
             continue
         wf = _detect_pg_workflow(pg)
         if wf:
@@ -4161,6 +4454,59 @@ def _detect_folder_resolution(folder: Path):
     return None
 
 
+def _detect_folder_dataset(folder: Path):
+    """Datensatz-Paar eines Run-Ordners, oder None.
+
+    Reihenfolge:
+      1. run_meta.json (von allen Runs seit --dataset geschrieben)
+      2. die Kollektions-ID in loadcollection2 eines Szenario-JSON
+         (Fallback fuer Ordner ohne run_meta.json)
+    None heisst "unbekannt", nicht "dem".
+    """
+    meta_path = folder / RUN_META_FILENAME
+    if meta_path.is_file():
+        try:
+            val = json.loads(meta_path.read_text()).get("dataset")
+            if val in DATASETS:
+                return val
+        except Exception:
+            pass
+    by_collection = {info["collection"]: name
+                     for name, info in DATASETS.items()}
+    for cand in sorted(folder.glob("*.json")):
+        try:
+            doc = json.loads(cand.read_text())
+        except Exception:
+            continue
+        root = doc.get("process_graph", doc)
+        if not isinstance(root, dict):
+            continue
+        for node in root.values():
+            if not isinstance(node, dict):
+                continue
+            if node.get("process_id") != "load_collection":
+                continue
+            cid = (node.get("arguments") or {}).get("id")
+            if cid in by_collection:
+                return by_collection[cid]
+    return None
+
+
+def _folder_matches_dataset(folder: Path, dataset: str) -> bool:
+    """Passt der Run-Ordner zum geforderten Datensatz-Paar?
+
+    Unbekannt (weder run_meta.json noch erkennbare Kollektion) wird NUR fuer
+    das historische Default-Paar akzeptiert - alle Laeufe vor dieser
+    Experimentdimension liefen gegen COPERNICUS_30. Bei abweichender
+    Anfrage lieber kein Kandidat als der falsche: ein Landcover-Lauf gegen
+    eine DEM-Referenz verglichen liefert stumm Unsinn.
+    """
+    detected = _detect_folder_dataset(folder)
+    if detected is None:
+        return dataset == DEFAULT_DATASET
+    return detected == dataset
+
+
 def _folder_matches_resolution(folder: Path, resolution: float) -> bool:
     """Passt der Run-Ordner zur geforderten Zellgroesse?
 
@@ -4180,7 +4526,8 @@ def _folder_matches_resolution(folder: Path, resolution: float) -> bool:
 def _find_latest_run_dir(base: str, suffix: str, region: str,
                           extent_size: str = None,
                           workflow: str = None,
-                          resolution: float = None):
+                          resolution: float = None,
+                          dataset: str = None):
     """Neuesten outputs/run_*_{suffix} fuer Region zurueckgeben, oder None.
 
     Wenn extent_size gesetzt ist, werden nur Ordner beruecksichtigt, deren
@@ -4190,6 +4537,8 @@ def _find_latest_run_dir(base: str, suffix: str, region: str,
     Vergleichen verschiedener Workflow-Varianten der gleichen Region/Extent.
     Wenn resolution gesetzt ist, muss auch die Zellgroesse uebereinstimmen -
     ohne das wuerde ein 60-m-Run gegen eine 10-m-Referenz verglichen.
+    Wenn dataset gesetzt ist, muss zusaetzlich das Datensatz-Paar passen -
+    sonst wuerde ein Landcover-Lauf gegen eine DEM-Referenz verglichen.
     """
     base_p = Path(base)
     if not base_p.is_dir():
@@ -4211,6 +4560,8 @@ def _find_latest_run_dir(base: str, suffix: str, region: str,
         if workflow is not None and _detect_folder_workflow(d) != workflow:
             continue
         if resolution is not None and not _folder_matches_resolution(d, resolution):
+            continue
+        if dataset is not None and not _folder_matches_dataset(d, dataset):
             continue
         candidates.append(d)
     if not candidates:
@@ -4252,6 +4603,32 @@ def _compare_tif_pair(ref_tif: Path, test_tif: Path,
     return (mae, rmse, len(bands), valid_pixels, total_pixels)
 
 
+def _compare_tif_pair_categorical(ref_tif: Path, test_tif: Path,
+                                  validity_only: bool = False,
+                                  nodata=None):
+    """Kategorialer Vergleich eines TIF-Paars.
+
+    Gibt das Dict von calculate_categorical_metrics zurueck (oder None bei
+    Fehler). Das Alignment laeuft IMMER mit nearest - alles andere wuerde
+    Klassen-IDs mischen.
+    """
+    try:
+        from accuracy_calculator import (align_rasters,
+                                         calculate_categorical_metrics)
+    except Exception as exc:
+        print(f"  Import-Fehler fuer accuracy_calculator: {exc}")
+        return None
+    try:
+        ref_data, test_data, _ = align_rasters(
+            str(ref_tif), str(test_tif), resampling_method="nearest",
+        )
+        return calculate_categorical_metrics(
+            ref_data, test_data, nodata=nodata, validity_only=validity_only)
+    except Exception as exc:
+        print(f"  Vergleich fehlgeschlagen ({ref_tif.name}): {exc}")
+        return None
+
+
 def _lookup_run_id_for_dir(step3_dir: Path):
     """run_id ueber timestamp aus results.json in der DB nachschlagen."""
     results_path = step3_dir / "results.json"
@@ -4287,12 +4664,34 @@ def _ensure_accuracy_reference_column(conn) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info('accuracy')").fetchall()}
     if "reference_run_id" not in cols:
         conn.execute("ALTER TABLE accuracy ADD COLUMN reference_run_id INTEGER")
+    # Kategoriale Metriken in EIGENEN Spalten. Sie duerfen NICHT in
+    # rmse/mae landen: analyze.fetch_accuracy mittelt blind ueber run_id,
+    # eine Uebereinstimmungsquote in der mae-Spalte wuerde alle bisherigen
+    # Auswertungen still verfaelschen.
+    if "agreement_pct" not in cols:
+        conn.execute("ALTER TABLE accuracy ADD COLUMN agreement_pct DOUBLE")
+    if "kappa" not in cols:
+        conn.execute("ALTER TABLE accuracy ADD COLUMN kappa DOUBLE")
+    if "confusion_json" not in cols:
+        conn.execute("ALTER TABLE accuracy ADD COLUMN confusion_json TEXT")
+    if "metric_kind" not in cols:
+        conn.execute("ALTER TABLE accuracy ADD COLUMN metric_kind TEXT")
 
 
 def _persist_accuracy(run_id: int, mae: float, rmse: float,
                       reference_file: str,
-                      reference_run_id: int = None) -> None:
-    """MAE/RMSE in die accuracy-Tabelle schreiben.
+                      reference_run_id: int = None,
+                      agreement_pct: float = None,
+                      kappa: float = None,
+                      confusion_json: str = None,
+                      metric_kind: str = "continuous") -> None:
+    """Accuracy-Metriken in die accuracy-Tabelle schreiben.
+
+    metric_kind='continuous': mae/rmse gesetzt, kategoriale Spalten NULL.
+    metric_kind='categorical'/'categorical_validity': agreement_pct/kappa/
+    confusion_json gesetzt, mae/rmse bleiben NULL - ueber Klassen-IDs sind
+    sie bedeutungslos, und ein Wert dort wuerde in bestehende Auswertungen
+    einlaufen.
 
     reference_run_id: run_id des Ground-Truth-Runs (onthefly oder
     local_reference). Wird fuer die Cleanup-Abhaengigkeitsanalyse gebraucht:
@@ -4309,14 +4708,17 @@ def _persist_accuracy(run_id: int, mae: float, rmse: float,
         ).fetchone()[0]
         conn.execute(
             '''INSERT INTO accuracy
-               (accuracy_id, run_id, reference_file, reference_run_id, rmse, mae)
-               VALUES (?, ?, ?, ?, ?, ?)''',
-            (next_id, run_id, reference_file, reference_run_id, rmse, mae),
+               (accuracy_id, run_id, reference_file, reference_run_id,
+                rmse, mae, agreement_pct, kappa, confusion_json, metric_kind)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (next_id, run_id, reference_file, reference_run_id, rmse, mae,
+             agreement_pct, kappa, confusion_json, metric_kind),
         )
         conn.commit()
         conn.close()
         ref_str = f", reference_run_id={reference_run_id}" if reference_run_id else ""
-        print(f"  Accuracy gespeichert (accuracy_id={next_id}, run_id={run_id}{ref_str})")
+        print(f"  Accuracy gespeichert (accuracy_id={next_id}, "
+              f"run_id={run_id}, metric_kind={metric_kind}{ref_str})")
     except Exception as exc:
         print(f"  WARNUNG: Accuracy nicht in DB geschrieben: {exc}")
 
@@ -4610,7 +5012,8 @@ def run_accuracy_check(output_base: str, region: str,
                        workflow: str = None,
                        resampling_method: str = "nearest",
                        reference_strategy: str = "onthefly",
-                       resolution: float = None):
+                       resolution: float = None,
+                       dataset: str = None):
     """Neuesten {reference_strategy}-Run vs neuesten {test_strategy}-Run vergleichen.
 
     reference_strategy: "onthefly" (Default) oder "local_reference" (lokale
@@ -4633,6 +5036,12 @@ def run_accuracy_check(output_base: str, region: str,
 
     Speichert den Median(MAE)/Median(RMSE) ueber alle gemeinsamen Date-TIFs in
     die accuracy-Tabelle (run_id des Test-Runs).
+
+    Bei kategorialen Datensatz-/Workflow-Kombinationen (--dataset landcover)
+    wird stattdessen die Uebereinstimmungsquote + Cohen's Kappa berechnet und
+    in die eigenen Spalten geschrieben; mae/rmse bleiben NULL. Aggregiert
+    wird dort PIXELGEWICHTET ueber alle Date-TIFs, nicht per Median: ein
+    Median von Quoten ueber unterschiedlich grosse Bilder verzerrt.
     """
     if reference_strategy not in _ACCURACY_LAYOUT:
         raise ValueError(
@@ -4644,14 +5053,17 @@ def run_accuracy_check(output_base: str, region: str,
     extent_info = f"  |  Extent: {extent_size}" if extent_size else ""
     workflow_info = f"  |  Workflow: {workflow}" if workflow else ""
     res_info = f"  |  Aufloesung: {resolution:g} m" if resolution else ""
+    ds_info = f"  |  Datensatz: {dataset}" if dataset else ""
     print(f"  Accuracy-Check vs '{reference_strategy}'"
-          f"  |  Region: {region}{extent_info}{workflow_info}{res_info}")
+          f"  |  Region: {region}{extent_info}{workflow_info}{res_info}"
+          f"{ds_info}")
 
     ref_suffix, _ = _ACCURACY_LAYOUT[reference_strategy]
     reference_dir = _find_latest_run_dir(output_base, ref_suffix, region,
                                          extent_size=extent_size,
                                          workflow=workflow,
-                                         resolution=resolution)
+                                         resolution=resolution,
+                                         dataset=dataset)
 
     # test_strategy auto-detecten: bevorzugt full_pp, dann local_pp, dann
     # (wenn reference != onthefly) auch onthefly. reference selbst ist
@@ -4668,7 +5080,8 @@ def run_accuracy_check(output_base: str, region: str,
             if _find_latest_run_dir(output_base, suf, region,
                                     extent_size=extent_size,
                                     workflow=workflow,
-                                    resolution=resolution) is not None:
+                                    resolution=resolution,
+                                    dataset=dataset) is not None:
                 test_strategy = cand
                 break
 
@@ -4684,7 +5097,8 @@ def run_accuracy_check(output_base: str, region: str,
     test_dir = _find_latest_run_dir(output_base, test_suffix, region,
                                     extent_size=extent_size,
                                     workflow=workflow,
-                                    resolution=resolution)
+                                    resolution=resolution,
+                                    dataset=dataset)
 
     if not reference_dir or not test_dir:
         miss = reference_strategy if not reference_dir else test_strategy
@@ -4710,6 +5124,15 @@ def run_accuracy_check(output_base: str, region: str,
         print(f"    {reference_strategy} TIFs: {sorted(reference_tifs)}")
         print(f"    {test_strategy} TIFs: {sorted(test_tifs)}")
         return None
+
+    # Kategorialer Zweig: Uebereinstimmungsquote statt MAE/RMSE.
+    categorical = bool(dataset and workflow
+                       and _categorical_output(dataset, workflow))
+    if categorical:
+        return _run_accuracy_check_categorical(
+            common, reference_tifs, test_tifs, dataset, workflow,
+            region, reference_strategy, test_strategy,
+            reference_dir, test_dir, test_tif_dir, test_run_id)
 
     per_mae, per_rmse, n_bands_last = [], [], 0
     per_valid, per_total = [], []
@@ -4781,6 +5204,120 @@ def run_accuracy_check(output_base: str, region: str,
     }
 
 
+def _run_accuracy_check_categorical(common, reference_tifs, test_tifs,
+                                    dataset, workflow, region,
+                                    reference_strategy, test_strategy,
+                                    reference_dir, test_dir, test_tif_dir,
+                                    test_run_id):
+    """Kategorialer Teil von run_accuracy_check.
+
+    Aggregation PIXELGEWICHTET ueber alle Date-TIFs (Summe der
+    uebereinstimmenden Pixel / Summe der gueltigen), nicht per Median: der
+    Median von Quoten ueber unterschiedlich grosse Bilder verzerrt. Kappa
+    wird aus der aufsummierten Verwechslungsmatrix neu berechnet, nicht
+    ueber Einzel-Kappas gemittelt.
+    """
+    # lc_mask liefert maskiertes B04 - dort steckt die Aussage in der
+    # Maskenkante, nicht im Wert (s. CATEGORICAL_WORKFLOWS).
+    validity_only = (workflow == "lc_mask")
+    nodata = DATASETS[dataset].get("nodata") if not validity_only else None
+    metric_kind = "categorical_validity" if validity_only else "categorical"
+
+    total_agree = 0
+    total_valid = 0
+    total_px = 0
+    merged_confusion = {}
+    n_files = 0
+    for name in common:
+        res = _compare_tif_pair_categorical(
+            reference_tifs[name], test_tifs[name],
+            validity_only=validity_only, nodata=nodata)
+        if not res or res.get("overall_accuracy") is None:
+            continue
+        n_files += 1
+        total_agree += res["agreeing_pixels"]
+        total_valid += res["valid_pixels"]
+        total_px += res["total_pixels"]
+        for ref_c, row in res["confusion"].items():
+            dst = merged_confusion.setdefault(int(ref_c), {})
+            for test_c, n in row.items():
+                dst[int(test_c)] = dst.get(int(test_c), 0) + int(n)
+        print(f"    {name}: Uebereinstimmung="
+              f"{100.0 * res['overall_accuracy']:.4f}%  "
+              f"kappa={res['kappa'] if res['kappa'] is None else round(res['kappa'], 6)}  "
+              f"({res['valid_pixels']:,}/{res['total_pixels']:,} Pixel)")
+
+    if not n_files or not total_valid:
+        print("  Skip: kein valider Pixel-Vergleich moeglich.")
+        return None
+
+    overall = total_agree / total_valid
+    # Kappa aus der aggregierten Matrix.
+    classes = set(merged_confusion)
+    for row in merged_confusion.values():
+        classes.update(row)
+    p_e = 0.0
+    for c in classes:
+        n_ref = sum(merged_confusion.get(c, {}).values())
+        n_test = sum(row.get(c, 0) for row in merged_confusion.values())
+        p_e += (n_ref / total_valid) * (n_test / total_valid)
+    kappa = ((overall - p_e) / (1.0 - p_e)) if (1.0 - p_e) > 1e-12 else None
+
+    run_id = test_run_id
+    if run_id is None:
+        run_id = _lookup_run_id_for_dir(test_tif_dir)
+    reference_run_id = _lookup_run_id_for_dir(reference_dir)
+
+    confusion_json = json.dumps(
+        {str(k): {str(k2): v2 for k2, v2 in v.items()}
+         for k, v in sorted(merged_confusion.items())})
+
+    if run_id is not None:
+        # mae/rmse bleiben bewusst NULL - s. _persist_accuracy.
+        _persist_accuracy(run_id, None, None, str(reference_dir),
+                          reference_run_id=reference_run_id,
+                          agreement_pct=100.0 * overall,
+                          kappa=kappa,
+                          confusion_json=confusion_json,
+                          metric_kind=metric_kind)
+    else:
+        print(f"  WARNUNG: kein run_id fuer {test_strategy} gefunden, "
+              f"nicht in DB geschrieben.")
+
+    kappa_str = f"{kappa:.6f}" if kappa is not None else "n/a"
+    print(f"\n  Accuracy-Check ({metric_kind}): "
+          f"Uebereinstimmung={100.0 * overall:.4f}%  kappa={kappa_str}  "
+          f"({n_files} Dates, {total_agree:,}/{total_valid:,} Pixel gleich)")
+    if merged_confusion:
+        print(f"  Verwechslungen (Referenzklasse -> Testklasse, nur "
+              f"abweichende):")
+        for ref_c in sorted(merged_confusion):
+            for test_c in sorted(merged_confusion[ref_c]):
+                if test_c != ref_c:
+                    print(f"    {ref_c:>4} -> {test_c:<4} "
+                          f"{merged_confusion[ref_c][test_c]:,} px")
+
+    return {
+        "region": region,
+        "reference_strategy": reference_strategy,
+        "test_strategy": test_strategy,
+        "metric_kind": metric_kind,
+        "dataset": dataset,
+        "workflow": workflow,
+        "agreement_percent": 100.0 * overall,
+        "kappa": kappa,
+        "confusion": merged_confusion,
+        "n_dates": n_files,
+        "agreeing_pixels": total_agree,
+        "valid_pixels": total_valid,
+        "total_pixels": total_px,
+        "run_id": run_id,
+        "reference_run_id": reference_run_id,
+        "reference_dir": str(reference_dir),
+        "test_dir": str(test_dir),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -4837,7 +5374,11 @@ def main() -> None:
                              "Tile-Boundary-Penalty messbar). Wirkt auf "
                              "onthefly, DEM-Download und local_pp Szenarien "
                              "sowie das STAC Item.")
-    parser.add_argument("--workflow", default="merge_add",
+    # default=None statt "merge_add": so ist unterscheidbar, ob der Nutzer
+    # den Workflow gesetzt hat. Nicht gesetzt -> Default des Datensatzes
+    # (merge_add fuer dem, lc_overlay fuer landcover), aufgeloest direkt
+    # nach parse_args. Fuer --dataset dem aendert das nichts.
+    parser.add_argument("--workflow", default=None,
                         choices=WORKFLOWS,
                         help="openEO Workflow: "
                              "merge_add (Default, B04+DEM via merge_cubes/add), "
@@ -4849,7 +5390,18 @@ def main() -> None:
                              "resample (DEM CDSE-seitig nach EPSG:3035@30m und "
                              "zurueck nach Region-UTM@10m, dann B04+DEM/add), "
                              "filter_bbox (B04+DEM/add, dann filter_bbox auf "
-                             "die mittleren 50%% des Extents).")
+                             "die mittleren 50%% des Extents). "
+                             "NUR mit --dataset landcover: "
+                             "lc_overlay (Default dort - merge_cubes bleibt, "
+                             "aber der overlap_resolver reicht die "
+                             "Klassenkarte durch statt zu addieren; Ergebnis "
+                             "ist die Klassenkarte auf dem S2-Gitter, jedes "
+                             "abweichende Pixel ist ein "
+                             "Transformationsartefakt), "
+                             "lc_mask (B04 auf eine Landbedeckungsklasse "
+                             "maskiert; gemessen wird die Maskenkante). "
+                             "Ohne Angabe wird der Default des Datensatzes "
+                             "verwendet.")
     parser.add_argument("--local-resampling", default="nearest",
                         choices=tuple(LOCAL_RESAMPLING.keys()),
                         help="Resampling-Methode fuer die lokale DEM-Reprojektion "
@@ -4878,6 +5430,23 @@ def main() -> None:
                              f"und Test-Run muessen dieselbe Aufloesung haben - "
                              f"der Accuracy-Check waehlt die Referenz danach "
                              f"aus.")
+    parser.add_argument("--dataset", default=DEFAULT_DATASET,
+                        choices=sorted(DATASETS),
+                        help=f"Datensatz-Paar. Das erste Raster ist immer "
+                             f"Sentinel-2 B04; variabel ist das ZWEITE. "
+                             f"dem (Default): {DATASETS['dem']['label']} - "
+                             f"bisheriges Verhalten, byte-identisch. "
+                             f"landcover: {DATASETS['landcover']['label']}. "
+                             f"Zweck: die bisherigen Genauigkeitsbefunde "
+                             f"beruhen ausschliesslich auf kontinuierlichen "
+                             f"Hoehendaten; ein kategorialer Datensatz macht "
+                             f"sie belastbarer. Bei landcover gelten eigene "
+                             f"Workflows (lc_overlay, lc_mask), nur "
+                             f"--local-resampling=nearest, und der "
+                             f"Accuracy-Check rechnet Uebereinstimmungsquote "
+                             f"+ Cohen's Kappa statt MAE/RMSE. Referenz- und "
+                             f"Test-Run muessen dasselbe Paar haben - der "
+                             f"Accuracy-Check waehlt die Referenz danach aus.")
     parser.add_argument("--dem-layout", default="striped",
                         choices=DEM_LAYOUTS,
                         help="Interne Struktur des reprojizierten DEM-GeoTIFF "
@@ -5047,6 +5616,19 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Datensatz-Paar aufloesen und pruefen, BEVOR irgendetwas laeuft.
+    # Workflow-Default kommt vom Datensatz, damit '--dataset landcover'
+    # allein schon funktioniert; bei 'dem' ist das Ergebnis merge_add,
+    # also unveraendert.
+    dataset = _dataset_of(args)
+    if args.workflow is None:
+        args.workflow = DATASETS[dataset]["default_workflow"]
+    try:
+        _validate_dataset_workflow(dataset, args.workflow)
+        _validate_dataset_resampling(dataset, args.local_resampling)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     global HETZNER_HOST, HETZNER_WEB_PATH, HETZNER_URL_BASE
     if args.host:
         HETZNER_HOST = args.host
@@ -5149,7 +5731,8 @@ def main() -> None:
                            workflow=args.workflow,
                            resampling_method=args.local_resampling,
                            reference_strategy="onthefly",
-                           resolution=_resolution_of(args))
+                           resolution=_resolution_of(args),
+                           dataset=dataset)
 
     if args.reference_check:
         # Pro CDSE-Strategie (onthefly, local_pp, full_pp) einen Vergleich
@@ -5175,7 +5758,8 @@ def main() -> None:
             if _find_latest_run_dir(args.output_dir, suf, args.region,
                                     extent_size=args.extent_size,
                                     workflow=args.workflow,
-                                    resolution=resolution) is None:
+                                    resolution=resolution,
+                                    dataset=dataset) is None:
                 continue
             any_run = True
             run_accuracy_check(
@@ -5187,6 +5771,7 @@ def main() -> None:
                 resampling_method=args.local_resampling,
                 reference_strategy="local_reference",
                 resolution=resolution,
+                dataset=dataset,
             )
         if not any_run:
             print("\n[--reference-check] Keine CDSE-Strategie-Runs gefunden "

@@ -220,6 +220,106 @@ def calculate_metrics(reference, test, nodata=None, exclude_zeros=False):
     return results
 
 
+def calculate_categorical_metrics(reference, test, nodata=None,
+                                  validity_only=False):
+    """Vergleichsmetriken fuer KATEGORIALE Raster (Klassen-IDs).
+
+    MAE/RMSE sind hier bedeutungslos: der Abstand zwischen Klasse 10 (Baum)
+    und Klasse 50 (bebaut) ist keine 40. Stattdessen:
+
+      overall_accuracy - Anteil pixelweise uebereinstimmender Klassen. Die
+                         Kernzahl.
+      kappa            - Cohen's Kappa, korrigiert um zufaellige
+                         Uebereinstimmung. Noetig, weil Landbedeckung immer
+                         stark ungleich verteilt ist: besteht ein Ausschnitt
+                         zu 95% aus einer Klasse, sieht die reine Quote auch
+                         dann gut aus, wenn jede Klassengrenze verschoben
+                         ist.
+      confusion        - vollstaendige Verwechslungsmatrix
+                         {ref_klasse: {test_klasse: n}} - zeigt, WELCHE
+                         Klassen ineinander laufen (typisch: benachbarte
+                         Klassen an den Kanten).
+      per_class        - je Referenzklasse Anzahl und Trefferquote.
+
+    validity_only=True: nicht die Klassen selbst werden verglichen, sondern
+    nur GUELTIG vs NODATA (2 Klassen). Fuer lc_mask - dort steckt die
+    Aussage in der Maskenkante, die Werte innerhalb der Maske sind ohnehin
+    identisch, und ein Vergleich der Werte wuerde die Kante ausblenden.
+    """
+    ref = np.asarray(reference)
+    tst = np.asarray(test)
+    if ref.ndim == 3:
+        ref = ref[0]
+    if tst.ndim == 3:
+        tst = tst[0]
+
+    if validity_only:
+        # NaN und (falls angegeben) nodata gelten als ungueltig.
+        ref_valid = np.isfinite(ref)
+        tst_valid = np.isfinite(tst)
+        if nodata is not None:
+            ref_valid &= (ref != nodata)
+            tst_valid &= (tst != nodata)
+        ref_cls = ref_valid.astype(np.int64)
+        tst_cls = tst_valid.astype(np.int64)
+        mask = np.ones(ref_cls.shape, dtype=bool)
+    else:
+        ref_cls = ref.astype(np.int64)
+        tst_cls = tst.astype(np.int64)
+        mask = np.isfinite(ref.astype(np.float64)) & np.isfinite(
+            tst.astype(np.float64))
+        if nodata is not None:
+            mask &= (ref_cls != nodata) & (tst_cls != nodata)
+
+    total_px = int(mask.size)
+    valid_px = int(mask.sum())
+    if valid_px == 0:
+        return {
+            "overall_accuracy": None, "kappa": None, "confusion": {},
+            "per_class": {}, "valid_pixels": 0, "total_pixels": total_px,
+            "agreeing_pixels": 0,
+        }
+
+    r = ref_cls[mask]
+    t = tst_cls[mask]
+    agree = int((r == t).sum())
+    overall = agree / valid_px
+
+    classes = np.union1d(np.unique(r), np.unique(t))
+    confusion, per_class = {}, {}
+    for c in classes:
+        sel = (r == c)
+        n_c = int(sel.sum())
+        if n_c:
+            hits = int((t[sel] == c).sum())
+            per_class[int(c)] = {
+                "n_reference": n_c,
+                "n_correct": hits,
+                "accuracy": hits / n_c,
+            }
+            row = {}
+            for c2 in np.unique(t[sel]):
+                row[int(c2)] = int((t[sel] == c2).sum())
+            confusion[int(c)] = row
+
+    # Cohen's Kappa: (p_o - p_e) / (1 - p_e)
+    p_e = 0.0
+    for c in classes:
+        p_e += (float((r == c).sum()) / valid_px) * \
+               (float((t == c).sum()) / valid_px)
+    kappa = (overall - p_e) / (1.0 - p_e) if (1.0 - p_e) > 1e-12 else None
+
+    return {
+        "overall_accuracy": float(overall),
+        "kappa": float(kappa) if kappa is not None else None,
+        "confusion": confusion,
+        "per_class": per_class,
+        "valid_pixels": valid_px,
+        "total_pixels": total_px,
+        "agreeing_pixels": agree,
+    }
+
+
 def print_results(results, ref_path, test_path):
     """Pretty print the results."""
     print("\n" + "=" * 60)

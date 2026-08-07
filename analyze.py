@@ -124,6 +124,60 @@ def fetch_accuracy(db_path: str):
     }
 
 
+def fetch_categorical_accuracy(db_path: str):
+    """Kategoriale Accuracy-Zeilen (--dataset landcover) als Liste von Dicts.
+
+    Getrennt von fetch_accuracy: dort werden ausschliesslich rmse/mae
+    ausgewertet, und die sind bei kategorialen Laeufen bewusst NULL (der
+    Abstand zwischen Klasse 10 und Klasse 50 ist keine 40). Beide Sichten
+    duerfen sich nicht vermischen - sonst laufen Uebereinstimmungsquoten in
+    Mittelwerte kontinuierlicher Fehler ein.
+
+    Liefert [] wenn die Tabelle oder die Spalten fehlen (alte DBs).
+    """
+    con = duckdb.connect(db_path, read_only=True)
+    tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+    if "accuracy" not in tables:
+        return []
+    cols = {r[1] for r in con.execute("PRAGMA table_info('accuracy')").fetchall()}
+    if not {"agreement_pct", "metric_kind"} <= cols:
+        return []
+    run_cols = {r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()}
+    ds_expr = "r.dataset" if "dataset" in run_cols else "NULL"
+    res_expr = "r.resolution_m" if "resolution_m" in run_cols else "NULL"
+    rows = con.execute(
+        f"""SELECT a.run_id, a.metric_kind, a.agreement_pct, a.kappa,
+                   a.confusion_json, r.crs_strategy, r.workflow, r.extent_size,
+                   {ds_expr} AS dataset, {res_expr} AS resolution_m
+            FROM accuracy a LEFT JOIN runs r ON r.run_id = a.run_id
+            WHERE a.agreement_pct IS NOT NULL
+            ORDER BY a.run_id"""
+    ).fetchall()
+    keys = ("run_id", "metric_kind", "agreement_pct", "kappa",
+            "confusion_json", "strategy", "workflow", "extent_size",
+            "dataset", "resolution_m")
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def print_categorical_accuracy(db_path: str) -> None:
+    """Kategoriale Ergebnisse tabellarisch ausgeben."""
+    rows = fetch_categorical_accuracy(db_path)
+    print("\n=== Kategoriale Genauigkeit (Uebereinstimmung / Cohen's Kappa) ===")
+    if not rows:
+        print("  keine kategorialen Accuracy-Eintraege "
+              "(--dataset landcover noch nicht gelaufen?)")
+        return
+    print(f"  {'run':>5}  {'Strategie':<20} {'Workflow':<11} {'Extent':<7} "
+          f"{'Aufl.':>6}  {'Uebereinst.':>11}  {'Kappa':>8}  Metrik")
+    for r in rows:
+        res = f"{r['resolution_m']:g} m" if r["resolution_m"] else "-"
+        kappa = f"{r['kappa']:.6f}" if r["kappa"] is not None else "n/a"
+        print(f"  {r['run_id']:>5}  {(r['strategy'] or '-'):<20} "
+              f"{(r['workflow'] or '-'):<11} {(r['extent_size'] or '-'):<7} "
+              f"{res:>6}  {r['agreement_pct']:>10.4f}%  {kappa:>8}  "
+              f"{r['metric_kind']}")
+
+
 def bootstrap_median_ci(values, iters=BOOTSTRAP_ITERS, conf=0.95):
     """Percentile-bootstrap CI for the median. Returns (low, high) or (None, None)."""
     n = len(values)
@@ -484,10 +538,19 @@ def main():
                              "bytes_sent, Anteil HTTP 206 (Range) vs 200. "
                              "Zeigt den Zusammenhang zwischen Extent-Groesse "
                              "und Anzahl Range Requests.")
+    parser.add_argument("--categorical", action="store_true",
+                        help="Kategoriale Genauigkeit ausgeben "
+                             "(--dataset landcover): Uebereinstimmungsquote "
+                             "und Cohen's Kappa je Run. Diese Zeilen tragen "
+                             "bewusst KEIN rmse/mae und tauchen deshalb in "
+                             "den normalen Accuracy-Spalten nicht auf.")
     args = parser.parse_args()
 
     if args.nginx_stats:
         print_nginx_stats(args.db)
+
+    if args.categorical:
+        print_categorical_accuracy(args.db)
 
     runs = fetch_runs(args.db)
     if not runs:
