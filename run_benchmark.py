@@ -131,6 +131,11 @@ DATASETS = {
         # 10 Baum, 30 Gras, 40 Acker, 50 bebaut, 60 vegetationsarm, 80 Wasser.
         "dtype": "uint8",
         "nodata": 0,
+        # Gueltige ESA-WorldCover-Klassen. Dient der INHALTLICHEN Pruefung
+        # des CDSE-Ergebnisses: der erste Serverlauf meldete success und
+        # lieferte trotzdem S2-Reflexionswerte. Ein Ergebnis, dessen Werte
+        # nicht in dieser Menge liegen, ist keine Klassenkarte.
+        "classes": (10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100),
     },
 }
 
@@ -226,6 +231,160 @@ def _apply_dataset_to_pg(pg: dict, dataset: str) -> None:
     args = node.setdefault("arguments", {})
     args["id"] = info["collection"]
     args["temporal_extent"] = list(info["temporal_extent"])
+
+
+def verify_lc_overlay_graph(pg: dict, dataset: str = "landcover") -> list:
+    """Strukturpruefung fuer lc_overlay: liefert der Graph nachweisbar den
+    KLASSEN-Cube als Ergebnis?
+
+    Gibt eine Liste von Beanstandungen zurueck (leer = in Ordnung).
+
+    Hintergrund: der erste Serverlauf meldete success und lieferte trotzdem
+    S2-Reflexionswerte. So ein Fehler faellt weder dem Backend noch dem
+    Benchmark auf - deshalb hier eine Pruefung, die den Ergebnispfad
+    RUECKWAERTS von save_result verfolgt und belegt, dass er auf dem
+    Klassenband endet.
+
+    Geprueft wird:
+      1. save_result haengt an filter_bands auf dem Klassenband.
+      2. dessen Datenquelle ist merge_cubes.
+      3. merge1 hat KEINEN overlap_resolver (sonst waere die Band-Auswahl
+         wieder von der x/y-Bindung des Resolvers abhaengig).
+      4. die Band-Labels der beiden Cubes sind DISJUNKT - der Zweitcube
+         wird auf den Klassen-Bandnamen umbenannt, nicht auf B04.
+      5. zwischen Klassen-Cube und save_result liegt KEIN rechnender
+         Prozess (add/subtract/multiply/divide) - genau dort ist der
+         Fehler zuletzt entstanden.
+    """
+    band = DATASETS[dataset]["band"]
+    root = pg.get("process_graph", pg)
+    problems = []
+
+    def node_of(ref):
+        if isinstance(ref, dict) and "from_node" in ref:
+            return ref["from_node"], root.get(ref["from_node"])
+        return None, None
+
+    save = next((n for n in root.values()
+                 if isinstance(n, dict) and n.get("process_id") == "save_result"),
+                None)
+    if save is None:
+        return ["kein save_result im Graphen"]
+
+    fb_name, fb = node_of(save.get("arguments", {}).get("data"))
+    if not fb or fb.get("process_id") != "filter_bands":
+        problems.append(
+            f"save_result haengt nicht an filter_bands, sondern an "
+            f"{fb.get('process_id') if fb else None!r} ({fb_name!r})")
+        return problems
+    if fb["arguments"].get("bands") != [band]:
+        problems.append(
+            f"filter_bands waehlt {fb['arguments'].get('bands')!r} "
+            f"statt [{band!r}]")
+
+    mg_name, mg = node_of(fb["arguments"].get("data"))
+    if not mg or mg.get("process_id") != "merge_cubes":
+        problems.append(
+            f"filter_bands liest nicht aus merge_cubes, sondern aus "
+            f"{mg.get('process_id') if mg else None!r}")
+        return problems
+    if "overlap_resolver" in mg.get("arguments", {}):
+        problems.append(
+            "merge_cubes hat einen overlap_resolver - die Bandauswahl "
+            "haengt dann wieder an dessen x/y-Bindung")
+
+    # Band-Labels beider Cubes ermitteln: cube1 = S2 (load_collection.bands),
+    # cube2 = Zweitcube (rename_labels.target).
+    _, c1 = node_of(mg["arguments"].get("cube1"))
+    c1_bands = (c1 or {}).get("arguments", {}).get("bands")
+    rn = next((n for n in root.values()
+               if isinstance(n, dict) and n.get("process_id") == "rename_labels"),
+              None)
+    c2_bands = (rn or {}).get("arguments", {}).get("target")
+    if c2_bands != [band]:
+        problems.append(
+            f"rename_labels.target ist {c2_bands!r}, erwartet [{band!r}] - "
+            f"bei Umbenennung auf einen S2-Bandnamen ueberlappen die Cubes "
+            f"wieder")
+    if c1_bands and c2_bands and set(c1_bands) & set(c2_bands):
+        problems.append(
+            f"Band-Labels ueberlappen: cube1={c1_bands!r} cube2={c2_bands!r}")
+
+    # Kein rechnender Prozess auf dem Pfad Klassen-Cube -> save_result.
+    arithmetic = {"add", "subtract", "multiply", "divide", "mean", "sum"}
+    seen, stack = set(), [fb["arguments"].get("data")]
+    while stack:
+        name, node = node_of(stack.pop())
+        if not node or name in seen:
+            continue
+        seen.add(name)
+        if node.get("process_id") in arithmetic:
+            problems.append(
+                f"rechnender Prozess {node['process_id']!r} ({name!r}) auf "
+                f"dem Ergebnispfad")
+        for v in (node.get("arguments") or {}).values():
+            if isinstance(v, dict) and "from_node" in v:
+                stack.append(v)
+    return problems
+
+
+def verify_categorical_result(result_dir, dataset: str,
+                              label: str = "") -> bool:
+    """Prueft NACH dem CDSE-Job, ob das Ergebnis wirklich Klassen enthaelt.
+
+    Der erste Landcover-Serverlauf meldete status=success und lieferte
+    trotzdem S2-Reflexionswerte (int16, Werte 66..85 und negative statt
+    uint8 mit 10/30/40/...). Weder das Backend noch der Benchmark haben das
+    bemerkt - erst der Accuracy-Check mit 0,0000 % Uebereinstimmung. Diese
+    Pruefung faengt genau das ab, direkt nach dem Job und mit klarer
+    Meldung, statt es in eine unerklaerliche Metrik laufen zu lassen.
+
+    Prueft je Ergebnis-TIF: (1) Werte liegen in der Klassenmenge des
+    Datensatzes, (2) keine negativen Werte, (3) Anzahl verschiedener Werte
+    ist klein (eine Klassenkarte hat Dutzende, kein Kontinuum).
+
+    Gibt True zurueck wenn plausibel, sonst False (und meldet laut). Wirft
+    NICHT - der Lauf soll seine Zeitmessungen behalten, das Ergebnis wird
+    nur unmissverstaendlich als unbrauchbar markiert.
+    """
+    import numpy as np
+    info = DATASETS.get(dataset, {})
+    classes = set(info.get("classes") or ())
+    if not classes:
+        return True
+    tifs = sorted(Path(result_dir).glob("*.tif"))
+    if not tifs:
+        print(f"  [warn] Keine Ergebnis-TIFs in {result_dir} - "
+              f"Inhaltspruefung uebersprungen.")
+        return True
+    ok = True
+    for tif in tifs:
+        try:
+            with rasterio.open(tif) as src:
+                arr = src.read(1)
+                dt = src.dtypes[0]
+        except Exception as exc:
+            print(f"  [warn] {tif.name} nicht lesbar: {exc}")
+            continue
+        vals = np.unique(arr[np.isfinite(arr)] if arr.dtype.kind == "f" else arr)
+        fremd = sorted(int(v) for v in vals if int(v) not in classes)
+        if fremd:
+            ok = False
+            print(f"\n  [DIAGNOSE] {label}{tif.name}: Ergebnis ist KEINE "
+                  f"Klassenkarte.")
+            print(f"      dtype={dt}, {len(vals)} verschiedene Werte, "
+                  f"Bereich {int(vals.min())}..{int(vals.max())}")
+            print(f"      Werte ausserhalb der {dataset}-Klassen "
+                  f"{sorted(classes)}: {fremd[:12]}"
+                  f"{' ...' if len(fremd) > 12 else ''}")
+            print(f"      Erwartet: uint8 mit ausschliesslich diesen Klassen. "
+                  f"Typische Ursache: der Graph liefert den falschen Cube "
+                  f"(s. verify_lc_overlay_graph).")
+        else:
+            print(f"  Inhaltspruefung {tif.name}: OK "
+                  f"({len(vals)} Klassen, dtype={dt})")
+    return ok
+
 
 # Ziel-Zellgroesse in Metern. 10 m = Sentinel-2 B04 nativ und damit das
 # bisherige, fest verdrahtete Verhalten. Ueber --resolution steuerbar
@@ -1606,24 +1765,46 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
 
     if workflow == "lc_overlay":
         # merge_cubes BLEIBT - genau dieselbe Gitter-Aushandlung zwischen
-        # S2-Cube und Zweitcube wie bei merge_add, nur reicht der
-        # overlap_resolver den Zweitcube (y) durch statt zu addieren.
-        # Ergebnis: die Klassenkarte auf dem S2-Gitter.
+        # S2-Cube und Zweitcube wie bei merge_add (cube1 = S2 ist laut Spec
+        # das Resampling-Ziel, die Klassenkarte landet also auf dem
+        # S2-Gitter). Die Auswahl des Ergebnis-Cubes laeuft aber NICHT mehr
+        # ueber den overlap_resolver.
         #
-        # "y + 0" statt eines echten Durchreich-Prozesses, weil openEO
-        # keinen "nimm y"-Prozess kennt und der overlap_resolver einen
-        # Ergebnisknoten braucht. Der Knotenname lcpassthrough1 ist die
-        # Workflow-Signatur fuer _detect_pg_workflow - ohne ihn waere der
-        # Graph von merge_add nicht zu unterscheiden (beide nutzen 'add').
-        pg["merge1"]["arguments"]["overlap_resolver"] = {
-            "process_graph": {
-                "lcpassthrough1": {
-                    "arguments": {"x": {"from_parameter": "y"}, "y": 0},
-                    "process_id": "add",
-                    "result": True,
-                }
-            }
+        # WARUM NICHT (erster Serverlauf, belegt): der frueherer Ansatz war
+        # ein Durchreich-Resolver add(x={from_parameter:"y"}, y=0). Laut
+        # openEO-Spec ist das korrekt - overlap_resolver.x ist "the
+        # overlapping value from the base data cube cube1", y "from the
+        # other data cube cube2" -, also haette y+0 die Klassenkarte
+        # geliefert. Der Job lief mit status=success durch und lieferte
+        # trotzdem S2-Reflexionswerte (int16 statt uint8). Die Log-Zeile
+        # "Starting stage: 29 - merge_cubes, B04,B04,add" zeigt, warum:
+        # CDSE erkennt den Resolver als bekannten Binaeroperator 'add' und
+        # wendet seine native cube1<op>cube2-Implementierung an - die
+        # Argumentverdrahtung (from_parameter + Konstante 0) faellt dabei
+        # weg. Der Ansatz haengt damit an einer Backend-Interna, nicht an
+        # der Spec.
+        #
+        # STATTDESSEN: die Baender werden gar nicht erst zur Ueberlappung
+        # gebracht. Der Zweitcube behaelt seinen eigenen Bandnamen (MAP),
+        # S2 heisst B04 -> DISJUNKTE Labels. Laut Spec braucht merge_cubes
+        # dann keinen overlap_resolver ("If there is any overlap between
+        # the dimension labels, the parameter overlap_resolver must be
+        # specified"), sondern konkateniert entlang der Band-Dimension.
+        # Danach holt filter_bands genau das Klassenband heraus.
+        #
+        # Damit haengt das Ergebnis an einem BANDNAMEN statt an der
+        # x/y-Bindung eines Resolvers: es kann strukturell nicht mehr
+        # versehentlich S2 sein.
+        band = DATASETS[dataset]["band"]
+        pg["renamelabels1"]["arguments"]["target"] = [band]
+        # Kein Overlap -> Resolver entfernen (er waere unbenutzt, und
+        # manche Backends beanstanden einen Resolver ohne Ueberlappung).
+        pg["merge1"]["arguments"].pop("overlap_resolver", None)
+        pg["filterbands_lc"] = {
+            "arguments": {"data": {"from_node": "merge1"}, "bands": [band]},
+            "process_id": "filter_bands",
         }
+        pg["saveresult1"]["arguments"]["data"] = {"from_node": "filterbands_lc"}
         return pg
 
     if workflow == "lc_mask":
@@ -3032,6 +3213,8 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
         _write_run_meta(outdir, resolution, dataset=dataset)
         results = run_openeo(args.api_url, str(scenario_path), str(outdir),
                              job_timeout=args.job_timeout)
+        if _is_categorical(dataset) and results.get("status") == "success":
+            verify_categorical_result(outdir, dataset, label="onthefly ")
         total_time = results.get("total_time")
         run_id = import_run(str(outdir), crs_strategy="onthefly",
                             run_type=run_type, extent_size=args.extent_size,
@@ -3467,6 +3650,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         _write_run_meta(base, resolution, dataset=dataset)
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
                                    job_timeout=args.job_timeout)
+        if _is_categorical(dataset) and results_step5.get("status") == "success":
+            verify_categorical_result(step3_dir, dataset, label="local_pp ")
         t_main = results_step5.get("total_time") or 0.0
         total_time = preprocessing_time + t_main
 
@@ -3822,6 +4007,8 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         )
         results_main = run_openeo(args.api_url, str(scenario_path), str(main_dir),
                                   job_timeout=args.job_timeout)
+        if _is_categorical(dataset) and results_main.get("status") == "success":
+            verify_categorical_result(main_dir, dataset, label="full_pp ")
         t_main = results_main.get("total_time") or 0.0
         total_time = preprocessing_time + t_main
 
@@ -4422,6 +4609,9 @@ def _detect_pg_workflow(pg: dict):
     # lc_mask ZUERST: der Graph hat kein merge1, dafuer die eigenen Knoten.
     if "lcmask1" in root or "lcmaskbuild1" in root:
         return "lc_mask"
+    # lc_overlay: merge1 ohne overlap_resolver + filter_bands aufs Klassenband.
+    if "filterbands_lc" in root:
+        return "lc_overlay"
     if "applykernel1" in root:
         return "focal"
     if "resamplespatial1" in root or "resamplespatial2" in root:
@@ -4437,10 +4627,6 @@ def _detect_pg_workflow(pg: dict):
         ov = merge.get("arguments", {}).get("overlap_resolver")
         if isinstance(ov, dict):
             resolver = ov.get("process_graph", {})
-            # lc_overlay VOR der 'add'-Pruefung: sein Durchreich-Resolver
-            # benutzt ebenfalls 'add' und waere sonst merge_add.
-            if "lcpassthrough1" in resolver:
-                return "lc_overlay"
             for node in resolver.values():
                 if not isinstance(node, dict):
                     continue
