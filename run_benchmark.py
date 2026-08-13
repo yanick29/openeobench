@@ -3675,10 +3675,33 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         # Schritt 5: load_stac Szenario ausfuehren. Bei zarr und bei
         # --dem-tiles>1 zeigt load_stac auf die Collection-URL,
         # gtiff-Einzeldatei/netcdf unveraendert direkt auf die Item-URL.
-        use_collection = dem_format == "zarr" or tiles is not None
+        #
+        # --zarr-via-item kehrt das NUR fuer zarr um (Versuch 7). Grund:
+        # seit der shape-Injektion in die .zmetadata scheitert der Lauf
+        # nicht mehr am Zarr-Parser ("missing key: 'shape'" ist weg),
+        # sondern frueher im COLLECTION-Lesepfad:
+        #   construct_item_collection: static Catalog ..., band_names=['DEM']
+        #   ItemCollection.from_stac_catalog ... elapsed 0:00:00.046
+        #   post_dry_run failed: 'NoneType' object has no attribute 'crs'
+        #   Collected 0 projection metadata entries from 1 items
+        # Das Item wird also gezaehlt, seine Assets aber nicht ausgewertet.
+        # Der S2-Cube laeuft im selben Job ueber from_stac_api und sammelt
+        # 1184 Eintraege - der statische Katalogpfad ist damit der
+        # Verdaechtige, nicht das Format. netcdf funktioniert ueber die
+        # ITEM-URL, deshalb hier dieselbe Einbindung fuer zarr.
+        # Item + Injektion ist die einzige noch nie getestete Kombination.
+        # --dem-tiles>1 bleibt IMMER Collection: dort ist die Collection
+        # die Mosaik-Struktur selbst, nicht bloss ein Wrapper.
+        zarr_via_item = bool(getattr(args, "zarr_via_item", False))
+        use_collection = tiles is not None or (
+            dem_format == "zarr" and not zarr_via_item)
         load_stac_url = collection_url if use_collection else stac_url
+        via = "Collection" if use_collection else "Item"
+        if dem_format == "zarr" and zarr_via_item:
+            via += " (--zarr-via-item; Collection wurde trotzdem erzeugt "
+            via += "und hochgeladen)"
         print(f"\n  [Schritt 5/5] load_stac Szenario auf CDSE ausfuehren "
-              f"(url={'Collection' if use_collection else 'Item'})...")
+              f"(url={via})...")
         scenario_filename = f"{strategy_label}_{region}.json"
         local_pp_scenario = build_local_pp_scenario(
             region, load_stac_url, base / scenario_filename,
@@ -5839,6 +5862,25 @@ def main() -> None:
                              "Experiment: laedt CDSE die Kacheln parallel? "
                              "Das Datenvolumen sinkt durch die Zerlegung "
                              "NICHT - nur Parallelitaet kann Zeit sparen.")
+    parser.add_argument("--zarr-via-item", action="store_true",
+                        help="Nur --dem-format=zarr: load_stac zeigt auf die "
+                             "STAC-ITEM-URL statt auf die Collection-URL. "
+                             "Die Collection wird weiterhin erzeugt und "
+                             "hochgeladen, sie wird nur nicht mehr "
+                             "referenziert. Hintergrund: seit der "
+                             "shape-Injektion in die .zmetadata scheitert "
+                             "der zarr-Lauf nicht mehr am Zarr-Parser, "
+                             "sondern im Collection-Lesepfad "
+                             "(from_stac_catalog liefert 'Collected 0 "
+                             "projection metadata entries from 1 items', "
+                             "danach 'NoneType' object has no attribute "
+                             "'crs'). netcdf laeuft ueber die Item-URL "
+                             "erfolgreich - dieses Flag testet, ob der "
+                             "Collection-Pfad der Blocker ist und nicht das "
+                             "Format. Auf --dem-tiles>1 hat das Flag keine "
+                             "Wirkung: dort IST die Collection die "
+                             "Mosaik-Struktur. Default AUS (bisheriges "
+                             "Verhalten).")
     parser.add_argument("--snap-dem-to-s2", action="store_true",
                         help="(nur local_preprocessing) DEM pixelgenau auf "
                              "das erwartete CDSE/S2-Zielgitter bringen: "
