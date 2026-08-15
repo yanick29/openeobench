@@ -551,6 +551,8 @@ _DEM_FORMAT_EXT = {
 #
 #   store           Verzeichnis-Store direkt (aktueller Default, HEAD-Form):
 #                   https://HOST/x.zarr
+#   store-vsicurl   derselbe Store mit GDAL-Pfad-Praefix, sonst nichts:
+#                   /vsicurl/https://HOST/x.zarr
 #   chunk           erster Array-Chunk unter bekannter Bild-Endung:
 #                   https://HOST/x.zarr/DEM/0.0.tif
 #   driver-fragment GDAL-Treiberausdruck, Endung als URL-Fragment angehaengt:
@@ -570,9 +572,50 @@ _DEM_FORMAT_EXT = {
 # (Link.href ist java.net.URI, OpenSearchResponses.scala:139). Der
 # funktionierende netcdf-href traegt nur ein Pfad-Praefix und bleibt
 # URL-aehnlich; diese beiden Formen ahmen das nach.
-ZARR_HREF_FORMS = ("store", "chunk", "driver-fragment", "driver-plain",
-                   "driver-novsi", "driver-noquote", "driver-minimal")
+#
+# store-vsicurl zieht die Konsequenz daraus und laesst die Treibersyntax
+# ganz weg - der href ist dann exakt so gebaut wie der funktionierende
+# netcdf-href (nur Pfad-Praefix, keine Quotes, keine zusaetzlichen
+# Doppelpunkte) und bleibt damit ein gueltiger, absoluter Pfad. Zwei
+# Gruende, warum das die bisher belegten Huerden trifft:
+#   - Ein Treiberausdruck als href wurde von CDSE als RELATIVER Pfad
+#     behandelt und hinter die Basis-URL gehaengt (404 auf
+#     "http:/HOST/ZARR:/vsicurl/http:/HOST/...").  Ein mit "/vsi"
+#     beginnender Pfad gilt dagegen als absolut (pystac/utils.py,
+#     _make_absolute_href_url) und ist ein legaler java.net.URI
+#     (OpenSearchResponses.scala:139).
+#   - Der Ausdruck endet weiter auf ".zarr" und trifft damit
+#     ZarrRasterSourceProvider.canProcess; das Praefix muss aus dem href
+#     kommen, weil dieser Provider als einziger der Kette kein
+#     .replace("https", "/vsicurl/https") macht.
+# Lokal gemessen (GDAL 3.10.3, Server mit 301 auf Verzeichnisse wie echter
+# nginx, unter GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR): oeffnet den
+# UNVERAENDERTEN Store direkt als 2D-Raster mit EPSG:32633 und korrektem
+# Transform, Pixel SHA-256-identisch. Ein Store mit nur einem Array (ohne
+# x/y-Koordinaten) waere hier NICHT besser - er liefert eine
+# Identitaets-Transformation, weil GDALs Zarr-Treiber die Geotransformation
+# aus den Koordinatenarrays zieht und das GeoTransform-Attribut ignoriert.
+ZARR_HREF_FORMS = ("store", "store-vsicurl", "chunk", "driver-fragment",
+                   "driver-plain", "driver-novsi", "driver-noquote",
+                   "driver-minimal")
 DEFAULT_ZARR_HREF_FORM = "store"
+
+# --zarr-asset-media-type: welchen Medientyp der zarr-data-Asset deklariert.
+#   none        gar kein 'type'-Feld (Default, bisheriges Verhalten). Der
+#               Medientyp-Check in load_stac.py::_is_band_asset haengt an
+#               `if asset.media_type:` und entfaellt damit; entschieden wird
+#               ueber roles=['data']. In einem CDSE-Lauf belegt: das Asset
+#               wurde ohne type-Feld akzeptiert
+#               (opensearch_stats={'assets': 1, 'items with
+#               len(band_assets)=1': 1}).
+#   image/tiff  deklariert einen Typ aus der Whitelist
+#               (_is_supported_raster_mime_type). Sachlich falsch fuer einen
+#               Zarr-Store, aber die von der CDSE-Doku ("Minimal STAC
+#               requirement summary") verlangte Form - und fuer die
+#               Reader-Wahl folgenlos, die haengt allein an der Pfadendung
+#               (ZarrRasterSourceProvider.canProcess).
+ZARR_ASSET_MEDIA_TYPES = ("none", "image/tiff")
+DEFAULT_ZARR_ASSET_MEDIA_TYPE = "none"
 
 
 def _zarr_asset_href(store_url: str, form: str, band: str) -> str:
@@ -594,6 +637,12 @@ def _zarr_asset_href(store_url: str, form: str, band: str) -> str:
                          f"Erlaubt: {ZARR_HREF_FORMS}")
     if form == "store":
         return store_url
+    if form == "store-vsicurl":
+        # Nur das Pfad-Praefix, exakt wie beim netcdf-Asset. Idempotent,
+        # damit ein bereits praefixierter store_url nicht doppelt wird.
+        if store_url.startswith("/vsicurl/"):
+            return store_url
+        return f"/vsicurl/{store_url}"
     if form == "chunk":
         return f"{store_url}/{band}/0.0.tif"
     if form == "driver-noquote":
@@ -2707,7 +2756,9 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
                     grid: dict = None,
                     dataset: str = DEFAULT_DATASET,
                     zarr_legacy_asset: bool = False,
-                    zarr_href_form: str = DEFAULT_ZARR_HREF_FORM) -> dict:
+                    zarr_href_form: str = DEFAULT_ZARR_HREF_FORM,
+                    zarr_asset_media_type: str = DEFAULT_ZARR_ASSET_MEDIA_TYPE
+                    ) -> dict:
     """STAC Item passend zum reprojizierten DEM-Asset.
 
     `extent` ueberschreibt REGIONS[region]['extent'] (z.B. fuer small/large
@@ -2832,7 +2883,17 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
         # s. Docstring Punkt 1: ein DEKLARIERTER, nicht gelisteter Medientyp
         # laesst _is_band_asset das Asset sofort verwerfen; ohne type-Feld
         # faellt der Check aus und roles=['data'] entscheidet.
-        del asset["type"]
+        # --zarr-asset-media-type kann stattdessen einen GELISTETEN Typ
+        # deklarieren (s. ZARR_ASSET_MEDIA_TYPES).
+        if zarr_asset_media_type not in ZARR_ASSET_MEDIA_TYPES:
+            raise ValueError(
+                f"Unbekannter --zarr-asset-media-type: "
+                f"{zarr_asset_media_type!r}. "
+                f"Erlaubt: {ZARR_ASSET_MEDIA_TYPES}")
+        if zarr_asset_media_type == "none":
+            del asset["type"]
+        else:
+            asset["type"] = zarr_asset_media_type
     properties = {"datetime": DATASETS[dataset]["stac_datetime"],
                   "proj:epsg": epsg}
     if grid is not None:
@@ -3586,6 +3647,19 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
               "als '0.0' OHNE Endung. Eine so benannte Kopie muss separat "
               "auf dem Server liegen, der Upload legt sie NICHT an.")
 
+    # --zarr-asset-media-type: deklarierter Medientyp des zarr-Assets.
+    zarr_asset_media_type = getattr(args, "zarr_asset_media_type",
+                                    DEFAULT_ZARR_ASSET_MEDIA_TYPE)
+    if zarr_asset_media_type not in ZARR_ASSET_MEDIA_TYPES:
+        raise ValueError(
+            f"Unbekannter --zarr-asset-media-type: "
+            f"{zarr_asset_media_type!r}. Erlaubt: {ZARR_ASSET_MEDIA_TYPES}")
+    if (dem_format != "zarr"
+            and zarr_asset_media_type != DEFAULT_ZARR_ASSET_MEDIA_TYPE):
+        print(f"  [warn] --zarr-asset-media-type={zarr_asset_media_type} wird "
+              f"bei --dem-format={dem_format} ignoriert (nur fuer zarr "
+              f"relevant).")
+
     # --dem-tiles: DEM in N raeumliche Kacheln zerlegen, je Kachel ein
     # eigenes STAC-Item (ein Asset) in einer Collection. Nur gtiff - die
     # zarr/netcdf-Experimente bleiben unangetastet.
@@ -3863,6 +3937,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                 dataset=dataset,
                 zarr_legacy_asset=getattr(args, "zarr_legacy_asset", False),
                 zarr_href_form=zarr_href_form,
+                zarr_asset_media_type=zarr_asset_media_type,
             )
             _stac_asset = stac_item["assets"]["data"]
             print(f"  STAC data-Asset: href={_stac_asset['href']}")
@@ -6177,6 +6252,15 @@ def main() -> None:
                              "store (Default, bisheriges Verhalten): "
                              "Verzeichnis-Store direkt, "
                              "https://HOST/x.zarr. "
+                             "store-vsicurl: derselbe Store mit "
+                             "GDAL-Pfad-Praefix, /vsicurl/https://HOST/x.zarr "
+                             "- gleiche Bauform wie der funktionierende "
+                             "netcdf-href (kein Treiberpraefix, keine Quotes, "
+                             "kein Array-Pfad), damit CDSE ihn nicht als "
+                             "relativen Pfad hinter die Basis-URL haengt. "
+                             "Lokal gegen GDAL geprueft: oeffnet den "
+                             "unveraenderten Store mit korrektem CRS und "
+                             "Transform. "
                              "chunk: erster Array-Chunk unter bekannter "
                              "Bild-Endung, https://HOST/x.zarr/DEM/0.0.tif "
                              "(setzt eine so benannte Kopie auf dem Server "
@@ -6199,6 +6283,24 @@ def main() -> None:
                              "traegt in allen Formen kein type-Feld, damit "
                              "pro Lauf genau eine Groesse variiert. "
                              "Wird von --zarr-legacy-asset ueberstimmt.")
+    parser.add_argument("--zarr-asset-media-type",
+                        default=DEFAULT_ZARR_ASSET_MEDIA_TYPE,
+                        choices=ZARR_ASSET_MEDIA_TYPES,
+                        help="Nur --dem-format=zarr: welchen Medientyp der "
+                             "data-Asset deklariert. none (Default, "
+                             "bisheriges Verhalten): gar kein type-Feld - "
+                             "der Medientyp-Check in _is_band_asset haengt "
+                             "an 'if asset.media_type:' und entfaellt damit, "
+                             "entschieden wird ueber roles=['data'] (in "
+                             "einem CDSE-Lauf belegt: Asset ohne type-Feld "
+                             "akzeptiert, opensearch_stats assets=1). "
+                             "image/tiff: deklariert einen Typ aus der "
+                             "Whitelist - sachlich falsch fuer einen "
+                             "Zarr-Store, aber die von der CDSE-Doku "
+                             "verlangte Form; fuer die Reader-Wahl folgenlos, "
+                             "die haengt allein an der Pfadendung. "
+                             "Wird von --zarr-legacy-asset ueberstimmt "
+                             "(dort gilt application/vnd+zarr).")
     parser.add_argument("--zarr-legacy-asset", action="store_true",
                         help="Nur --dem-format=zarr: die alte Asset-Form im "
                              "STAC-Item wiederherstellen, also "
