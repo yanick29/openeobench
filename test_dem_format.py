@@ -274,7 +274,11 @@ def _log_stac_media_types() -> None:
             dem_format=fmt,
         )
         asset = item["assets"]["data"]
-        print(f"  {fmt:8s}  media_type={asset['type']:36s}  href={asset['href']}")
+        # zarr traegt bewusst KEIN type-Feld (CDSEs _is_band_asset verwirft
+        # Assets mit deklariertem, nicht gelistetem Medientyp) - deshalb
+        # .get() statt [] und ein sichtbarer Platzhalter.
+        media_type = asset.get("type", "<kein type-Feld>")
+        print(f"  {fmt:8s}  media_type={media_type:36s}  href={asset['href']}")
 
 
 def main() -> int:
