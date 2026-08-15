@@ -559,8 +559,19 @@ _DEM_FORMAT_EXT = {
 #                   ZARR:"/vsicurl/https://HOST/x.zarr":/DEM
 #   driver-novsi    derselbe Ausdruck ohne /vsicurl/-Praefix:
 #                   ZARR:"https://HOST/x.zarr":/DEM
+#   driver-noquote  Treiberausdruck OHNE Anfuehrungszeichen:
+#                   ZARR:/vsicurl/https://HOST/x.zarr:/DEM
+#   driver-minimal  nur Praefix + URL, ohne Array-Pfad, ohne Quotes:
+#                   ZARR:https://HOST/x.zarr
+#
+# Die letzten beiden zielen auf den Befund, dass CDSE bei den gequoteten
+# Formen in addLink abbricht (Py4JJavaError o.addLink) - vermutlich weil
+# Anfuehrungszeichen und mehrfache Doppelpunkte keine gueltige URI ergeben
+# (Link.href ist java.net.URI, OpenSearchResponses.scala:139). Der
+# funktionierende netcdf-href traegt nur ein Pfad-Praefix und bleibt
+# URL-aehnlich; diese beiden Formen ahmen das nach.
 ZARR_HREF_FORMS = ("store", "chunk", "driver-fragment", "driver-plain",
-                   "driver-novsi")
+                   "driver-novsi", "driver-noquote", "driver-minimal")
 DEFAULT_ZARR_HREF_FORM = "store"
 
 
@@ -585,6 +596,13 @@ def _zarr_asset_href(store_url: str, form: str, band: str) -> str:
         return store_url
     if form == "chunk":
         return f"{store_url}/{band}/0.0.tif"
+    if form == "driver-noquote":
+        return f"ZARR:/vsicurl/{store_url}:/{band}"
+    if form == "driver-minimal":
+        # Ohne Array-Pfad: der Store enthaelt genau ein Datenarray
+        # (plus x/y/spatial_ref als Koordinaten), GDAL waehlt es beim
+        # Oeffnen des Stores selbst aus.
+        return f"ZARR:{store_url}"
     # GDAL-Treiberausdruck. Anfuehrungszeichen sind GDALs Standardsyntax
     # fuer Pfade mit Doppelpunkten (gdal.org, Zarr-Treiber: 'ZARR:"path":
     # /array'). Ob CDSE sie transportiert, ist genau die offene Frage.
@@ -6171,6 +6189,12 @@ def main() -> None:
                              "driver-plain: derselbe Ausdruck ohne Fragment. "
                              "driver-novsi: derselbe Ausdruck ohne "
                              "/vsicurl/-Praefix. "
+                             "driver-noquote: Treiberausdruck OHNE "
+                             "Anfuehrungszeichen, "
+                             "ZARR:/vsicurl/https://HOST/x.zarr:/DEM. "
+                             "driver-minimal: nur Praefix und URL, ohne "
+                             "Array-Pfad und ohne Quotes, "
+                             "ZARR:https://HOST/x.zarr. "
                              "Es aendert sich NUR der href - der Asset "
                              "traegt in allen Formen kein type-Feld, damit "
                              "pro Lauf genau eine Groesse variiert. "
