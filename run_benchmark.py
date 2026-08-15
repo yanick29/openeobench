@@ -2628,7 +2628,8 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
                     item_id: str, extent: dict = None,
                     dem_format: str = "gtiff",
                     grid: dict = None,
-                    dataset: str = DEFAULT_DATASET) -> dict:
+                    dataset: str = DEFAULT_DATASET,
+                    zarr_legacy_asset: bool = False) -> dict:
     """STAC Item passend zum reprojizierten DEM-Asset.
 
     `extent` ueberschreibt REGIONS[region]['extent'] (z.B. fuer small/large
@@ -2636,8 +2637,9 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
 
     dem_format:
       gtiff  - Standard, media_type=image/tiff; application=geotiff
-      zarr   - Verzeichnis-Store, media_type=application/vnd+zarr, href
-               endet auf '/' damit klar ist dass es kein Einzelfile ist.
+      zarr   - Verzeichnis-Store. Der data-Asset traegt bewusst KEIN
+               'type'-Feld und der href endet auf '.zarr' OHNE Slash
+               (Details + Quellen unter zarr_legacy_asset).
       netcdf - Einzeldatei .nc, media_type=application/x-netcdf. Der href
                bekommt ein /vsicurl/-Praefix: CDSE baut daraus den GDAL-Pfad
                NETCDF:<href>:DEM ohne Quoting, und mit nacktem http-URL
@@ -2657,14 +2659,58 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     weil das Backend das File selbst oeffnen kann - zarr/netcdf kann es
     nicht. Die Werte muessen deshalb aus dem In-Memory-Ziel-Grid der
     Reprojektion kommen (_grid_from_dst_meta), nicht aus dem Output-File.
+
+    zarr_legacy_asset (nur dem_format=zarr, Default False): stellt die alte
+    Asset-Form wieder her (type=application/vnd+zarr + href mit
+    Schluss-Slash). Zwei belegte Gruende, warum die alte Form nicht
+    funktionieren KANN - beide im Backend-Quelltext nachlesbar:
+
+    1. type weglassen (Python-Treiber, openeo-geopyspark-driver):
+       load_stac.py::_is_band_asset filtert Assets VOR jeder Band- und
+       proj-Auswertung:
+           if asset.media_type:
+               ...
+               if not _is_supported_raster_mime_type(asset.media_type):
+                   return False
+       und _is_supported_raster_mime_type kennt nur image/tiff,
+       image/vnd.stac.geotiff, image/jp2, image/png, image/jpeg,
+       application/x-hdf, application/x-netcdf, application/netcdf -
+       KEINE zarr-Variante. Folge: iter_items_with_band_assets liefert
+       das Item gar nicht erst aus (`if band_assets:`), der Treiber
+       uebergibt 0 Features und FileLayerProvider.scala:721 wirft
+       "No features found for collection ..., cannot determine band
+       indices for link titles". Dieselbe Filterung erklaert
+       "Collected 0 projection metadata entries from 1 items"
+       (_backend/post_dry_run.py iteriert ebenfalls ueber
+       iter_items_with_band_assets). Der Media-Type-Check haengt aber an
+       `if asset.media_type:` - OHNE type-Feld faellt er komplett aus und
+       _is_band_asset entscheidet ueber roles=['data'] (in
+       roles_with_bands) => True. 'type' ist in STAC optional.
+    2. href OHNE Schluss-Slash (Scala, openeo-geotrellis-extensions):
+       FileLayerProvider.scala:98 fragt die RasterSource-Provider in der
+       Reihenfolge Zarr, HDF, NetCDF, JPEG, Default. Der zarr-Provider
+       greift ausschliesslich ueber die Pfad-Endung:
+           ZarrRasterSourceProvider.canProcess:
+               definition.dataPath.endsWith(".zarr")
+       Mit Slash ist das False, und DefaultRasterSourceProvider
+       (canProcess = true) wuerde den Store als GeoTIFF oeffnen. Der
+       Slash war eine reine Lesbarkeitskonvention von uns und kostet
+       genau den einzigen Codepfad, der zarr lesen kann. Ein
+       /vsicurl/-Praefix wie bei netcdf ist hier NICHT noetig:
+       geotrellis' GDALPath mappt http/https selbst auf /vsicurl/
+       (GDALPath.scala, toVSIScheme).
     """
     ext = extent if extent is not None else REGIONS[region]["extent"]
     w, s, e, n = ext["west"], ext["south"], ext["east"], ext["north"]
     media_type = _DEM_FORMAT_MEDIA_TYPE.get(dem_format,
                                             _DEM_FORMAT_MEDIA_TYPE["gtiff"])
     href = asset_href
-    if dem_format == "zarr" and not href.endswith("/"):
-        href = href + "/"
+    if dem_format == "zarr":
+        if zarr_legacy_asset:
+            if not href.endswith("/"):
+                href = href + "/"
+        else:
+            href = href.rstrip("/")
     if dem_format == "netcdf" and href.startswith("http"):
         href = "/vsicurl/" + href
 
@@ -2682,6 +2728,11 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
         "eo:bands": band_meta,
         "bands": band_meta,
     }
+    if dem_format == "zarr" and not zarr_legacy_asset:
+        # s. Docstring Punkt 1: ein DEKLARIERTER, nicht gelisteter Medientyp
+        # laesst _is_band_asset das Asset sofort verwerfen; ohne type-Feld
+        # faellt der Check aus und roles=['data'] entscheidet.
+        del asset["type"]
     properties = {"datetime": DATASETS[dataset]["stac_datetime"],
                   "proj:epsg": epsg}
     if grid is not None:
@@ -2754,9 +2805,15 @@ def build_dem_stac_collection(collection_id: str, collection_url: str,
     dt = props.get("datetime")
 
     item_assets_data = {
-        "type": asset.get("type"),
         "roles": asset.get("roles", ["data"]),
     }
+    # 'type' nur wenn das Item eines hat: der zarr-Asset traegt bewusst
+    # keinen Medientyp (s. build_stac_item), und ein "type": null in
+    # item_assets waere weder valide noch harmlos - Reader, die
+    # Asset-Metadaten von der Collection ziehen, wuerden denselben
+    # Medientyp-Filter erneut ausloesen.
+    if asset.get("type") is not None:
+        item_assets_data["type"] = asset["type"]
     for key in ("proj:epsg", "proj:shape", "proj:bbox", "proj:transform",
                 "eo:bands", "bands"):
         if key in asset:
@@ -3668,8 +3725,16 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             print(f"  STAC Upload fertig: {dem_tiles} Items + Collection "
                   f"{collection_url}  ({t_stac:.2f} s)")
         else:
+            # Bei zarr traegt der Asset per Default KEIN type-Feld mehr
+            # (s. build_stac_item), deshalb hier nicht stur den Eintrag aus
+            # _DEM_FORMAT_MEDIA_TYPE melden - das waere gelogen.
+            if dem_format == "zarr" and not getattr(args, "zarr_legacy_asset",
+                                                    False):
+                _mt_label = "ohne type-Feld"
+            else:
+                _mt_label = f"media_type={_DEM_FORMAT_MEDIA_TYPE[dem_format]}"
             print(f"\n  [Schritt 4/5] STAC Item generieren + hochladen "
-                  f"(media_type={_DEM_FORMAT_MEDIA_TYPE[dem_format]})...")
+                  f"({_mt_label})...")
             t_stac_start = time.time()
             stac_item = build_stac_item(
                 region=region,
@@ -3680,9 +3745,16 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                 dem_format=dem_format,
                 grid=_grid_from_dst_meta(dst_meta),
                 dataset=dataset,
+                zarr_legacy_asset=getattr(args, "zarr_legacy_asset", False),
             )
             _stac_asset = stac_item["assets"]["data"]
             print(f"  STAC data-Asset: href={_stac_asset['href']}")
+            if dem_format == "zarr":
+                _zarr_type = _stac_asset.get(
+                    "type",
+                    "<kein type-Feld: _is_band_asset entscheidet ueber "
+                    "roles=['data']>")
+                print(f"                   type={_zarr_type}")
             print(f"                   proj:epsg={_stac_asset['proj:epsg']}  "
                   f"proj:shape={_stac_asset.get('proj:shape')}  "
                   f"proj:bbox={_stac_asset.get('proj:bbox')}")
@@ -5976,6 +6048,25 @@ def main() -> None:
                              "Wirkung: dort IST die Collection die "
                              "Mosaik-Struktur. Default AUS (bisheriges "
                              "Verhalten).")
+    parser.add_argument("--zarr-legacy-asset", action="store_true",
+                        help="Nur --dem-format=zarr: die alte Asset-Form im "
+                             "STAC-Item wiederherstellen, also "
+                             "type=application/vnd+zarr UND href mit "
+                             "Schluss-Slash. Default AUS, d.h. der zarr-Asset "
+                             "traegt GAR KEIN type-Feld und der href endet "
+                             "auf '.zarr'. Hintergrund (Backend-Quelltext): "
+                             "load_stac.py::_is_band_asset verwirft Assets "
+                             "mit deklariertem, nicht gelistetem Medientyp "
+                             "sofort (_is_supported_raster_mime_type kennt "
+                             "kein zarr) - daraus folgt 'Collected 0 "
+                             "projection metadata entries from 1 items' und "
+                             "FileLayerProvider.scala:721 'No features found "
+                             "for collection ..., cannot determine band "
+                             "indices for link titles'. Ohne type-Feld "
+                             "entscheidet roles=['data']. Der Slash wiederum "
+                             "verhindert ZarrRasterSourceProvider.canProcess "
+                             "(dataPath.endsWith('.zarr')). Auf gtiff/netcdf "
+                             "hat das Flag keine Wirkung.")
     parser.add_argument("--zarr-no-explicit-extent", action="store_true",
                         help="Nur --dem-format=zarr: den bisherigen Weg "
                              "wiederherstellen und den load_stac-Knoten OHNE "
