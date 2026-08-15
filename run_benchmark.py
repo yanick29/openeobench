@@ -1233,6 +1233,35 @@ def _grid_from_dst_meta(dst_meta: dict) -> dict:
             "bounds": (left, bottom, right, top), "shape": (height, width)}
 
 
+def _load_stac_extent_from_grid(grid: dict, epsg: int) -> dict:
+    """openEO-Bounding-Box (Parameter `spatial_extent` von load_stac) aus
+    demselben Ziel-Grid, aus dem auch proj:bbox des STAC-Items gebaut wird.
+
+    Form laut Prozess-Spezifikation (openeo_processes_1.0.json, load_stac,
+    Parameter spatial_extent, Schema-Variante "Bounding Box",
+    subtype=bounding-box): Objekt mit den PFLICHT-Feldern west/south/east/
+    north (Zahlen), optional base/height (3. Achse) und optional crs -
+    entweder EPSG-Code als INTEGER (subtype epsg-code, minimum 1000) oder
+    WKT2-String; Default ist 4326. Deshalb hier ein int-EPSG, kein
+    "EPSG:32633"-String.
+
+    CRS-Wahl bewusst das Raster-CRS (i.d.R. UTM) statt EPSG:4326:
+      - Die Zahlen sind BITGLEICH die des proj:bbox im Item
+        (beide aus _grid_from_dst_meta(dst_meta)["bounds"]). Ein nach
+        WGS84 transformierter Extent waere ein anderer, gerundeter Wert -
+        und weil eine achsparallele UTM-Box in Grad ein leicht schiefes
+        Viereck ist, koennte dessen Rueck-Transformation den Rand
+        abschneiden oder erweitern.
+      - Der funktionierende gtiff-Lauf leitet den Extent genau aus diesen
+        proj-Feldern ab. Mit dieser Box aendert sich also nur, WER die
+        Zahl liefert (Graph statt Ableitung), nicht WELCHE.
+    """
+    left, bottom, right, top = grid["bounds"]
+    return {"west": float(left), "south": float(bottom),
+            "east": float(right), "north": float(top),
+            "crs": int(epsg)}
+
+
 def _s2_grid_from_extent(extent: dict, epsg: int,
                          resolution: float = DEFAULT_RESOLUTION_M) -> dict:
     """Erwartetes CDSE-Zielgitter aus dem angefragten Extent ableiten
@@ -2177,7 +2206,8 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
                             resample_s2_to_dem: bool = False,
                             resolution: float = DEFAULT_RESOLUTION_M,
                             dataset: str = DEFAULT_DATASET,
-                            resampling: str = "nearest") -> Path:
+                            resampling: str = "nearest",
+                            load_stac_spatial_extent: dict = None) -> Path:
     """
     Erzeugt das load_stac Szenario fuer den gewuenschten Workflow:
     Workflow-PG (s. _build_workflow_pg) wird gebaut, dann wird
@@ -2208,6 +2238,18 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     build_onthefly_scenario (resampletargetcrs1). Mit --resample-s2-to-dem
     ist das unnoetig: dort wird S2 ohnehin per resample_cube_spatial auf das
     DEM-Gitter gezogen, das die Aufloesung schon traegt.
+
+    load_stac_spatial_extent (None = Default = bisheriges Verhalten): wenn
+    gesetzt, bekommt loadstac1 den Parameter `spatial_extent` EXPLIZIT
+    mitgegeben, statt CDSE ihn aus den STAC-Metadaten ableiten zu lassen.
+    Erwartet wird eine openEO-Bounding-Box (west/south/east/north, optional
+    crs; s. _load_stac_extent_from_grid). Gedacht fuer --dem-format=zarr:
+    dort endet der Lauf reproduzierbar mit
+      "Unable to derive a spatial extent from provided STAC metadata:
+       <item-url>, please provide a spatial extent"
+    obwohl dasselbe Item als gtiff durchlaeuft - der Unterschied ist der
+    Medientyp application/vnd+zarr. Bei None bleibt der Knoten exakt wie
+    bisher ({"url": ...}), damit gtiff/netcdf-Graphen byte-identisch sind.
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
@@ -2216,8 +2258,12 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
 
     # loadcollection2 entfernen und durch loadstac1 ersetzen
     pg.pop("loadcollection2", None)
+    loadstac_args = {"url": stac_item_url}
+    if load_stac_spatial_extent is not None:
+        loadstac_args["spatial_extent"] = copy.deepcopy(
+            load_stac_spatial_extent)
     pg["loadstac1"] = {
-        "arguments": {"url": stac_item_url},
+        "arguments": loadstac_args,
         "process_id": "load_stac",
     }
     # Alle Knoten umbiegen die noch auf loadcollection2 zeigen
@@ -3700,6 +3746,54 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         if dem_format == "zarr" and zarr_via_item:
             via += " (--zarr-via-item; Collection wurde trotzdem erzeugt "
             via += "und hochgeladen)"
+
+        # spatial_extent EXPLIZIT am loadstac1-Knoten (Versuch 9, nur zarr).
+        # Der zarr-Lauf endet reproduzierbar mit
+        #   ProcessParameterInvalidException: ... 'spatial_extent' in process
+        #   'load_stac' is invalid: Unable to derive a spatial extent from
+        #   provided STAC metadata: <item-url>, please provide a spatial
+        #   extent
+        # und im Log steht load_params={'spatial_extent': {}, ...}. CDSE
+        # liest das Item (band_names=['DEM'], collected 1 item(s)), leitet
+        # aber die Ausdehnung nicht ab - bei einem inhaltlich identischen
+        # gtiff-Item mit denselben proj-Feldern schon. Die Fehlermeldung
+        # sagt woertlich "please provide a spatial extent", also wird sie
+        # hier geliefert statt ableiten zu lassen.
+        # Quelle der Zahlen: _grid_from_dst_meta(dst_meta) - DIESELBE
+        # Funktion auf DEMSELBEN dst_meta, aus der oben proj:bbox/
+        # proj:shape/proj:transform des Items gebaut wurden. Graph und
+        # Item-Metadaten koennen dadurch nicht auseinanderlaufen (unten
+        # zusaetzlich gegen proj:bbox geprueft). CRS = Raster-CRS als
+        # int-EPSG, Begruendung in _load_stac_extent_from_grid.
+        # Abschaltbar mit --zarr-no-explicit-extent (= bisheriger Weg).
+        load_stac_extent = None
+        if dem_format == "zarr" and not getattr(
+                args, "zarr_no_explicit_extent", False):
+            load_stac_extent = _load_stac_extent_from_grid(
+                _grid_from_dst_meta(dst_meta), target_epsg)
+            item_proj_bbox = stac_item["assets"]["data"].get("proj:bbox")
+            extent_bbox = [load_stac_extent["west"],
+                           load_stac_extent["south"],
+                           load_stac_extent["east"],
+                           load_stac_extent["north"]]
+            if item_proj_bbox != extent_bbox:
+                raise RuntimeError(
+                    "spatial_extent des load_stac-Knotens weicht vom "
+                    f"proj:bbox des STAC-Items ab ({extent_bbox} vs. "
+                    f"{item_proj_bbox}) - Abbruch vor CDSE, ein "
+                    "inkonsistenter Lauf ist als Diagnose wertlos.")
+            print(f"  loadstac1.spatial_extent explizit gesetzt "
+                  f"(EPSG:{target_epsg}): "
+                  f"west={load_stac_extent['west']} "
+                  f"south={load_stac_extent['south']} "
+                  f"east={load_stac_extent['east']} "
+                  f"north={load_stac_extent['north']}  "
+                  f"[== proj:bbox des Items]")
+        elif dem_format == "zarr":
+            print("  loadstac1.spatial_extent bleibt ungesetzt "
+                  "(--zarr-no-explicit-extent): CDSE muss die Ausdehnung "
+                  "wie bisher selbst ableiten.")
+
         print(f"\n  [Schritt 5/5] load_stac Szenario auf CDSE ausfuehren "
               f"(url={via})...")
         scenario_filename = f"{strategy_label}_{region}.json"
@@ -3711,6 +3805,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             resolution=resolution,
             dataset=dataset,
             resampling=args.local_resampling,
+            load_stac_spatial_extent=load_stac_extent,
         )
         _write_run_meta(base, resolution, dataset=dataset)
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
@@ -5881,6 +5976,23 @@ def main() -> None:
                              "Wirkung: dort IST die Collection die "
                              "Mosaik-Struktur. Default AUS (bisheriges "
                              "Verhalten).")
+    parser.add_argument("--zarr-no-explicit-extent", action="store_true",
+                        help="Nur --dem-format=zarr: den bisherigen Weg "
+                             "wiederherstellen und den load_stac-Knoten OHNE "
+                             "spatial_extent bauen, sodass CDSE die "
+                             "Ausdehnung wieder selbst aus den STAC-"
+                             "Metadaten ableiten muss. Default AUS, d.h. bei "
+                             "zarr traegt loadstac1 einen expliziten "
+                             "spatial_extent (west/south/east/north + crs als "
+                             "int-EPSG des Rasters, Zahlen bitgleich dem "
+                             "proj:bbox des Items). Hintergrund: der "
+                             "zarr-Lauf endet reproduzierbar mit 'Unable to "
+                             "derive a spatial extent from provided STAC "
+                             "metadata ..., please provide a spatial extent' "
+                             "(Log: load_params={'spatial_extent': {}, ...}), "
+                             "waehrend ein gtiff-Item mit denselben "
+                             "proj-Feldern durchlaeuft. Auf gtiff/netcdf hat "
+                             "das Flag keine Wirkung.")
     parser.add_argument("--snap-dem-to-s2", action="store_true",
                         help="(nur local_preprocessing) DEM pixelgenau auf "
                              "das erwartete CDSE/S2-Zielgitter bringen: "
