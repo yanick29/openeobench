@@ -544,6 +544,65 @@ _DEM_FORMAT_EXT = {
     "netcdf": ".nc",
 }
 
+# --zarr-href-form: welche Adressform der data-Asset bei dem_format=zarr
+# traegt. Reine Dokumentationsachse - jede Form entspricht einem bereits
+# gelaufenen oder noch offenen CDSE-Versuch, und alle bleiben abrufbar,
+# damit ein Ergebnis nachtraeglich reproduzierbar ist.
+#
+#   store           Verzeichnis-Store direkt (aktueller Default, HEAD-Form):
+#                   https://HOST/x.zarr
+#   chunk           erster Array-Chunk unter bekannter Bild-Endung:
+#                   https://HOST/x.zarr/DEM/0.0.tif
+#   driver-fragment GDAL-Treiberausdruck, Endung als URL-Fragment angehaengt:
+#                   ZARR:"/vsicurl/https://HOST/x.zarr":/DEM#x.tif
+#   driver-plain    derselbe Ausdruck ohne Fragment:
+#                   ZARR:"/vsicurl/https://HOST/x.zarr":/DEM
+#   driver-novsi    derselbe Ausdruck ohne /vsicurl/-Praefix:
+#                   ZARR:"https://HOST/x.zarr":/DEM
+ZARR_HREF_FORMS = ("store", "chunk", "driver-fragment", "driver-plain",
+                   "driver-novsi")
+DEFAULT_ZARR_HREF_FORM = "store"
+
+
+def _zarr_asset_href(store_url: str, form: str, band: str) -> str:
+    """href des zarr-data-Assets in der gewuenschten Adressform.
+
+    store_url: URL des Verzeichnis-Stores OHNE Schluss-Slash.
+    band:      Array-Name im Store (DATASETS[dataset]['band']), also der
+               Pfad hinter dem Doppelpunkt im GDAL-Treiberausdruck.
+
+    Der Chunk-Name '0.0' ist die zarr-v2-Konvention fuer den ersten Chunk
+    eines 2D-Arrays (Zeile.Spalte) und entspricht dem, was
+    _write_dem_as_zarr tatsaechlich schreibt. ACHTUNG: der Store enthaelt
+    die Datei als '0.0' OHNE Endung - die Form 'chunk' zeigt auf
+    '0.0.tif' und setzt voraus, dass eine so benannte Kopie zusaetzlich
+    auf dem Server liegt. Das Upload-Verhalten wird hier NICHT geaendert.
+    """
+    if form not in ZARR_HREF_FORMS:
+        raise ValueError(f"Unbekannte --zarr-href-form: {form!r}. "
+                         f"Erlaubt: {ZARR_HREF_FORMS}")
+    if form == "store":
+        return store_url
+    if form == "chunk":
+        return f"{store_url}/{band}/0.0.tif"
+    # GDAL-Treiberausdruck. Anfuehrungszeichen sind GDALs Standardsyntax
+    # fuer Pfade mit Doppelpunkten (gdal.org, Zarr-Treiber: 'ZARR:"path":
+    # /array'). Ob CDSE sie transportiert, ist genau die offene Frage.
+    if form == "driver-novsi":
+        inner = store_url
+    else:
+        inner = f"/vsicurl/{store_url}"
+    expr = f'ZARR:"{inner}":/{band}'
+    if form == "driver-fragment":
+        # Bekannte Bild-Endung als URL-Fragment anhaengen, damit ein
+        # endungsbasierter Filter sie sieht, ohne den Pfad zu veraendern.
+        # Name = Store-Basename mit .tif statt .zarr.
+        base = store_url.rsplit("/", 1)[-1]
+        if base.endswith(".zarr"):
+            base = base[:-len(".zarr")]
+        expr = f"{expr}#{base}.tif"
+    return expr
+
 
 def _normalize_crs(crs_str: str) -> str:
     """Normalisiert 'epsg:3035' / '3035' / 'EPSG:3035' -> 'EPSG:3035'."""
@@ -2629,7 +2688,8 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
                     dem_format: str = "gtiff",
                     grid: dict = None,
                     dataset: str = DEFAULT_DATASET,
-                    zarr_legacy_asset: bool = False) -> dict:
+                    zarr_legacy_asset: bool = False,
+                    zarr_href_form: str = DEFAULT_ZARR_HREF_FORM) -> dict:
     """STAC Item passend zum reprojizierten DEM-Asset.
 
     `extent` ueberschreibt REGIONS[region]['extent'] (z.B. fuer small/large
@@ -2696,9 +2756,28 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
        (canProcess = true) wuerde den Store als GeoTIFF oeffnen. Der
        Slash war eine reine Lesbarkeitskonvention von uns und kostet
        genau den einzigen Codepfad, der zarr lesen kann. Ein
-       /vsicurl/-Praefix wie bei netcdf ist hier NICHT noetig:
-       geotrellis' GDALPath mappt http/https selbst auf /vsicurl/
-       (GDALPath.scala, toVSIScheme).
+       /vsicurl/-Praefix wird bei der Form 'store' NICHT ergaenzt - siehe
+       zarr_href_form, dort steht auch die Korrektur zu geotrellis'
+       GDALPath.
+
+    zarr_href_form (nur dem_format=zarr, Default 'store' = HEAD-Form):
+    Adressform des data-Assets, s. ZARR_HREF_FORMS. Jede Form entspricht
+    einem CDSE-Versuch; die Achse existiert, damit alle bisher gebauten
+    Formen abrufbar bleiben und die Doku reproduzierbar ist. Nur der href
+    aendert sich, sonst nichts - insbesondere traegt der Asset in ALLEN
+    Formen kein 'type'-Feld (auch nicht bei 'chunk', wo der urspruengliche
+    Versuch zusaetzlich image/tiff deklariert hatte). So variiert pro Lauf
+    genau eine Groesse.
+
+    Korrektur zu einer frueheren Annahme in diesem Docstring: geotrellis
+    ergaenzt /vsicurl/ NICHT selbst. GDALPath.parse wuerde das tun
+    (GDALPath.scala, toVSIScheme), aufgerufen wird aber der
+    Case-Class-Konstruktor GDALPath(dataPath) (GDALPath.scala:42), der den
+    String unveraendert laesst - und ZarrRasterSourceProvider.scala:19 ist
+    als einziger Provider der Kette ohne das
+    .replace("https", "/vsicurl/https"), das NetCDF-, JPEG-, HDF- und
+    Default-Provider alle haben. Das Praefix muss also aus dem href
+    kommen (Formen driver-fragment/driver-plain).
     """
     ext = extent if extent is not None else REGIONS[region]["extent"]
     w, s, e, n = ext["west"], ext["south"], ext["east"], ext["north"]
@@ -2707,10 +2786,13 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     href = asset_href
     if dem_format == "zarr":
         if zarr_legacy_asset:
+            # Legacy schlaegt die Adressform: es ist bewusst die
+            # unveraenderte Ur-Form (type + Schluss-Slash).
             if not href.endswith("/"):
                 href = href + "/"
         else:
-            href = href.rstrip("/")
+            href = _zarr_asset_href(href.rstrip("/"), zarr_href_form,
+                                    band=DATASETS[dataset]["band"])
     if dem_format == "netcdf" and href.startswith("http"):
         href = "/vsicurl/" + href
 
@@ -3470,6 +3552,22 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         print(f"  [warn] --dem-layout={dem_layout} wird bei "
               f"--dem-format={dem_format} ignoriert (nur fuer gtiff relevant).")
 
+    # --zarr-href-form: Adressform des zarr-Assets (s. ZARR_HREF_FORMS).
+    # Frueh validieren, damit ein Tippfehler nicht erst nach DEM-Download,
+    # Reprojektion und Upload auffaellt.
+    zarr_href_form = getattr(args, "zarr_href_form", DEFAULT_ZARR_HREF_FORM)
+    if zarr_href_form not in ZARR_HREF_FORMS:
+        raise ValueError(f"Unbekannte --zarr-href-form: {zarr_href_form!r}. "
+                         f"Erlaubt: {ZARR_HREF_FORMS}")
+    if dem_format != "zarr" and zarr_href_form != DEFAULT_ZARR_HREF_FORM:
+        print(f"  [warn] --zarr-href-form={zarr_href_form} wird bei "
+              f"--dem-format={dem_format} ignoriert (nur fuer zarr relevant).")
+    if dem_format == "zarr" and zarr_href_form == "chunk":
+        print("  [warn] --zarr-href-form=chunk zeigt auf "
+              "<store>/<band>/0.0.tif; der Store enthaelt den Chunk aber "
+              "als '0.0' OHNE Endung. Eine so benannte Kopie muss separat "
+              "auf dem Server liegen, der Upload legt sie NICHT an.")
+
     # --dem-tiles: DEM in N raeumliche Kacheln zerlegen, je Kachel ein
     # eigenes STAC-Item (ein Asset) in einer Collection. Nur gtiff - die
     # zarr/netcdf-Experimente bleiben unangetastet.
@@ -3746,10 +3844,15 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                 grid=_grid_from_dst_meta(dst_meta),
                 dataset=dataset,
                 zarr_legacy_asset=getattr(args, "zarr_legacy_asset", False),
+                zarr_href_form=zarr_href_form,
             )
             _stac_asset = stac_item["assets"]["data"]
             print(f"  STAC data-Asset: href={_stac_asset['href']}")
             if dem_format == "zarr":
+                print(f"                   href-Form={zarr_href_form}"
+                      + ("  (--zarr-legacy-asset gesetzt, Form ignoriert)"
+                         if getattr(args, "zarr_legacy_asset", False)
+                         else ""))
                 _zarr_type = _stac_asset.get(
                     "type",
                     "<kein type-Feld: _is_band_asset entscheidet ueber "
@@ -6048,6 +6151,30 @@ def main() -> None:
                              "Wirkung: dort IST die Collection die "
                              "Mosaik-Struktur. Default AUS (bisheriges "
                              "Verhalten).")
+    parser.add_argument("--zarr-href-form", default=DEFAULT_ZARR_HREF_FORM,
+                        choices=ZARR_HREF_FORMS,
+                        help="Nur --dem-format=zarr: Adressform des "
+                             "data-Assets im STAC-Item. Jede Form entspricht "
+                             "einem CDSE-Versuch, alle bleiben abrufbar. "
+                             "store (Default, bisheriges Verhalten): "
+                             "Verzeichnis-Store direkt, "
+                             "https://HOST/x.zarr. "
+                             "chunk: erster Array-Chunk unter bekannter "
+                             "Bild-Endung, https://HOST/x.zarr/DEM/0.0.tif "
+                             "(setzt eine so benannte Kopie auf dem Server "
+                             "voraus - der Upload legt sie NICHT an, der "
+                             "Store enthaelt den Chunk als '0.0'). "
+                             "driver-fragment: GDAL-Treiberausdruck mit "
+                             "Endung als URL-Fragment, "
+                             "ZARR:\"/vsicurl/https://HOST/x.zarr\":/DEM"
+                             "#x.tif. "
+                             "driver-plain: derselbe Ausdruck ohne Fragment. "
+                             "driver-novsi: derselbe Ausdruck ohne "
+                             "/vsicurl/-Praefix. "
+                             "Es aendert sich NUR der href - der Asset "
+                             "traegt in allen Formen kein type-Feld, damit "
+                             "pro Lauf genau eine Groesse variiert. "
+                             "Wird von --zarr-legacy-asset ueberstimmt.")
     parser.add_argument("--zarr-legacy-asset", action="store_true",
                         help="Nur --dem-format=zarr: die alte Asset-Form im "
                              "STAC-Item wiederherstellen, also "
