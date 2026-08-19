@@ -1251,6 +1251,38 @@ def _inspect_asset_size(path) -> dict:
                 "num_files": 1, "is_directory": False}
 
 
+def _uploaded_raster_bytes(paths) -> int | None:
+    """Summe der Groessen der hochgeladenen RASTER-Assets in Bytes.
+
+    Zweck: zusammen mit dem uebertragenen Volumen aus nginx_access_log
+    ergibt sich der Lese-Anteil (bytes_sent / asset_bytes) - liest CDSE
+    die Daten einmal ganz, nur teilweise (Range-Requests auf ein COG)
+    oder mehrfach?
+
+    Deshalb zaehlen NUR die Rasterdaten. STAC-Item- und Collection-JSONs
+    bleiben aussen vor: sie sind wenige KB, werden anders gelesen (immer
+    vollstaendig, meist mehrfach) und wuerden den Quotienten verzerren.
+
+    Deckt alle drei Sonderfaelle ueber _inspect_asset_size ab:
+      - dem_format=zarr -> Verzeichnis-Store, rekursive Summe aller Chunks
+      - --dem-tiles N   -> eine Datei je Kachel, Summe ueber alle
+      - gtiff/netcdf    -> Einzeldatei
+    Gibt None zurueck, wenn nichts angegeben wurde oder keine der Pfade
+    existiert (Strategien ohne Upload -> Spalte bleibt NULL).
+    """
+    total = 0
+    seen = False
+    for path in paths or []:
+        if path is None:
+            continue
+        p = Path(path)
+        if not p.exists():
+            continue
+        total += _inspect_asset_size(str(p))["size_bytes"]
+        seen = True
+    return total if seen else None
+
+
 def _reproject_dem_to_array(input_tif: str, dst_crs: str,
                             resampling: str = "nearest",
                             target_resolution: float = DEFAULT_RESOLUTION_M):
@@ -3866,6 +3898,20 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                 t_scp_asset = scp_upload(str(local_asset_path), remote_asset_name)
             print(f"  Asset Upload fertig: {asset_url}  ({t_scp_asset:.2f} s)")
 
+        # Groesse der hochgeladenen Rasterdaten festhalten (-> Spalte
+        # asset_bytes). Gemessen wird an den LOKALEN Dateien, die soeben
+        # hochgeladen wurden - identisch mit dem, was auf dem Server
+        # liegt, und ohne zusaetzlichen ssh-Aufruf. Bei --dem-tiles>1 die
+        # Summe der Kacheln, bei zarr die rekursive Summe des Stores.
+        asset_bytes = _uploaded_raster_bytes(
+            tile_local_paths if tiles is not None else [local_asset_path])
+        if asset_bytes is not None:
+            _n_files = (len(tile_local_paths) if tiles is not None
+                        else _inspect_asset_size(str(local_asset_path))["num_files"])
+            print(f"  Asset-Groesse: {asset_bytes} B "
+                  f"({asset_bytes / (1024**2):.2f} MB, {_n_files} Datei(en), "
+                  f"dem_format={dem_format})")
+
         # Schritt 4: STAC Item(s) generieren + hochladen (media_type haengt
         # am dem_format). Bei --dem-tiles>1: ein Item PRO KACHEL (eigene
         # proj-Felder + eigener WGS84-Extent je Ausschnitt) in einer
@@ -4124,6 +4170,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             dem_tiles=dem_tiles,
             resolution_m=resolution,
             dataset=dataset,
+            asset_bytes=asset_bytes,
         )
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf
@@ -4350,6 +4397,25 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         t_tif_uploads += scp_upload_verified(dem_for_upload, dem_remote_tif_name)
         print(f"  TIF Uploads fertig  ({t_tif_uploads:.2f} s)")
 
+        # Groesse der hochgeladenen Rasterdaten (-> Spalte asset_bytes).
+        # ENTSCHEIDUNG: bei full_preprocessing zaehlen die S2-Raster MIT.
+        # Grund: asset_bytes ist der Nenner des Lese-Anteils
+        # bytes_sent / asset_bytes, und der Zaehler kommt aus
+        # nginx_access_log - dort werden fuer full_pp genau diese
+        # S2-Kacheln MITGELOGGT (log_filenames = S2-TIFs + S2-Items +
+        # Collection + DEM). Zaehlte man nur das DEM, stuende
+        # S2+DEM-Verkehr ueber DEM-Groesse und der Quotient waere um ein
+        # Vielfaches zu hoch. Bei local_preprocessing kommt umgekehrt nur
+        # das DEM von Hetzner, dort zaehlt auch nur das DEM.
+        # Die STAC-JSONs bleiben in beiden Faellen aussen vor (s.
+        # _uploaded_raster_bytes).
+        asset_bytes = _uploaded_raster_bytes(
+            [stif for stif, _ in s2_remote_names] + [dem_for_upload])
+        if asset_bytes is not None:
+            print(f"  Asset-Groesse: {asset_bytes} B "
+                  f"({asset_bytes / (1024**2):.2f} MB, "
+                  f"{len(s2_remote_names)} S2-Raster + 1 DEM)")
+
         # Schritt 5: STAC Collection + DEM STAC Item bauen und hochladen
         print(f"\n  [Schritt 5/7] STAC Collection (S2) + STAC Item (DEM) generieren...")
         t_stac_build_start = time.time()
@@ -4461,6 +4527,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             local_resampling=args.local_resampling,
             target_crs=target_crs_str,
             resolution_m=resolution,
+            asset_bytes=asset_bytes,
             dataset=dataset,
         )
 

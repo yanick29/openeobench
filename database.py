@@ -162,6 +162,13 @@ def create_database():
     # trennbar - sie tragen unterschiedliche Metriken.
     if "dataset" not in existing_run_cols:
         c.execute("ALTER TABLE runs ADD COLUMN dataset TEXT")
+    # Groesse der hochgeladenen RASTER-Assets in Bytes. Zusammen mit dem
+    # uebertragenen Volumen aus nginx_access_log ergibt das den Lese-Anteil
+    # (bytes_sent / asset_bytes): liest CDSE die Datei einmal ganz, nur
+    # teilweise (Range-Requests auf ein COG) oder mehrfach? Ohne diese
+    # Spalte ist das uebertragene Volumen nicht normierbar.
+    if "asset_bytes" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN asset_bytes BIGINT")
 
     conn.commit()
     conn.close()
@@ -194,6 +201,8 @@ def _ensure_run_extra_columns(conn):
         conn.execute("ALTER TABLE runs ADD COLUMN resolution_m DOUBLE")
     if "dataset" not in cols:
         conn.execute("ALTER TABLE runs ADD COLUMN dataset TEXT")
+    if "asset_bytes" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN asset_bytes BIGINT")
 
 
 def import_run(output_directory, crs_strategy=None, run_type=None,
@@ -201,7 +210,7 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
                s2_download_time=None, workflow=None, local_resampling=None,
                target_crs=None, dem_layout=None, dem_format=None,
                dem_snap=None, dem_tiles=None, resolution_m=None,
-               dataset=None):
+               dataset=None, asset_bytes=None):
     """Importiert einen Run aus results.json und job-results.json in die DB."""
     conn = duckdb.connect(DB_PATH)
     _ensure_run_extra_columns(conn)
@@ -321,11 +330,11 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         crs_strategy, run_type, preprocessing_time, dem_download_time,
         s2_download_time, extent_size,
         workflow, local_resampling, target_crs, dem_layout, dem_format,
-        dem_snap, dem_tiles, resolution_m, dataset,
+        dem_snap, dem_tiles, resolution_m, dataset, asset_bytes,
         credits, cpu_seconds, duration_backend, input_pixels_mp, max_memory_gb,
         git_commit, openeo_version, rasterio_version, numpy_version,
         proj_version, environment_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
         run_id,
         results.get("backend_url"),
         results.get("backend_name"),
@@ -361,6 +370,7 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         dem_tiles,
         resolution_m,
         dataset,
+        asset_bytes,
         results.get("credits"),
         results.get("cpu_seconds"),
         results.get("duration_backend"),
