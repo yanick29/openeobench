@@ -25,6 +25,7 @@ import statistics
 import subprocess
 import sys
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +39,37 @@ from rasterio.warp import (Resampling, calculate_default_transform, reproject,
 from database import import_nginx_access_log, import_run
 
 CDSE_URL = "https://openeo.dataspace.copernicus.eu/openeo/1.2"
+TERRASCOPE_URL = "https://openeo.terrascope.be/openeo/1.2"
+
+# --backend: waehlbare openEO-Backends. Setzt NUR Endpunkt und
+# OIDC-Anbieter - Prozessgraphen, Strategien, Formate, Workflows, der
+# Hosting-Server und die STAC-Erzeugung bleiben identisch, damit Laeufe
+# ueber Backends hinweg vergleichbar sind.
+#
+# oidc_provider=None heisst: authenticate_oidc() ohne provider_id, also
+# das bisherige Verhalten. Terrascope hat genau EINEN Anbieter ("CDSE",
+# dieselbe Identitaet wie beim Direktzugang), der wird explizit gesetzt,
+# damit die Anmeldung nicht von einer Auto-Auswahl des Clients abhaengt.
+BACKENDS = {
+    "cdse":       {"url": CDSE_URL,       "oidc_provider": None},
+    "terrascope": {"url": TERRASCOPE_URL, "oidc_provider": "CDSE"},
+}
+DEFAULT_BACKEND = "cdse"
+
+
+def _oidc_provider_for(api_url: str):
+    """OIDC-Anbieter zu einer Backend-URL, oder None fuer den Default.
+
+    Bewusst aus der URL abgeleitet statt durch alle run_openeo-Aufrufe
+    gereicht: so bekommt auch ein per --api-url direkt angegebener
+    Terrascope-Endpunkt den richtigen Anbieter, und keine der acht
+    bestehenden Aufrufstellen muss angefasst werden.
+    """
+    host = urllib.parse.urlparse(api_url or "").netloc.lower()
+    for cfg in BACKENDS.values():
+        if urllib.parse.urlparse(cfg["url"]).netloc.lower() == host:
+            return cfg["oidc_provider"]
+    return None
 
 ALL_STRATEGIES = ["onthefly", "local_preprocessing", "full_preprocessing"]
 # local_reference ist die unabhaengige lokale Ground-Truth-Pipeline ohne
@@ -1766,7 +1798,7 @@ def reproject_dem_local(input_tif: str, output_tif: str,
 
 
 def run_openeo(api_url: str, scenario: str, output_dir: str,
-               job_timeout: int = 3600) -> dict:
+               job_timeout: int = 3600, oidc_provider: str = None) -> dict:
     """
     Fuehrt openeotest.py run aus. Gibt den Inhalt von results.json zurueck.
     Wirft RuntimeError wenn results.json nicht geschrieben wurde oder der
@@ -1782,6 +1814,12 @@ def run_openeo(api_url: str, scenario: str, output_dir: str,
         "--output-directory", output_dir,
         "--job-timeout", str(job_timeout),
     ]
+    # OIDC-Anbieter nur anhaengen wenn es einen gibt: ohne das Argument
+    # ruft openeotest.py authenticate_oidc() wie bisher ohne provider_id
+    # auf, der cdse-Aufruf bleibt also Zeichen fuer Zeichen derselbe.
+    provider = oidc_provider or _oidc_provider_for(api_url)
+    if provider:
+        cmd += ["--oidc-provider", provider]
     print(f"\n  [openeotest] {' '.join(cmd)}")
     proc = subprocess.run(cmd, check=False, stderr=subprocess.PIPE, text=True)
 
@@ -6116,8 +6154,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Automatisierter Benchmark fuer CRS-Strategien"
     )
-    parser.add_argument("--api-url", default=CDSE_URL,
-                        help=f"OpenEO Backend URL (Standard: {CDSE_URL})")
+    parser.add_argument("--backend", default=DEFAULT_BACKEND,
+                        choices=sorted(BACKENDS.keys()),
+                        help="openEO-Backend: setzt Endpunkt UND "
+                             "OIDC-Anbieter. cdse (Default, bisheriges "
+                             f"Verhalten): {CDSE_URL}, Anmeldung wie bisher "
+                             "ohne expliziten provider_id. terrascope: "
+                             f"{TERRASCOPE_URL}, Anmeldung per OIDC-Anbieter "
+                             "'CDSE' (dieselbe Identitaet). Geaendert werden "
+                             "NUR Endpunkt und Anmeldung - Prozessgraphen, "
+                             "Strategien, Formate, Workflows, Hosting-Server "
+                             "und STAC-Erzeugung bleiben identisch. "
+                             "--api-url hat Vorrang.")
+    parser.add_argument("--api-url", default=None,
+                        help="OpenEO Backend URL. Ueberschreibt --backend. "
+                             f"Ohne Angabe die URL des gewaehlten Backends "
+                             f"(Default: {CDSE_URL}).")
     parser.add_argument("--strategy", default="all",
                         choices=ALL_STRATEGIES + EXTRA_STRATEGIES + ["all"],
                         help="Strategie(n) ausfuehren. 'all' = onthefly + "
@@ -6528,6 +6580,17 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Backend aufloesen: --api-url hat Vorrang vor --backend. Deshalb ist
+    # der argparse-Default von --api-url None statt CDSE_URL - nur so ist
+    # "explizit gesetzt" von "nicht angegeben" unterscheidbar. Nach dieser
+    # Zeile traegt args.api_url wieder eine echte URL, alle bestehenden
+    # Aufrufstellen bleiben unveraendert; ohne Flags ist das Ergebnis
+    # exakt CDSE_URL wie bisher.
+    _api_url_explicit = args.api_url is not None
+    if not _api_url_explicit:
+        args.api_url = BACKENDS[args.backend]["url"]
+    _provider = _oidc_provider_for(args.api_url)
+
     # Datensatz-Paar aufloesen und pruefen, BEVOR irgendetwas laeuft.
     # Workflow-Default kommt vom Datensatz, damit '--dataset landcover'
     # allein schon funktioniert; bei 'dem' ist das Ergebnis merge_add,
@@ -6568,6 +6631,11 @@ def main() -> None:
             strategies = [s for s in strategies if s != "full_preprocessing"]
 
     print(f"\nBenchmark gestartet: {datetime.now().isoformat()}")
+    print(f"Backend:    {args.backend}"
+          + (f"  (--api-url gesetzt, ueberschreibt den Endpunkt)"
+             if _api_url_explicit else "")
+          + (f"  |  OIDC-Anbieter: {_provider}" if _provider
+             else "  |  OIDC-Anbieter: Default"))
     print(f"API-URL:    {args.api_url}")
     print(f"Region:     {args.region}  (EPSG:{REGIONS[args.region]['epsg']})")
     print(f"Extent:     {args.extent_size}  ({SIZE_KM[args.extent_size]:.0f} km Kantenlaenge)")

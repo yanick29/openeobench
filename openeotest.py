@@ -254,7 +254,8 @@ def authenticate(connection, backend_name):
         logger.error(f"Authentication failed for backend {backend_name}: {str(e)}")
         return False
 
-def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
+def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600,
+             oidc_provider=None):
     """Run a specific scenario on a given backend."""
     # Parse hostname for default output directory
     hostname = urllib.parse.urlparse(api_url).netloc
@@ -326,8 +327,17 @@ def run_task(api_url, scenario_path, output_directory=None, job_timeout=3600):
             
             # Authenticate
             try:
-                connection.authenticate_oidc()
-                logger.info("Authenticated with backend")
+                # oidc_provider: manche Backends bieten mehrere
+                # OIDC-Anbieter an bzw. verlangen den Namen explizit
+                # (Terrascope: einziger Anbieter "CDSE"). Ohne Angabe
+                # bleibt es beim bisherigen Aufruf ohne provider_id.
+                if oidc_provider:
+                    connection.authenticate_oidc(provider_id=oidc_provider)
+                    logger.info(f"Authenticated with backend "
+                                f"(OIDC provider: {oidc_provider})")
+                else:
+                    connection.authenticate_oidc()
+                    logger.info("Authenticated with backend")
             except Exception as e:
                 logger.error(f"Authentication failed for backend: {str(e)}")
                 results["error"] = f"Authentication failed: {str(e)}"
@@ -3584,6 +3594,10 @@ def main():
     run_parser.add_argument('--job-timeout', type=int, default=3600,
                             help='Maximum wait time in seconds for the CDSE job (default: 3600 = 1h). '
                                  'Increase for very large extents.')
+    run_parser.add_argument('--oidc-provider', default=None,
+                            help='OIDC provider_id for authentication (e.g. "CDSE" for '
+                                 'the Terrascope backend). Omit to let the client pick '
+                                 'the provider as before.')
     
     # Summarize task parser
     summarize_parser = subparsers.add_parser('summarize', help='Generate a summary report from output folders')
@@ -3623,7 +3637,8 @@ def main():
     
     if args.task == 'run':
         run_task(args.api_url, args.scenario, args.output_directory,
-                 job_timeout=args.job_timeout)
+                 job_timeout=args.job_timeout,
+                 oidc_provider=getattr(args, 'oidc_provider', None))
     elif args.task == 'summarize':
         # Handle both new and old-style arguments
         input_patterns = args.input_patterns if hasattr(args, 'input_patterns') and args.input_patterns else [args.input]
