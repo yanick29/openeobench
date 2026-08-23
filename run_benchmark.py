@@ -5830,6 +5830,65 @@ def _collect_workflow_tifs(tif_dir: Path) -> dict:
             if _ACCURACY_TIF_RE.match(p.name)}
 
 
+# Workflows, die die Zeitdimension im Prozessgraphen KOLLABIEREN lassen.
+# Ihr Ergebnis ist EIN Raster ohne Datum, das Backend schreibt dafuer
+# genau eine Datei (CDSE: "openEO.tif"). Ein Namensvergleich gegen die
+# datierten Referenzdateien kann daher nie greifen.
+# Aktuell nur 'aggregation' (setzt reducedimension1 mit dimension='t',
+# s. _build_workflow_pg). 'reducedimension_dem' zaehlt NICHT dazu - das
+# entfernt t nur am statischen DEM-Cube, der S2-Zeitstapel bleibt.
+# Kommt ein weiterer zeitreduzierender Workflow dazu, gehoert er hier
+# hinein, dann traegt der Vergleich ihn automatisch mit.
+TIME_REDUCING_WORKFLOWS = ("aggregation",)
+
+# Undatierte Backend-Ausgabe: "openEO.tif", auch "openEO-1.tif" o.ae.,
+# aber NICHT die datierten openEO_YYYY-MM-DD*.tif und nichts anderes.
+_REDUCED_TIF_RE = re.compile(r"^openEO[^_]*\.tif$", re.IGNORECASE)
+
+
+def _collect_reduced_tifs(tif_dir: Path) -> dict:
+    """Undatierte Workflow-Ausgaben eines zeitreduzierenden Laufs."""
+    return {p.name: p for p in tif_dir.glob("*.tif")
+            if _REDUCED_TIF_RE.match(p.name)
+            and not _ACCURACY_TIF_RE.match(p.name)}
+
+
+def _pair_time_reduced(reference_tifs: dict, test_tif_dir: Path):
+    """Paar (Referenzdatei, Testdatei, Label) fuer einen zeitreduzierten
+    Lauf, oder None.
+
+    Warum ueberhaupt: bei workflow=aggregation reduziert der Prozessgraph
+    die Zeitdimension per reduce_dimension(mean), das Backend schreibt
+    genau EINE undatierte Datei. Die lokale Referenz rechnet denselben
+    temporalen Mittelwert, legt ihn aber unter JEDEM Datumsnamen ab (s.
+    _apply_local_workflow) - die Namensmengen ueberschneiden sich also
+    nie, und der Vergleich fiel bisher mit "keine gemeinsamen TIF-Dateien"
+    aus.
+
+    Geloest wird das hier auf der VERGLEICHSSEITE statt beim Schreiben der
+    Referenz. Grund: der Dateiname der Backend-Ausgabe ist nicht
+    garantiert - er ist eine Konvention des jeweiligen Backends, und seit
+    --backend terrascope gibt es mehr als eins. Die Referenz auf genau
+    einen erratenen Namen umzustellen wuerde die Kopplung an diese
+    Konvention verschaerfen; der Inhaltsvergleich hier kommt ohne sie aus.
+
+    Zulaessig ist die Paarung nur bei GENAU EINER undatierten Testdatei -
+    mehrere waeren ein anderer Fall und werden bewusst nicht geraten. Als
+    Referenz dient die alphabetisch erste Datei: sie sind per
+    Konstruktion alle identisch (derselbe Mittelwert unter allen Namen),
+    die Wahl ist also inhaltlich beliebig und nur der Determinismus
+    zaehlt.
+    """
+    if not reference_tifs:
+        return None
+    reduced = _collect_reduced_tifs(test_tif_dir)
+    if len(reduced) != 1:
+        return None
+    test_name, test_path = next(iter(reduced.items()))
+    ref_name = sorted(reference_tifs)[0]
+    return reference_tifs[ref_name], test_path, test_name, ref_name
+
+
 def run_accuracy_check(output_base: str, region: str,
                        test_strategy: str = None,
                        test_run_id=None, extent_size: str = None,
@@ -5943,6 +6002,26 @@ def run_accuracy_check(output_base: str, region: str,
     reference_tifs = _collect_workflow_tifs(reference_tif_dir)
     test_tifs      = _collect_workflow_tifs(test_tif_dir)
     common = sorted(set(reference_tifs) & set(test_tifs))
+
+    # Zeitreduzierender Workflow (aggregation): das Backend schreibt genau
+    # eine undatierte Datei, die Referenz liegt unter datierten Namen -
+    # kein Namensmatch moeglich. Dann inhaltlich paaren statt zu skippen.
+    # Greift NUR wenn der Namensvergleich leer ausgeht: findet ein Backend
+    # doch einen datierten Namen, bleibt der bisherige Weg unveraendert.
+    if not common and workflow in TIME_REDUCING_WORKFLOWS:
+        pair = _pair_time_reduced(reference_tifs, test_tif_dir)
+        if pair:
+            ref_path, test_path, test_name, ref_name = pair
+            label = test_name
+            reference_tifs = {label: ref_path}
+            test_tifs = {label: test_path}
+            common = [label]
+            print(f"  Zeitreduzierter Workflow '{workflow}': vergleiche die "
+                  f"einzelne Backend-Ausgabe {test_name} gegen die Referenz "
+                  f"{ref_name} (dort liegt derselbe temporale Mittelwert "
+                  f"unter allen {len(_collect_workflow_tifs(reference_tif_dir))} "
+                  f"Datumsnamen, die Auswahl ist daher inhaltlich beliebig).")
+
     if not common:
         print(f"  Skip: keine gemeinsamen TIF-Dateien.")
         print(f"    {reference_strategy} TIFs: {sorted(reference_tifs)}")
