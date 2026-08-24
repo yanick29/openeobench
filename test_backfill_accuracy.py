@@ -144,7 +144,8 @@ class Fixture:
             return {"openEO.tif": arr}
         return {name: arr for name in dated}
 
-    def build(self, n_repeats: int, t0: datetime, mtime0: float) -> None:
+    def build(self, n_repeats: int, t0: datetime, mtime0: float,
+              with_reference: bool = True) -> None:
         for i in range(n_repeats):
             stamp = (t0 + timedelta(minutes=i)).strftime("%Y%m%d_%H%M%S")
             ts = (t0 + timedelta(minutes=i)).isoformat()
@@ -154,6 +155,10 @@ class Fixture:
             rid = _import(d, "onthefly", self.extent_size, self.workflow,
                           self.resolution, self.dataset)
             self.test_runs.append((rid, d))
+        if not with_reference:
+            # Referenzlauf gescheitert (im echten Fall: CDSE-Warteschlangen-
+            # Timeout) - es gibt Messlaeufe, aber keine Ground-Truth.
+            return
         stamp = (t0 + timedelta(minutes=n_repeats)).strftime("%Y%m%d_%H%M%S")
         ts = (t0 + timedelta(minutes=n_repeats)).isoformat()
         d = _mk_run_dir(self.out_root, "local_reference", stamp, self.pg,
@@ -166,11 +171,21 @@ class Fixture:
 
 
 def _accuracy_rows(db_path: str) -> list:
+    """(run_id, mae, rmse, agreement_pct, metric_kind, reference_run_id,
+    reference_file) je Zeile.
+
+    Die kategorialen Spalten legt erst _persist_accuracy beim ersten
+    Schreiben an (idempotente Migration) - in einer DB ohne jeden Eintrag
+    fehlen sie noch. Deshalb wird nur abgefragt, was existiert.
+    """
     conn = duckdb.connect(db_path, read_only=True)
+    have = {r[1] for r in conn.execute(
+        "PRAGMA table_info('accuracy')").fetchall()}
+    cols = ["run_id", "mae", "rmse", "agreement_pct", "metric_kind",
+            "reference_run_id", "reference_file"]
+    sel = [c if c in have else "NULL" for c in cols]
     rows = conn.execute(
-        "SELECT run_id, mae, rmse, agreement_pct, metric_kind, "
-        "reference_run_id, reference_file FROM accuracy ORDER BY run_id"
-    ).fetchall()
+        f"SELECT {', '.join(sel)} FROM accuracy ORDER BY run_id").fetchall()
     conn.close()
     return rows
 
@@ -395,6 +410,98 @@ def assert_backfill_result(state: dict) -> None:
           "reference_run_id gesetzt.")
 
 
+def test_no_fallback_without_reference(tmp_root: Path) -> None:
+    """Ohne local_reference wird NICHT gegen onthefly verglichen, sondern
+    uebersprungen - und der Block MIT Referenz bleibt davon unberuehrt."""
+    print("\n--- Test 6: kein Rueckfall ohne local_reference ---")
+    out_root = tmp_root / "out_noref"
+    out_root.mkdir()
+    db_path = str(tmp_root / "noref.duckdb")
+    database.DB_PATH = db_path
+    database.create_database()
+
+    mit = Fixture(out_root, "berlin", "small", "merge_add", "dem")
+    mit.build(3, datetime(2026, 7, 1, 5, 0, 0), 1_800_000_000.0)
+    ohne = Fixture(out_root, "berlin", "large", "focal", "dem")
+    ohne.build(2, datetime(2026, 7, 1, 8, 0, 0), 1_800_010_000.0,
+               with_reference=False)
+    print(f"  mit Referenz  : run_ids={[r[0] for r in mit.test_runs]} "
+          f"(local_reference={mit.reference[0]})")
+    print(f"  ohne Referenz : run_ids={[r[0] for r in ohne.test_runs]} "
+          f"(local_reference fehlt)")
+
+    cmd = [sys.executable, "backfill_accuracy.py", "--db", db_path,
+           "--output-dir", str(out_root), "--dry-run"]
+    out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    plan = out.stdout[out.stdout.index("  Plan:"):]
+    print("\n".join("  | " + ln for ln in plan.splitlines()
+                    if ln.strip().startswith(("Plan:", "run_id=", "Uebersprungen"))))
+    assert "Plan: 3 nachzutragen, 2 uebersprungen" in out.stdout, plan
+    for rid, _ in ohne.test_runs:
+        assert (f"run_id={rid} (onthefly): keine local_reference fuer "
+                f"Region=berlin, Extent=large, Workflow=focal") in out.stdout, plan
+    # Jede geplante Referenz ist ein local_reference-Ordner.
+    ref_lines = [ln for ln in plan.splitlines() if "Referenz:" in ln]
+    assert ref_lines and all("_local_reference" in ln for ln in ref_lines), ref_lines
+
+    # Echter Lauf: die drei mit Referenz bekommen Werte, die zwei ohne nicht.
+    out = subprocess.run(cmd[:-1], cwd=ROOT, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    rows = {r[0]: r for r in _accuracy_rows(db_path)}
+    got = sorted(rows)
+    print(f"  accuracy-Zeilen danach: {got}")
+    assert got == sorted(rid for rid, _ in mit.test_runs), got
+    for rid, _ in ohne.test_runs:
+        assert rid not in rows, f"run_id={rid} haette keinen Wert bekommen duerfen"
+    # Und die geschriebenen Zeilen zeigen wirklich auf local_reference.
+    for rid, _ in mit.test_runs:
+        assert Path(rows[rid][6]).name.endswith("_local_reference"), rows[rid]
+    print("  OK: uebersprungen statt gegen onthefly verglichen, "
+          "Referenzblock unveraendert.")
+
+
+def test_preflight_reference(tmp_root: Path) -> None:
+    """Fehlt die Referenz, startet --reference-check keinen einzigen Lauf."""
+    print("\n--- Test 7: Vorabpruefung startet keine Messlaeufe ---")
+    out_root = tmp_root / "out_preflight"
+    out_root.mkdir()
+    database.DB_PATH = str(tmp_root / "preflight.duckdb")
+    database.create_database()
+
+    calls = []
+
+    def fake_runner(args, repeat_idx):
+        calls.append(repeat_idx)
+        return {"strategy": "onthefly", "repeat": repeat_idx + 1,
+                "run_type": "cold", "status": "error", "run_id": None,
+                "outdir": None, "preprocessing_time": None, "total_time": None}
+
+    argv = ["run_benchmark.py", "--strategy", "onthefly", "--region", "wien",
+            "--extent-size", "small", "--workflow", "merge_add",
+            "--repeat", "3", "--reference-check", "--min-free-gb", "0",
+            "--output-dir", str(out_root)]
+    with patch.object(rb, "run_strategy_onthefly", fake_runner), \
+            patch.object(sys, "argv", argv):
+        try:
+            rb.main()
+            raised = None
+        except SystemExit as exc:
+            raised = exc.code
+    print(f"  SystemExit={raised}, gestartete Laeufe={len(calls)}")
+    assert raised == 2, f"kein Abbruch (exit={raised})"
+    assert calls == [], f"es wurden {len(calls)} Laeufe gestartet"
+
+    # Mit --allow-missing-reference laufen sie bewusst trotzdem.
+    with patch.object(rb, "run_strategy_onthefly", fake_runner), \
+            patch.object(sys, "argv", argv + ["--allow-missing-reference"]):
+        rb.main()
+    print(f"  mit --allow-missing-reference: gestartete Laeufe={len(calls)}")
+    assert calls == [0, 1, 2], calls
+    assert _accuracy_rows(database.DB_PATH) == []
+    print("  OK: Abbruch ohne Referenz, Escape-Hatch funktioniert.")
+
+
 def main() -> int:
     old_db = database.DB_PATH
     tmp_root = Path(tempfile.mkdtemp(prefix="backfill_test_"))
@@ -442,6 +549,9 @@ def main() -> int:
                [r for r in before if r[0] == target][0][1]
         print(f"  OK: run_id={target} ersetzt, Zeilenzahl unveraendert "
               f"({len(after)}), Wert identisch.")
+
+        test_no_fallback_without_reference(tmp_root)
+        test_preflight_reference(tmp_root)
 
         print("\nALLE TESTS BESTANDEN")
         return 0

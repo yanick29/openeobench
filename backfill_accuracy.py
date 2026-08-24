@@ -8,6 +8,10 @@ ermittelten Ordner - also immer nur die letzte Wiederholung. Bei --repeat 3
 bekam damit nur der dritte Lauf eine Zeile in der accuracy-Tabelle. Dieses
 Skript traegt die fehlenden Zeilen fuer alle schon vorhandenen Ordner nach.
 
+Referenz ist IMMER local_reference (s. REFERENCE_STRATEGY). Fehlt sie fuer
+eine Konfiguration, wird der Lauf uebersprungen und in der Skip-Liste
+begruendet - es tritt KEINE andere Strategie an ihre Stelle.
+
 Verglichen wird ueber run_benchmark.run_accuracy_check - dieselbe Funktion,
 die auch der regulaere Check benutzt. Damit sind alle Spalten identisch
 gefuellt (inkl. metric_kind/agreement_pct/kappa/confusion_json bei
@@ -53,6 +57,18 @@ import run_benchmark as rb
 # Strategien, die als TEST-Seite eines Vergleichs in Frage kommen.
 # local_reference ist die Ground-Truth und bekommt selbst keine Zeile.
 CDSE_TEST_STRATEGIES = ("onthefly", "local_preprocessing", "full_preprocessing")
+
+# Die Referenz ist IMMER die lokale Ground-Truth - kein Rueckfall, kein
+# Schalter. Fehlt sie, wird der Lauf uebersprungen.
+#
+# Warum hart verdrahtet: ein Vergleich gegen onthefly liefert Zahlen, die
+# aussehen wie ein Genauigkeitswert, aber etwas anderes messen (zwei
+# CDSE-Wege gegeneinander statt CDSE gegen eine unabhaengige lokale
+# Rechnung). In der Auswertung stehen beide in derselben Spalte und sind
+# hinterher nicht mehr auseinanderzuhalten. Real passiert fuer wien und
+# newyork, nachdem der Referenzlauf am CDSE-Warteschlangen-Timeout
+# gescheitert war.
+REFERENCE_STRATEGY = "local_reference"
 
 # Label in der DB -> Schluessel in rb._ACCURACY_LAYOUT.
 STRATEGY_ALIASES = {"local_pp_cached": "local_preprocessing"}
@@ -258,16 +274,6 @@ def _has_result_tifs(run_dir: Path, strategy: str, workflow: str) -> bool:
 # Referenzwahl
 # ---------------------------------------------------------------------------
 
-def _default_reference_strategy(strategy: str) -> str:
-    """Strukturell moegliche Referenz, wenn es keine Geschwister-Zeile gibt.
-
-    onthefly kann nur gegen die lokale Ground-Truth verglichen werden (im
-    regulaeren Lauf ist das --reference-check); local_pp/full_pp werden per
-    Default gegen onthefly geprueft (--accuracy-check).
-    """
-    return "local_reference" if strategy == "onthefly" else "onthefly"
-
-
 def existing_accuracy_refs(conn) -> list:
     """[(run_id, reference_file), ...], neueste zuerst - einmal geladen und
     dann fuer jeden Kandidaten wiederverwendet."""
@@ -280,16 +286,18 @@ def existing_accuracy_refs(conn) -> list:
         return []
 
 
-def sibling_reference(acc_refs: list, cfg: dict, strategy: str, index: dict,
-                      config_cache: dict, rows_by_id: dict):
-    """(ref_strategy, ref_dir) aus schon vorhandenen accuracy-Zeilen
-    derselben Konfiguration, oder (None, None).
+def sibling_reference_dir(acc_refs: list, cfg: dict, strategy: str,
+                          index: dict, config_cache: dict, rows_by_id: dict):
+    """local_reference-ORDNER aus einer vorhandenen accuracy-Zeile derselben
+    Konfiguration, oder None.
 
-    Damit traegt der Backfill genau das nach, was der regulaere Check fuer
-    die Geschwister-Wiederholungen bereits geschrieben hat: dieselbe
-    Referenz-Strategie UND moeglichst derselbe Referenz-Ordner. Ohne das
-    koennte ein Nachtrag stumm gegen eine andere (neuere) Referenz laufen
-    als die uebrigen Wiederholungen desselben Blocks.
+    Damit trifft der Nachtrag dieselbe Referenz wie die schon eingetragenen
+    Geschwister-Wiederholungen und nicht stumm eine andere (neuere).
+
+    Zeilen, deren reference_file KEIN local_reference-Ordner ist, werden
+    bewusst uebergangen: die stammen aus --accuracy-check (Referenz
+    onthefly) oder aus dem frueheren Rueckfall. Sie als Vorlage zu nehmen
+    wuerde eine fremde Referenz in die nachgetragenen Zeilen weitertragen.
     """
     want = _config_key(cfg, strategy)
     for sib_run_id, ref_file in acc_refs:
@@ -303,39 +311,44 @@ def sibling_reference(acc_refs: list, cfg: dict, strategy: str, index: dict,
         if _config_key(config_cache[sib_run_id], sib_strategy) != want:
             continue
         ref_dir = Path(ref_file)
-        ref_strategy = _strategy_of_dir(ref_dir)
-        if ref_strategy is None:
+        if _strategy_of_dir(ref_dir) != REFERENCE_STRATEGY:
             continue
         if not ref_dir.is_dir():
-            # Ordner weg (verschoben/geloescht): Strategie trotzdem
-            # uebernehmen, Ordner spaeter neu suchen.
-            return (ref_strategy, None)
-        return (ref_strategy, ref_dir)
-    return (None, None)
+            continue
+        return ref_dir
+    return None
 
 
-def resolve_reference(output_dir: str, cfg: dict, strategy: str,
-                      ref_strategy: str, preferred_dir: Path):
-    """(ref_strategy, ref_dir, hinweis) - Referenzordner endgueltig waehlen.
+def resolve_reference(output_dir: str, cfg: dict, preferred_dir: Path):
+    """(ref_dir, hinweis) - den local_reference-Ordner endgueltig waehlen.
 
     preferred_dir (aus einer Geschwister-Zeile) gewinnt, solange er noch
-    Ergebnis-TIFs enthaelt. Sonst der neueste passende Ordner mit gleicher
-    Region, Extent, Workflow, Aufloesung und Datensatz - exakt die
-    Auswahl, die auch der regulaere Check trifft.
+    Ergebnis-TIFs enthaelt. Sonst der neueste passende local_reference-Lauf
+    mit gleicher Region, Extent, Workflow, Aufloesung und Datensatz - exakt
+    die Auswahl, die auch der regulaere Check trifft.
+
+    Gibt es keinen brauchbaren, ist das Ergebnis None und der Lauf wird
+    uebersprungen. Eine andere Strategie tritt NIE an die Stelle der
+    Referenz - der Wert saehe normal aus, wuerde aber etwas anderes messen.
     """
     if preferred_dir is not None:
-        if _has_result_tifs(preferred_dir, ref_strategy, cfg["workflow"]):
-            return (ref_strategy, preferred_dir, "wie Geschwister-Zeile")
+        if _has_result_tifs(preferred_dir, REFERENCE_STRATEGY, cfg["workflow"]):
+            return (preferred_dir, "wie Geschwister-Zeile")
         note = "Geschwister-Referenz ohne TIFs (aufgeraeumt?), neueste stattdessen"
     else:
         note = "neueste passende"
-    suffix, _sub = rb._ACCURACY_LAYOUT[ref_strategy]
+    suffix, _sub = rb._ACCURACY_LAYOUT[REFERENCE_STRATEGY]
     ref_dir = rb._find_latest_run_dir(output_dir, suffix, cfg["region"],
                                       extent_size=cfg["extent_size"],
                                       workflow=cfg["workflow"],
                                       resolution=cfg["resolution"],
                                       dataset=cfg["dataset"])
-    return (ref_strategy, ref_dir, note)
+    if ref_dir is not None and not _has_result_tifs(
+            ref_dir, REFERENCE_STRATEGY, cfg["workflow"]):
+        # Ordner da, aber ohne Raster (cleanup-after-accuracy): als Referenz
+        # unbrauchbar. Lieber kein Wert als ein Wert gegen etwas anderes.
+        return (None, "local_reference vorhanden, aber ohne Ergebnis-TIFs")
+    return (ref_dir, note)
 
 
 def preview_pairs(run_dir: Path, strategy: str, ref_dir: Path,
@@ -448,6 +461,29 @@ def delete_accuracy_rows(run_id: int) -> int:
 # Planung
 # ---------------------------------------------------------------------------
 
+def _warn_foreign_references(acc_refs: list) -> None:
+    """Vorhandene Zeilen nennen, deren Referenz kein local_reference ist.
+
+    Der Nachtrag ruehrt sie nicht an - aber sie stehen in derselben Spalte
+    wie die Werte gegen die lokale Ground-Truth und sind in der Auswertung
+    sonst nicht als etwas anderes erkennbar. Entweder bewusst per
+    --accuracy-check entstanden oder Ergebnis des frueheren Rueckfalls.
+    """
+    foreign = sorted({run_id for run_id, ref_file in acc_refs
+                      if _strategy_of_dir(Path(ref_file)) != REFERENCE_STRATEGY})
+    if not foreign:
+        return
+    shown = ", ".join(str(r) for r in foreign[:15])
+    more = f" (+{len(foreign) - 15} weitere)" if len(foreign) > 15 else ""
+    print(f"\n  HINWEIS: {len(foreign)} vorhandene accuracy-Zeile(n) haben "
+          f"KEINE local_reference als Referenz: run_ids {shown}{more}.\n"
+          f"  Sie stammen aus --accuracy-check (Referenz onthefly) oder aus "
+          f"dem frueheren Rueckfall und messen etwas anderes als der "
+          f"Referenzvergleich.\n"
+          f"  Dieses Skript aendert sie nicht - nach einem local_reference-"
+          f"Lauf lassen sie sich mit --force gezielt ersetzen.")
+
+
 def build_plan(conn, args, index: dict) -> list:
     """Liste von Vorhaben: je Run entweder 'todo' oder 'skip' + Begruendung."""
     run_cols = _table_columns(conn, "runs")
@@ -455,6 +491,7 @@ def build_plan(conn, args, index: dict) -> list:
     rows_by_id = {r["run_id"]: r for r in rows}
     have_accuracy = runs_with_accuracy(conn)
     acc_refs = existing_accuracy_refs(conn)
+    _warn_foreign_references(acc_refs)
     wanted_strategies = set(args.strategy or CDSE_TEST_STRATEGIES)
     config_cache = {}
     plan = []
@@ -507,36 +544,26 @@ def build_plan(conn, args, index: dict) -> list:
             plan.append(entry)
             continue
 
-        if args.reference_strategy == "auto":
-            ref_strategy, preferred = sibling_reference(
-                acc_refs, cfg, strategy, index, config_cache, rows_by_id)
-            if ref_strategy is None:
-                ref_strategy = _default_reference_strategy(strategy)
-                preferred = None
-                ref_note = "Default (keine Geschwister-Zeile)"
-            else:
-                ref_note = "aus Geschwister-Zeile"
-        else:
-            ref_strategy = args.reference_strategy
-            preferred = None
-            ref_note = "per --reference-strategy"
+        preferred = sibling_reference_dir(acc_refs, cfg, strategy, index,
+                                          config_cache, rows_by_id)
+        ref_note = ("aus Geschwister-Zeile" if preferred is not None
+                    else "keine Geschwister-Zeile")
+        ref_strategy = REFERENCE_STRATEGY
 
-        if ref_strategy == strategy:
-            entry.update(action="skip",
-                         reason=f"Referenz-Strategie == Test-Strategie "
-                                f"({strategy})")
-            plan.append(entry)
-            continue
-
-        ref_strategy, ref_dir, dir_note = resolve_reference(
-            args.output_dir, cfg, strategy, ref_strategy, preferred)
+        ref_dir, dir_note = resolve_reference(args.output_dir, cfg, preferred)
         if ref_dir is None:
             entry.update(action="skip",
-                         reason=f"kein {ref_strategy}-Ordner fuer Region="
+                         reason=f"keine local_reference fuer Region="
                                 f"{cfg['region']}, Extent={cfg['extent_size']}, "
                                 f"Workflow={cfg['workflow']}, "
                                 f"Aufloesung={cfg['resolution']}, "
-                                f"Datensatz={cfg['dataset']}")
+                                f"Datensatz={cfg['dataset']} vorhanden"
+                                + (f" ({dir_note})"
+                                   if dir_note.startswith("local_reference")
+                                   else "")
+                                + " - es wird KEIN Wert geschrieben und "
+                                  "KEINE andere Strategie als Referenz "
+                                  "eingesetzt")
             plan.append(entry)
             continue
 
@@ -630,12 +657,6 @@ def main() -> int:
     parser.add_argument("--strategy", action="append", default=None,
                         choices=list(CDSE_TEST_STRATEGIES),
                         help="Nur diese Test-Strategie(n). Default: alle drei.")
-    parser.add_argument("--reference-strategy", default="auto",
-                        choices=("auto", "onthefly", "local_reference"),
-                        help="Referenz-Seite. auto (Default): dieselbe wie bei "
-                             "den schon vorhandenen Zeilen derselben "
-                             "Konfiguration, sonst local_reference fuer "
-                             "onthefly-Runs und onthefly fuer local_pp/full_pp.")
     parser.add_argument("--resampling", default="nearest",
                         help="Resampling-Methode, falls der Run keine in der "
                              "DB stehen hat (Default: nearest).")

@@ -6005,8 +6005,18 @@ def run_accuracy_check(output_base: str, region: str,
         extent_msg = f" mit extent_size='{extent_size}'" if extent_size else ""
         wf_msg = f" und workflow='{workflow}'" if workflow else ""
         res_msg = f" und Aufloesung {resolution:g} m" if resolution else ""
+        ds_msg = f" und Datensatz '{dataset}'" if dataset else ""
         print(f"  Skip: kein {miss}-Run fuer Region '{region}'"
-              f"{extent_msg}{wf_msg}{res_msg} gefunden.")
+              f"{extent_msg}{wf_msg}{res_msg}{ds_msg} gefunden.")
+        if not reference_dir:
+            # Bewusst KEIN Ausweichen auf eine andere Strategie: ein
+            # Vergleich gegen z.B. onthefly liefert eine plausibel
+            # aussehende Zahl, misst aber etwas anderes und ist in der
+            # accuracy-Tabelle hinterher nicht mehr davon zu unterscheiden.
+            print(f"  Es wird KEIN Wert geschrieben und KEINE andere "
+                  f"Strategie als Referenz eingesetzt. Fuer einen Vergleich "
+                  f"muss zuerst ein {reference_strategy}-Lauf dieser "
+                  f"Konfiguration existieren.")
         return None
 
     reference_tif_dir = _tif_dir(reference_dir, reference_strategy)
@@ -6242,6 +6252,81 @@ def _run_accuracy_check_categorical(common, reference_tifs, test_tifs,
     }
 
 
+def _reference_is_usable(run_dir: Path, workflow: str = None) -> bool:
+    """Taugt dieser local_reference-Ordner als Referenz?
+
+    Der Ordner allein reicht nicht: --cleanup-after-accuracy loescht die
+    TIFs und laesst results.json/Prozessgraphen stehen. So ein Ordner ist
+    ein Treffer fuer _find_latest_run_dir, aber als Referenz wertlos.
+    """
+    tif_dir = _tif_dir(run_dir, "local_reference")
+    if _collect_workflow_tifs(tif_dir):
+        return True
+    if workflow in TIME_REDUCING_WORKFLOWS:
+        return bool(_collect_reduced_tifs(tif_dir))
+    return False
+
+
+def _preflight_reference(args, strategies, dataset, resolution) -> None:
+    """Vor dem ersten Lauf pruefen, ob --reference-check ueberhaupt
+    aufgehen kann - sonst gar nicht erst starten.
+
+    Anlass: fuer wien und newyork war der local_reference-Lauf am
+    CDSE-Warteschlangen-Timeout gescheitert. Der anschliessende Aufruf mit
+    --reference-check liess trotzdem alle Messlaeufe durchlaufen (zwoelf
+    Backend-Jobs, echte Credits) und meldete erst ganz am Ende, dass kein
+    Vergleich moeglich ist. Die Pruefung kostet einen Verzeichnis-Scan und
+    faengt genau das ab.
+
+    Nicht geprueft wird, wenn local_reference in diesem Aufruf selbst
+    laeuft (dann entsteht die Referenz ja gerade) oder wenn ueberhaupt
+    keine Laeufe anstehen (--repeat 0).
+    """
+    if not args.reference_check or args.repeat < 1:
+        return
+    if "local_reference" in strategies:
+        return
+    suffix, _sub = _ACCURACY_LAYOUT["local_reference"]
+    ref_dir = _find_latest_run_dir(args.output_dir, suffix, args.region,
+                                   extent_size=args.extent_size,
+                                   workflow=args.workflow,
+                                   resolution=resolution,
+                                   dataset=dataset)
+    if ref_dir is not None and _reference_is_usable(ref_dir, args.workflow):
+        print(f"  [reference-check] Referenz vorhanden: {ref_dir.name}")
+        return
+
+    why = ("keiner gefunden" if ref_dir is None
+           else f"{ref_dir.name} enthaelt keine Ergebnis-TIFs "
+                f"(aufgeraeumt?)")
+    cfg = (f"Region={args.region}, Extent={args.extent_size}, "
+           f"Workflow={args.workflow}, Aufloesung={resolution:g} m, "
+           f"Datensatz={dataset}")
+    print(f"\n{'!'*72}")
+    print(f"  --reference-check gesetzt, aber kein brauchbarer "
+          f"local_reference-Lauf: {why}.")
+    print(f"  Konfiguration: {cfg}")
+    print(f"  Ohne Referenz ist KEIN Vergleich moeglich - und es wird auch "
+          f"keine andere\n  Strategie ersatzweise als Referenz genommen.")
+    if args.allow_missing_reference:
+        print(f"  [--allow-missing-reference] Die Laeufe starten trotzdem. "
+              f"Sie kosten Credits\n  und bekommen keinen Genauigkeitswert; "
+              f"nachtragen laesst er sich spaeter mit\n  "
+              f"backfill_accuracy.py, sobald die Referenz existiert.")
+        print(f"{'!'*72}")
+        return
+    print(f"  Abbruch VOR dem ersten Lauf - so verbrennt kein Backend-Job "
+          f"Credits fuer\n  Messungen, die niemand vergleichen kann.")
+    print(f"  Erst die Referenz erzeugen:")
+    print(f"    py run_benchmark.py --strategy local_reference "
+          f"--region {args.region} --extent-size {args.extent_size} "
+          f"--workflow {args.workflow}")
+    print(f"  Oder --allow-missing-reference setzen, um bewusst ohne "
+          f"Vergleich zu messen.")
+    print(f"{'!'*72}")
+    sys.exit(2)
+
+
 def _accuracy_targets_from_session(all_results, strategies) -> list:
     """Alle erfolgreichen Laeufe DIESES Aufrufs, die als Test-Seite eines
     Accuracy-Vergleichs taugen - einer je Wiederholung.
@@ -6332,7 +6417,18 @@ def main() -> None:
                              "--strategy local_reference oder ein frueherer). "
                              "Unterscheidet sich von --accuracy-check dadurch, "
                              "dass die unabhaengige lokale Pipeline als "
-                             "Ground-Truth dient statt onthefly.")
+                             "Ground-Truth dient statt onthefly. Fehlt die "
+                             "Referenz, bricht der Aufruf VOR dem ersten Lauf "
+                             "ab (s. --allow-missing-reference) - es wird nie "
+                             "eine andere Strategie ersatzweise verglichen.")
+    parser.add_argument("--allow-missing-reference", action="store_true",
+                        help="Die Vorabpruefung von --reference-check nur "
+                             "warnen lassen statt abzubrechen. Die Laeufe "
+                             "starten dann ohne dass ein Vergleich moeglich "
+                             "ist - sie kosten Credits und bleiben ohne "
+                             "Genauigkeitswert. Nachtragen geht spaeter mit "
+                             "backfill_accuracy.py, sobald die Referenz "
+                             "existiert.")
     parser.add_argument("--extent-size", default="medium",
                         choices=("small", "medium", "large", "xlarge", "xxlarge"),
                         help="AOI-Kantenlaenge um das Region-Zentrum: "
@@ -6775,6 +6871,10 @@ def main() -> None:
     print(f"Strategien: {strategies}")
     print(f"Repeats:    {args.repeat}")
     print(f"Run-Type:   {args.run_type}")
+
+    # Erst pruefen, dann messen: ohne local_reference kann --reference-check
+    # nichts vergleichen, und die Laeufe waeren fuer die Auswertung wertlos.
+    _preflight_reference(args, strategies, dataset, _resolution_of(args))
 
     all_results = []
     runners = {
