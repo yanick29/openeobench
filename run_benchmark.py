@@ -5896,7 +5896,8 @@ def run_accuracy_check(output_base: str, region: str,
                        resampling_method: str = "nearest",
                        reference_strategy: str = "onthefly",
                        resolution: float = None,
-                       dataset: str = None):
+                       dataset: str = None,
+                       test_dir=None, reference_dir=None):
     """Neuesten {reference_strategy}-Run vs neuesten {test_strategy}-Run vergleichen.
 
     reference_strategy: "onthefly" (Default) oder "local_reference" (lokale
@@ -5925,11 +5926,25 @@ def run_accuracy_check(output_base: str, region: str,
     in die eigenen Spalten geschrieben; mae/rmse bleiben NULL. Aggregiert
     wird dort PIXELGEWICHTET ueber alle Date-TIFs, nicht per Median: ein
     Median von Quoten ueber unterschiedlich grosse Bilder verzerrt.
+
+    test_dir / reference_dir: konkrete Run-Ordner statt der Auswahl per
+    _find_latest_run_dir. Ohne sie bleibt alles wie bisher - "neuester
+    passender Ordner". Mit ihnen laesst sich EIN BESTIMMTER Lauf pruefen,
+    was bei --repeat > 1 noetig ist: dort existieren mehrere gleich gute
+    Ordner, und "der neueste" ist immer nur die letzte Wiederholung. Wird
+    test_dir gesetzt, muss auch test_strategy gesetzt sein - erst sie sagt,
+    in welchem Unterordner die Ergebnis-TIFs liegen (_ACCURACY_LAYOUT).
     """
     if reference_strategy not in _ACCURACY_LAYOUT:
         raise ValueError(
             f"reference_strategy='{reference_strategy}' nicht bekannt. "
             f"Erlaubt: {sorted(_ACCURACY_LAYOUT)}"
+        )
+    if test_dir is not None and test_strategy is None:
+        raise ValueError(
+            "test_dir ohne test_strategy: ohne die Strategie ist das "
+            "Unterverzeichnis der Ergebnis-TIFs nicht bestimmbar "
+            f"(erlaubt: {sorted(_ACCURACY_LAYOUT)})."
         )
 
     print(f"\n{'='*60}")
@@ -5942,11 +5957,12 @@ def run_accuracy_check(output_base: str, region: str,
           f"{ds_info}")
 
     ref_suffix, _ = _ACCURACY_LAYOUT[reference_strategy]
-    reference_dir = _find_latest_run_dir(output_base, ref_suffix, region,
-                                         extent_size=extent_size,
-                                         workflow=workflow,
-                                         resolution=resolution,
-                                         dataset=dataset)
+    reference_dir = (Path(reference_dir) if reference_dir is not None
+                     else _find_latest_run_dir(output_base, ref_suffix, region,
+                                               extent_size=extent_size,
+                                               workflow=workflow,
+                                               resolution=resolution,
+                                               dataset=dataset))
 
     # test_strategy auto-detecten: bevorzugt full_pp, dann local_pp, dann
     # (wenn reference != onthefly) auch onthefly. reference selbst ist
@@ -5977,11 +5993,12 @@ def run_accuracy_check(output_base: str, region: str,
         return None
 
     test_suffix, _ = _ACCURACY_LAYOUT[test_strategy]
-    test_dir = _find_latest_run_dir(output_base, test_suffix, region,
-                                    extent_size=extent_size,
-                                    workflow=workflow,
-                                    resolution=resolution,
-                                    dataset=dataset)
+    test_dir = (Path(test_dir) if test_dir is not None
+                else _find_latest_run_dir(output_base, test_suffix, region,
+                                          extent_size=extent_size,
+                                          workflow=workflow,
+                                          resolution=resolution,
+                                          dataset=dataset))
 
     if not reference_dir or not test_dir:
         miss = reference_strategy if not reference_dir else test_strategy
@@ -6223,6 +6240,37 @@ def _run_accuracy_check_categorical(common, reference_tifs, test_tifs,
         "reference_dir": str(reference_dir),
         "test_dir": str(test_dir),
     }
+
+
+def _accuracy_targets_from_session(all_results, strategies) -> list:
+    """Alle erfolgreichen Laeufe DIESES Aufrufs, die als Test-Seite eines
+    Accuracy-Vergleichs taugen - einer je Wiederholung.
+
+    Warum: vorher merkte sich main() pro Strategie genau EINE test_run_id
+    (die Schleife ueberschrieb sie bei jeder Wiederholung), und
+    run_accuracy_check loeste das Verzeichnis ueber _find_latest_run_dir
+    auf - beides zeigte auf die LETZTE Wiederholung. Bei --repeat 3 bekam
+    damit nur der dritte Lauf eine Zeile in der accuracy-Tabelle, die
+    ersten beiden blieben leer. Die Werte sind deterministisch, es geht
+    also nicht um neue Erkenntnis, sondern um vollstaendige Daten je
+    run_id.
+
+    Rueckgabe: [(strategy, run_id, outdir), ...] in Laufreihenfolge.
+    strategy ist auf die Schluessel von _ACCURACY_LAYOUT normalisiert
+    (local_pp_cached -> local_preprocessing), damit Suffix und
+    Ergebnis-Unterordner aufloesbar bleiben.
+    """
+    targets = []
+    for r in all_results:
+        if r.get("status") != "success" or r.get("run_id") is None:
+            continue
+        s = r.get("strategy")
+        if s == "local_pp_cached":
+            s = "local_preprocessing"
+        if s not in strategies or not r.get("outdir"):
+            continue
+        targets.append((s, r["run_id"], r["outdir"]))
+    return targets
 
 
 # ---------------------------------------------------------------------------
@@ -6772,47 +6820,72 @@ def main() -> None:
     print_summary(all_results)
 
     if args.accuracy_check:
-        test_strategy = None
-        test_run_id = None
-        for r in all_results:
-            if r.get("status") != "success" or r.get("run_id") is None:
-                continue
-            if r.get("strategy") in ("local_preprocessing", "local_pp_cached"):
-                test_strategy = "local_preprocessing"
-                test_run_id = r["run_id"]
-            elif r.get("strategy") == "full_preprocessing":
-                test_strategy = "full_preprocessing"
-                test_run_id = r["run_id"]
-        run_accuracy_check(args.output_dir, args.region,
-                           test_strategy=test_strategy,
-                           test_run_id=test_run_id,
-                           extent_size=args.extent_size,
-                           workflow=args.workflow,
-                           resampling_method=args.local_resampling,
-                           reference_strategy="onthefly",
-                           resolution=_resolution_of(args),
-                           dataset=dataset)
+        # Ein Vergleich JE LAUF dieses Aufrufs, mit dessen eigenem Ordner
+        # und dessen eigener run_id - sonst bekaeme bei --repeat N nur die
+        # letzte Wiederholung eine Zeile in der accuracy-Tabelle.
+        targets = _accuracy_targets_from_session(
+            all_results, ("local_preprocessing", "full_preprocessing"))
+        if targets:
+            for t_strategy, t_run_id, t_dir in targets:
+                run_accuracy_check(args.output_dir, args.region,
+                                   test_strategy=t_strategy,
+                                   test_run_id=t_run_id,
+                                   test_dir=t_dir,
+                                   extent_size=args.extent_size,
+                                   workflow=args.workflow,
+                                   resampling_method=args.local_resampling,
+                                   reference_strategy="onthefly",
+                                   resolution=_resolution_of(args),
+                                   dataset=dataset)
+        else:
+            # Kein eigener Lauf in dieser Session (z.B. --repeat 0):
+            # unveraendert der neueste passende Ordner von der Platte.
+            run_accuracy_check(args.output_dir, args.region,
+                               test_strategy=None,
+                               test_run_id=None,
+                               extent_size=args.extent_size,
+                               workflow=args.workflow,
+                               resampling_method=args.local_resampling,
+                               reference_strategy="onthefly",
+                               resolution=_resolution_of(args),
+                               dataset=dataset)
 
     if args.reference_check:
-        # Pro CDSE-Strategie (onthefly, local_pp, full_pp) einen Vergleich
+        # Pro CDSE-Strategie (onthefly, local_pp, full_pp) ein Vergleich
         # gegen den neuesten local_reference-Run derselben Region/Workflow/
-        # Extent. test_run_ids werden aus all_results bezogen, falls die
-        # Strategie in dieser Session lief; sonst per Disk-Lookup.
-        test_run_ids = {}
-        for r in all_results:
-            if r.get("status") != "success" or r.get("run_id") is None:
-                continue
-            s = r.get("strategy")
-            if s in ("local_pp_cached",):
-                s = "local_preprocessing"
-            if s in ("onthefly", "local_preprocessing", "full_preprocessing"):
-                test_run_ids[s] = r["run_id"]
-
+        # Extent - und zwar JE LAUF dieser Session (run_id + Ordner aus
+        # all_results). Lief die Strategie hier gar nicht, wie bisher per
+        # Disk-Lookup der neueste passende Ordner ohne run_id.
         candidate_strategies = ("onthefly", "local_preprocessing",
                                 "full_preprocessing")
+        # Je Strategie ALLE Laeufe dieser Session, nicht nur den letzten.
+        session_runs = {}
+        for s, rid, odir in _accuracy_targets_from_session(
+                all_results, candidate_strategies):
+            session_runs.setdefault(s, []).append((rid, odir))
+
         any_run = False
         resolution = _resolution_of(args)
         for s in candidate_strategies:
+            runs_of_s = session_runs.get(s)
+            if runs_of_s:
+                any_run = True
+                for t_run_id, t_dir in runs_of_s:
+                    run_accuracy_check(
+                        args.output_dir, args.region,
+                        test_strategy=s,
+                        test_run_id=t_run_id,
+                        test_dir=t_dir,
+                        extent_size=args.extent_size,
+                        workflow=args.workflow,
+                        resampling_method=args.local_resampling,
+                        reference_strategy="local_reference",
+                        resolution=resolution,
+                        dataset=dataset,
+                    )
+                continue
+            # Strategie lief nicht in dieser Session: wie bisher der
+            # neueste passende Ordner von der Platte.
             suf, _ = _ACCURACY_LAYOUT[s]
             if _find_latest_run_dir(args.output_dir, suf, args.region,
                                     extent_size=args.extent_size,
@@ -6824,7 +6897,7 @@ def main() -> None:
             run_accuracy_check(
                 args.output_dir, args.region,
                 test_strategy=s,
-                test_run_id=test_run_ids.get(s),
+                test_run_id=None,
                 extent_size=args.extent_size,
                 workflow=args.workflow,
                 resampling_method=args.local_resampling,
