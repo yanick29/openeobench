@@ -169,6 +169,14 @@ def create_database():
     # Spalte ist das uebertragene Volumen nicht normierbar.
     if "asset_bytes" not in existing_run_cols:
         c.execute("ALTER TABLE runs ADD COLUMN asset_bytes BIGINT")
+    # Ausgabeformat des save_result-Knotens ('GTiff' oder 'netCDF'), gesetzt
+    # per --save-format (onthefly, local_preprocessing) bzw.
+    # --fullpp-save-format (full_preprocessing). Ohne diese Spalte sind
+    # Laeufe mit unterschiedlichem Writer in der Auswertung nicht trennbar -
+    # und genau das ist die Frage bei der GTiff-Korruption auf CDSE
+    # (ZIPDecode-Fehler beim Lesen der Backend-Ausgabe).
+    if "save_format" not in existing_run_cols:
+        c.execute("ALTER TABLE runs ADD COLUMN save_format TEXT")
 
     conn.commit()
     conn.close()
@@ -203,6 +211,8 @@ def _ensure_run_extra_columns(conn):
         conn.execute("ALTER TABLE runs ADD COLUMN dataset TEXT")
     if "asset_bytes" not in cols:
         conn.execute("ALTER TABLE runs ADD COLUMN asset_bytes BIGINT")
+    if "save_format" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN save_format TEXT")
 
 
 def import_run(output_directory, crs_strategy=None, run_type=None,
@@ -210,7 +220,7 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
                s2_download_time=None, workflow=None, local_resampling=None,
                target_crs=None, dem_layout=None, dem_format=None,
                dem_snap=None, dem_tiles=None, resolution_m=None,
-               dataset=None, asset_bytes=None):
+               dataset=None, asset_bytes=None, save_format=None):
     """Importiert einen Run aus results.json und job-results.json in die DB."""
     conn = duckdb.connect(DB_PATH)
     _ensure_run_extra_columns(conn)
@@ -330,11 +340,11 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         crs_strategy, run_type, preprocessing_time, dem_download_time,
         s2_download_time, extent_size,
         workflow, local_resampling, target_crs, dem_layout, dem_format,
-        dem_snap, dem_tiles, resolution_m, dataset, asset_bytes,
+        dem_snap, dem_tiles, resolution_m, dataset, asset_bytes, save_format,
         credits, cpu_seconds, duration_backend, input_pixels_mp, max_memory_gb,
         git_commit, openeo_version, rasterio_version, numpy_version,
         proj_version, environment_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
         run_id,
         results.get("backend_url"),
         results.get("backend_name"),
@@ -371,6 +381,7 @@ def import_run(output_directory, crs_strategy=None, run_type=None,
         resolution_m,
         dataset,
         asset_bytes,
+        save_format,
         results.get("credits"),
         results.get("cpu_seconds"),
         results.get("duration_backend"),
