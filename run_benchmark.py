@@ -4616,6 +4616,40 @@ def _box3_mean(arr):
     return s / 9.0
 
 
+def _nodata_to_nan(data, nodata):
+    """Nodata-Zellen eines Quellrasters auf NaN setzen, als float64.
+
+    nodata kommt IMMER aus dem nodata-Attribut der Quelldatei (rasterio
+    src.nodata) - hier steht bewusst kein fester Wert. Die Sentinels
+    unterscheiden sich je Kollektion, Backend und dtype: S2 kommt als int16
+    mit -32768, das DEM als float mit NaN, Landcover als uint8 mit 0.
+
+    Warum das noetig ist: ohne diese Maske geht der ganzzahlige Sentinel als
+    echter Messwert in die Rechnung ein. Gemessen an
+    outputs/run_20260826_134353_local_reference (berlin, large, merge_add):
+    das S2-Raster traegt nodata=-32768 auf 480576 Zellen, nach S2 + DEM
+    standen davon Werte um -32735 im Ergebnis (Minimum -32735.92, 841 Zellen
+    unter -1000). Weil das Ergebnis anschliessend NaN als Nodata deklarierte,
+    galten diese Artefakte als gueltige Messwerte und liefen in MAE/RMSE ein -
+    der RMSE sprang dadurch von ~2 auf ~156.
+
+    NaN als Sentinel braucht keine Behandlung (ist schon NaN), None heisst
+    "Datei deklariert kein Nodata" - dann wird nichts maskiert.
+    """
+    import numpy as np
+    out = np.asarray(data).astype(np.float64, copy=True)
+    if nodata is None:
+        return out
+    try:
+        nd = float(nodata)
+    except (TypeError, ValueError):
+        return out
+    if math.isnan(nd):
+        return out
+    out[out == nd] = np.nan
+    return out
+
+
 def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
                           out_dir: Path) -> list:
     """Wende den Workflow lokal mit rasterio+numpy an. Alle Eingaben muessen
@@ -4640,18 +4674,44 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
     lc_overlay bleibt das Raster im Quell-dtype (uint8), weil Klassen-IDs
     keine Fliesskommazahlen sind - sonst wuerden spaeter Klassen ueber
     float-Gleichheit verglichen.
+
+    NODATA: beide Eingaben werden VOR jeder Rechnung ueber _nodata_to_nan
+    maskiert - der Sentinel kommt aus dem nodata-Attribut der jeweiligen
+    Quelldatei. Das gilt fuer ALLE rechnenden Workflows, weil sie samt und
+    sonders auf s2_data/dem_data aufsetzen. Die float32-Ausgaben tragen
+    danach NaN als Nodata (s. _write_single); nur lc_overlay behaelt
+    Quell-dtype und Quell-Sentinel, dort ist das Ergebnis die Klassenkarte
+    selbst.
+
+    Folgefehler in _box3_mean (focal): NaN breitet sich ueber das 3x3-Fenster
+    auf die Nachbarzellen aus. Das ist gewollt - apply_kernel auf dem Backend
+    zieht ungueltige Pixel genauso in die Nachbarschaft.
     """
     import numpy as np
 
     with rasterio.open(str(dem_tif)) as dem_src:
         dem_raw = dem_src.read(1)
-        dem_data = dem_raw.astype(np.float64)
+        dem_nodata = dem_src.nodata
+        # Nodata des zweiten Rasters aus SEINER Datei lesen und ausmaskieren,
+        # bevor gerechnet wird (s. _nodata_to_nan). dem_raw bleibt roh - die
+        # kategorialen Zweige brauchen die Klassen-IDs im Quell-dtype.
+        dem_data = _nodata_to_nan(dem_raw, dem_nodata)
         ref_meta = dem_src.meta.copy()
         ref_transform = dem_src.transform
 
+    n_dem_masked = int(np.isnan(dem_data).sum())
+    if n_dem_masked:
+        print(f"    Zweites Raster {dem_tif.name}: {n_dem_masked:,} "
+              f"ungueltige Zellen (nodata={dem_nodata}) -> NaN")
+
     def _write_single(out_path: Path, data, meta=None):
+        # nodata MUSS zu den geschriebenen Werten passen: nach dem
+        # Ausmaskieren steht in ungueltigen Zellen NaN, also ist NaN der
+        # Sentinel des Ergebnisses. Ein aus dem Quell-Meta geerbter Wert
+        # (z.B. 0 aus einem uint8-Landcover) wuerde ungueltige Zellen als
+        # gueltig ausweisen - genau der Fehler in step4_result.
         m = (meta if meta is not None else ref_meta).copy()
-        m.update({"count": 1, "dtype": "float32"})
+        m.update({"count": 1, "dtype": "float32", "nodata": float("nan")})
         with rasterio.open(out_path, "w", **m) as dst:
             dst.write(data.astype(np.float32), 1)
 
@@ -4668,7 +4728,17 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
     for s2_tif in s2_tifs:
         try:
             with rasterio.open(str(s2_tif)) as s2_src:
-                s2_data = s2_src.read().astype(np.float64)
+                s2_raw = s2_src.read()
+                s2_nodata = s2_src.nodata
+                # Gleiches Vorgehen wie beim zweiten Raster: Sentinel aus der
+                # Quelldatei lesen, betroffene Zellen auf NaN. s2_raw bleibt
+                # roh fuer Bandtests auf Klassenwerten (SCL).
+                s2_data = _nodata_to_nan(s2_raw, s2_nodata)
+
+            n_s2_masked = int(np.isnan(s2_data).sum())
+            if n_s2_masked:
+                print(f"    {s2_tif.name}: {n_s2_masked:,} ungueltige "
+                      f"S2-Zellen (nodata={s2_nodata}) -> NaN")
 
             # Defensiver Shape-Check: S2 (per Band) und DEM muessen das
             # IDENTISCHE 2D-Grid haben. Sonst crasht das numpy-Broadcasting
@@ -4722,7 +4792,11 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
                         f"in {s2_tif.name} sind nur {s2_data.shape[0]}"
                     )
                 b04 = s2_data[0]
-                scl = s2_data[1].astype(int)
+                # SCL traegt Klassen-IDs: aus dem ROHEN Band lesen. Ueber
+                # s2_data (float, mit NaN) waere der int-Cast von NaN
+                # undefiniert; der Sentinel ist ohnehin keine der Klassen
+                # 4/5, ungueltige Zellen fallen also korrekt aus keep.
+                scl = s2_raw[1].astype(np.int64)
                 keep = np.isin(scl, (4, 5))
                 b04_masked = np.where(keep, b04, np.nan)
                 result = b04_masked + dem_data
