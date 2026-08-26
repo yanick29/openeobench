@@ -2320,13 +2320,50 @@ def _force_onthefly_target_crs(pg: dict, target_epsg: int,
     }
 
 
+SAVE_FORMATS = ("GTiff", "netCDF")
+DEFAULT_SAVE_FORMAT = "GTiff"
+
+
+def _apply_save_format(pg: dict, save_format: str) -> dict:
+    """Format des save_result-Knotens setzen (--save-format).
+
+    Bei 'GTiff' passiert NICHTS: die Templates tragen GTiff bereits, und der
+    Graph muss byte-identisch zum bisherigen bleiben - sonst waeren alle
+    frueheren Laeufe nicht mehr vergleichbar. Nur eine Abweichung wird
+    geschrieben, zusammen mit leeren options (moeglichst standardkonformes
+    Ausgabeprofil).
+
+    Anlass: --strategy onthefly --region berlin --extent-size xlarge
+    --workflow merge_add scheiterte 5 von 5 Laeufen auf CDSE mit
+    "/tmp/openEO_2024-07-24Z_<id>.tif is corrupt / ZIPDecode: Decoding error
+    at scanline 5248" - gleicher Termin, gleiche Scanline, verschiedene
+    Executoren, waehrend local_preprocessing denselben Ausschnitt fehlerfrei
+    verarbeitet. Der Verdacht ist der GTiff-Writer des Backends; mit netCDF
+    laesst er sich umgehen bzw. der Verdacht bestaetigen.
+
+    Bewusst getrennt von der Ueberschreibung in build_full_pp_scenario:
+    full_preprocessing behaelt seinen eigenen Schalter
+    --fullpp-save-format und bleibt hier unangetastet.
+    """
+    if save_format == DEFAULT_SAVE_FORMAT:
+        return pg
+    if "saveresult1" not in pg:
+        print(f"  [warn] --save-format={save_format} ohne Wirkung: der Graph "
+              f"hat keinen saveresult1-Knoten.")
+        return pg
+    pg["saveresult1"]["arguments"]["format"] = save_format
+    pg["saveresult1"]["arguments"]["options"] = {}
+    return pg
+
+
 def build_onthefly_scenario(region: str, target_path: Path,
                             extent_size: str = "medium",
                             workflow: str = "merge_add",
                             force_target_crs: bool = False,
                             resolution: float = DEFAULT_RESOLUTION_M,
                             dataset: str = DEFAULT_DATASET,
-                            resampling: str = "nearest") -> Path:
+                            resampling: str = "nearest",
+                            save_format: str = DEFAULT_SAVE_FORMAT) -> Path:
     """Onthefly = Workflow-PG aus bench_onthefly_{region}.json gebaut.
 
     Ueberspannt der Extent mehrere UTM-Zonen (oder ist force_target_crs
@@ -2337,6 +2374,9 @@ def build_onthefly_scenario(region: str, target_path: Path,
     Bei --resolution != 10 wird derselbe Knoten gesetzt, dann aber wegen der
     Zellgroesse: ohne ihn liefert CDSE sein natives 10-m-S2-Gitter und die
     Aufloesung waere im Ergebnis nicht wirksam.
+
+    save_format (--save-format): Ausgabeformat des save_result-Knotens.
+    Default GTiff = unveraendert; s. _apply_save_format.
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
@@ -2360,6 +2400,7 @@ def build_onthefly_scenario(region: str, target_path: Path,
               f"@ {resolution:g} m ({reason})")
         _force_onthefly_target_crs(pg, target_epsg, resolution=resolution,
                                    resampling=resampling)
+    _apply_save_format(pg, save_format)
     with open(target_path, "w") as f:
         json.dump({"process_graph": pg}, f, indent=2)
     return target_path
@@ -2403,7 +2444,8 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
                             resolution: float = DEFAULT_RESOLUTION_M,
                             dataset: str = DEFAULT_DATASET,
                             resampling: str = "nearest",
-                            load_stac_spatial_extent: dict = None) -> Path:
+                            load_stac_spatial_extent: dict = None,
+                            save_format: str = DEFAULT_SAVE_FORMAT) -> Path:
     """
     Erzeugt das load_stac Szenario fuer den gewuenschten Workflow:
     Workflow-PG (s. _build_workflow_pg) wird gebaut, dann wird
@@ -2446,6 +2488,11 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     obwohl dasselbe Item als gtiff durchlaeuft - der Unterschied ist der
     Medientyp application/vnd+zarr. Bei None bleibt der Knoten exakt wie
     bisher ({"url": ...}), damit gtiff/netcdf-Graphen byte-identisch sind.
+
+    save_format (--save-format): Ausgabeformat des save_result-Knotens.
+    Default GTiff = unveraendert; s. _apply_save_format. Nicht zu
+    verwechseln mit --dem-format, das das FORMAT DES HOCHGELADENEN DEM
+    steuert - hier geht es um das, was das Backend zurueckschreibt.
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
@@ -2515,6 +2562,8 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
               f"@ {resolution:g} m resamplen (--resolution)")
         _force_onthefly_target_crs(pg, target_epsg, resolution=resolution,
                                    resampling=resampling)
+
+    _apply_save_format(pg, save_format)
 
     scenario = {"process_graph": pg}
     with open(target_path, "w") as f:
@@ -3567,8 +3616,9 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
     outdir = _make_outdir(args.output_dir, "onthefly")
 
     print(f"\n{'='*60}")
+    save_format = getattr(args, "save_format", DEFAULT_SAVE_FORMAT)
     print(f"  Strategie: onthefly  |  Region: {args.region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
-    print(f"  Output: {outdir}")
+    print(f"  Output: {outdir}  |  Save-Format: {save_format}")
 
     try:
         resolution = _resolution_of(args)
@@ -3581,8 +3631,10 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
             resolution=resolution,
             dataset=dataset,
             resampling=args.local_resampling,
+            save_format=save_format,
         )
-        _write_run_meta(outdir, resolution, dataset=dataset)
+        _write_run_meta(outdir, resolution, dataset=dataset,
+                        save_format=save_format)
         results = run_openeo(args.api_url, str(scenario_path), str(outdir),
                              job_timeout=args.job_timeout)
         # Nur Diagnose: der Rueckgabewert wird bewusst NICHT ausgewertet.
@@ -3595,7 +3647,8 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
         run_id = import_run(str(outdir), crs_strategy="onthefly",
                             run_type=run_type, extent_size=args.extent_size,
                             workflow=args.workflow,
-                            resolution_m=resolution, dataset=dataset)
+                            resolution_m=resolution, dataset=dataset,
+                            save_format=save_format)
         return {
             "strategy": "onthefly", "repeat": repeat_idx + 1, "run_type": run_type,
             "status": results.get("status", "unknown"),
@@ -3789,12 +3842,14 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         for i in range(dem_tiles)]
     cache_dir = Path(args.output_dir) / "dem_cache"
     strategy_label = "local_pp_cached" if args.dem_cache else "local_preprocessing"
+    save_format = getattr(args, "save_format", DEFAULT_SAVE_FORMAT)
 
     print(f"\n{'='*60}")
     print(f"  Strategie: {strategy_label}  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
     print(f"  Output: {base}  |  Ziel-CRS: {dst_crs}  |  Aufloesung: "
           f"{resolution:g} m  |  DEM-Format: {dem_format}"
           + (f"  |  Layout: {dem_layout}" if dem_format == "gtiff" else "")
+          + f"  |  Save-Format: {save_format}"
           + (f"  |  Tiles: {dem_tiles} "
              f"({'x'.join(map(str, _tile_grid_layout(dem_tiles)))})"
              if dem_tiles > 1 else "")
@@ -4158,8 +4213,10 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             dataset=dataset,
             resampling=args.local_resampling,
             load_stac_spatial_extent=load_stac_extent,
+            save_format=save_format,
         )
-        _write_run_meta(base, resolution, dataset=dataset)
+        _write_run_meta(base, resolution, dataset=dataset,
+                        save_format=save_format)
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
                                    job_timeout=args.job_timeout)
         # Nur Diagnose: der Rueckgabewert wird bewusst NICHT ausgewertet.
@@ -4209,6 +4266,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             resolution_m=resolution,
             dataset=dataset,
             asset_bytes=asset_bytes,
+            save_format=save_format,
         )
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf
@@ -4567,6 +4625,12 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             resolution_m=resolution,
             asset_bytes=asset_bytes,
             dataset=dataset,
+            # full_pp behaelt seinen eigenen Schalter; nur der GEWAEHLTE Wert
+            # wandert in dieselbe Spalte, sonst waere ausgerechnet die
+            # Strategie, die diese Dimension schon hat, in der Auswertung
+            # nicht unterscheidbar. Am Verhalten von --fullpp-save-format
+            # aendert das nichts.
+            save_format=fullpp_save_format,
         )
 
         # Nginx-Logs fuer ALLE relevanten Dateien (TIFs + STAC Items + Collection + DEM)
@@ -5920,6 +5984,17 @@ TIME_REDUCING_WORKFLOWS = ("aggregation",)
 _REDUCED_TIF_RE = re.compile(r"^openEO[^_]*\.tif$", re.IGNORECASE)
 
 
+def _collect_netcdf_outputs(tif_dir: Path) -> list:
+    """Namen der netCDF-Ausgaben eines Ergebnisordners (--save-format netCDF).
+
+    Nur fuer die Diagnose im Accuracy-Check: liegt hier etwas, dann hat das
+    Backend kein GeoTIFF geschrieben und der Pixelvergleich kann nicht
+    greifen - er soll das dann klar sagen statt mit "keine gemeinsamen
+    TIF-Dateien" zu enden, was nach einem fehlenden Lauf aussieht.
+    """
+    return sorted(p.name for p in Path(tif_dir).glob("*.nc") if p.is_file())
+
+
 def _collect_reduced_tifs(tif_dir: Path) -> dict:
     """Undatierte Workflow-Ausgaben eines zeitreduzierenden Laufs."""
     return {p.name: p for p in tif_dir.glob("*.tif")
@@ -6124,6 +6199,26 @@ def run_accuracy_check(output_base: str, region: str,
                   f"Datumsnamen, die Auswahl ist daher inhaltlich beliebig).")
 
     if not common:
+        # netCDF-Ausgabe (--save-format / --fullpp-save-format netCDF):
+        # der Vergleich liest GeoTIFFs ueber rasterio/align_rasters, ein
+        # .nc-Ergebnis kann er nicht paaren. Das ist kein Fehler des Laufs,
+        # deshalb hier eine eigene, eindeutige Meldung statt "keine
+        # gemeinsamen TIF-Dateien" - und kein Abbruch.
+        ref_nc = _collect_netcdf_outputs(reference_tif_dir)
+        test_nc = _collect_netcdf_outputs(test_tif_dir)
+        if ref_nc or test_nc:
+            sides = []
+            if test_nc:
+                sides.append(f"{test_strategy} ({len(test_nc)} .nc)")
+            if ref_nc:
+                sides.append(f"{reference_strategy} ({len(ref_nc)} .nc)")
+            print(f"  Skip: netCDF-Ausgabe statt GeoTIFF bei "
+                  f"{' und '.join(sides)}.")
+            print(f"  Der Pixelvergleich arbeitet auf GeoTIFF; fuer eine "
+                  f"Genauigkeitszahl muss der Lauf mit --save-format GTiff "
+                  f"wiederholt werden. Es wird KEIN Wert geschrieben, der "
+                  f"Lauf selbst bleibt gueltig (Laufzeiten sind gemessen).")
+            return None
         print(f"  Skip: keine gemeinsamen TIF-Dateien.")
         print(f"    {reference_strategy} TIFs: {sorted(reference_tifs)}")
         print(f"    {test_strategy} TIFs: {sorted(test_tifs)}")
@@ -6838,6 +6933,25 @@ def main() -> None:
                              "256x256 mit deflate, wahrscheinlichere Ursache "
                              "der beobachteten CDSE-Output-Korruption bei "
                              "full_pp. Nur zur Regressions-Diagnose.")
+    parser.add_argument("--save-format", default=DEFAULT_SAVE_FORMAT,
+                        choices=SAVE_FORMATS,
+                        help="Ausgabeformat des save_result-Knotens fuer "
+                             "onthefly und local_preprocessing. Default "
+                             "GTiff (unveraendertes Verhalten). netCDF "
+                             "umgeht den GTiff-Writer des Backends: bei "
+                             "onthefly/berlin/xlarge/merge_add scheiterten "
+                             "5 von 5 Laeufen reproduzierbar mit "
+                             "'openEO_2024-07-24Z_<id>.tif is corrupt / "
+                             "ZIPDecode: Decoding error at scanline 5248' - "
+                             "gleicher Termin, gleiche Scanline, "
+                             "verschiedene Executoren, waehrend "
+                             "local_preprocessing denselben Ausschnitt "
+                             "fehlerfrei verarbeitet. Der Wert landet in "
+                             "runs.save_format. Achtung: der Accuracy-Check "
+                             "vergleicht GeoTIFFs und ueberspringt "
+                             "netCDF-Ausgaben mit Meldung. Fuer "
+                             "full_preprocessing gilt weiterhin der eigene "
+                             "Schalter --fullpp-save-format.")
     parser.add_argument("--fullpp-save-format", default="GTiff",
                         choices=("GTiff", "netCDF"),
                         help="save_result Format des CDSE-Jobs bei "
@@ -6937,6 +7051,9 @@ def main() -> None:
     print(f"Region:     {args.region}  (EPSG:{REGIONS[args.region]['epsg']})")
     print(f"Extent:     {args.extent_size}  ({SIZE_KM[args.extent_size]:.0f} km Kantenlaenge)")
     print(f"Workflow:   {args.workflow}")
+    print(f"Save-Format: {args.save_format}  (onthefly + local_preprocessing"
+          + (f"  |  full_preprocessing: {args.fullpp_save_format}"
+             if "full_preprocessing" in strategies else "") + ")")
     print(f"Local-Resampling: {args.local_resampling}")
     if args.target_crs:
         print(f"Target-CRS: {_normalize_crs(args.target_crs)}  (Override)")
