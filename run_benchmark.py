@@ -1991,6 +1991,11 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
     # "MAP" fuer ESA_WORLDCOVER); bei load_stac (local_pp / full_pp)
     # ueberschreiben die Builder source=[], weil der vom Backend vergebene
     # Bandname nicht garantiert derselbe ist.
+    # ACHTUNG: die Ueberlappung will NUR die arithmetische Verrechnung
+    # (merge_add/subtract/...). Die beiden KATEGORIALEN Workflows setzen
+    # target unten auf den eigenen Klassen-Bandnamen zurueck - dort waere
+    # ein gemeinsames Label eine Verwechslungsquelle statt einer
+    # Voraussetzung (s. lc_overlay und lc_mask).
     pg["renamelabels1"] = {
         "arguments": {
             "data": {"from_node": "loadcollection2"},
@@ -2077,9 +2082,34 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         #
         # mask() maskiert dort, wo der Mask-Cube WAHR ist -> die Bedingung
         # ist "Klasse != Zielklasse".
+        #
+        # BANDNAME (Fix): der Zweitcube behaelt seinen eigenen Namen (MAP),
+        # er wird NICHT auf B04 umbenannt. Vorher trugen S2-Cube und
+        # Masken-Cube beide das Label "B04" - dieselbe Kollision, die
+        # lc_overlay schon einmal ein S2-Ergebnis beschert hat (s. dort).
+        # Belegt am Serverlauf: die lokale Referenz liefert 31,7 % gueltige
+        # Zellen (exakt der Flaechenanteil der Klasse 10), CDSE dagegen
+        # 99,6 % - die Maske greift dort praktisch nicht. Mit disjunkten
+        # Labels kann kein Backend die beiden Cubes ueber den Bandnamen
+        # verwechseln.
+        band = DATASETS[dataset]["band"]
+        pg["renamelabels1"]["arguments"]["target"] = [band]
+        # filter_bands auf das Klassenband, bevor die Bedingung gebaut wird:
+        # damit haengt eq(x, LC_MASK_CLASS) nachweisbar am Klassenband und
+        # nicht an "irgendeinem Band des Cubes". Zweiter Zweck: rename_labels
+        # laeuft bei load_stac mit source=[] und benennt dann nur das ERSTE
+        # Label um - traegt das STAC-Item wider Erwarten mehr als ein Band,
+        # bliebe der Rest unbenannt im Cube und der apply-Ausdruck liefe
+        # auch darueber. Gleiche Konstruktion wie filterbands_lc in
+        # lc_overlay, nur eine Stufe frueher.
+        pg["filterbands_lcmask"] = {
+            "arguments": {"data": {"from_node": "reducedimension_dem"},
+                          "bands": [band]},
+            "process_id": "filter_bands",
+        }
         pg["lcmaskbuild1"] = {
             "arguments": {
-                "data": {"from_node": "reducedimension_dem"},
+                "data": {"from_node": "filterbands_lcmask"},
                 "process": {
                     "process_graph": {
                         "eq1": {
