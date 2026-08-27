@@ -2107,9 +2107,37 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
                           "bands": [band]},
             "process_id": "filter_bands",
         }
+        # ZEITACHSE (Fix): der Masken-Cube darf keine t-Dimension mehr
+        # tragen. reduce_dimension(t, first) zieht die Achse auf EINEN
+        # Eintrag zusammen, entfernt sie aber nicht - der Cube behaelt
+        # SpaceTimeKeys.
+        #
+        # Belegt am Serverlauf run_id 1141: der Masken-Cube kam mit dem
+        # Partitioner SpaceTimeKey(0,0,1609459200000), also genau einem
+        # Zeitschluessel zum 01.01.2021 (Aufnahmedatum der WorldCover-
+        # Karte). Der S2-Cube wird mit ByDay geladen und hat 16
+        # Zeitschritte im Juli/August 2024. Zu keinem davon existiert eine
+        # Maskenkachel -> "Stage 27: load_collection: filter mask keys"
+        # liest 0.00 MB, und mask() entfernt nichts (99,6 % Uebereinstimmung
+        # mit dem UNMASKIERTEN S2 statt der erwarteten 31,7 %).
+        #
+        # Bei lc_overlay faellt das nicht auf: dort folgt merge_cubes, das
+        # die Zeitachsen aneinander ausrichtet. mask() macht das nicht.
+        #
+        # reduce_dimension BLEIBT davor stehen: drop_dimension verlangt
+        # GENAU EIN Label auf der Achse und wirft sonst
+        # DimensionLabelCountMismatch. Dass die WorldCover-Kollektion nur
+        # einen Zeitstempel liefert, ist eine Eigenschaft der Daten, keine
+        # Zusicherung des Graphen - die Reduktion stellt die Vorbedingung
+        # her, statt sie vorauszusetzen.
+        pg["dropdimension_lcmask"] = {
+            "arguments": {"data": {"from_node": "filterbands_lcmask"},
+                          "name": "t"},
+            "process_id": "drop_dimension",
+        }
         pg["lcmaskbuild1"] = {
             "arguments": {
-                "data": {"from_node": "filterbands_lcmask"},
+                "data": {"from_node": "dropdimension_lcmask"},
                 "process": {
                     "process_graph": {
                         "eq1": {
