@@ -439,8 +439,10 @@ def test_no_fallback_without_reference(tmp_root: Path) -> None:
                     if ln.strip().startswith(("Plan:", "run_id=", "Uebersprungen"))))
     assert "Plan: 3 nachzutragen, 2 uebersprungen" in out.stdout, plan
     for rid, _ in ohne.test_runs:
+        # Backend=... steht seit dem Backend-Filter mit in der Begruendung.
         assert (f"run_id={rid} (onthefly): keine local_reference fuer "
-                f"Region=berlin, Extent=large, Workflow=focal") in out.stdout, plan
+                f"Backend=cdse, Region=berlin, Extent=large, "
+                f"Workflow=focal") in out.stdout, plan
     # Jede geplante Referenz ist ein local_reference-Ordner.
     ref_lines = [ln for ln in plan.splitlines() if "Referenz:" in ln]
     assert ref_lines and all("_local_reference" in ln for ln in ref_lines), ref_lines

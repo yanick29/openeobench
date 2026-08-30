@@ -1962,7 +1962,8 @@ def _load_bench_template(region: str, extent_size: str = "medium") -> dict:
 def _build_workflow_pg(template: dict, workflow: str, region: str = None,
                        resolution: float = DEFAULT_RESOLUTION_M,
                        dataset: str = DEFAULT_DATASET,
-                       resampling: str = "nearest") -> dict:
+                       resampling: str = "nearest",
+                       second_cube_from_stac: bool = False) -> dict:
     """Baut den process_graph fuer den gewuenschten Workflow.
 
     Alle Workflows starten von der merge_add-Baseline (bench_onthefly_{region}.json)
@@ -1998,6 +1999,14 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
                  -> reducedimension_dem (t entfernen)
                  -> [optional resample-Kette]
                  -> merge1.cube2
+
+    second_cube_from_stac: der Zweitcube kommt per load_stac von unserem
+    Server (local_pp / full_pp) statt aus einer Backend-Kollektion. Seit
+    das STAC-Item die datacube-Extension traegt, deklariert es
+    ausdruecklich nur ['x','y','bands'] - eine Zeitachse gibt es dort also
+    gar nicht mehr, und jeder Knoten, der auf 't' arbeitet, wird vom
+    Backend abgelehnt. Ausgewertet wird das bisher NUR im lc_mask-Zweig
+    (s. dort); Default False = bisheriges Verhalten fuer alle anderen.
     """
     pg = copy.deepcopy(template["process_graph"])
     # Zweitraster-Kollektion setzen (No-Op bei dataset='dem').
@@ -2119,15 +2128,43 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         # bliebe der Rest unbenannt im Cube und der apply-Ausdruck liefe
         # auch darueber. Gleiche Konstruktion wie filterbands_lc in
         # lc_overlay, nur eine Stufe frueher.
+        # ZEITACHSE - haengt daran, WOHER der Zweitcube kommt:
+        #
+        #  load_collection (onthefly): ESA_WORLDCOVER hat eine echte
+        #  t-Dimension mit dem Aufnahmedatum 2021-01-01. Sie muss weg,
+        #  sonst traegt der Masken-Cube SpaceTimeKeys, die zu keinem
+        #  S2-Zeitschritt passen, und mask() entfernt nichts (99,6 %
+        #  Uebereinstimmung mit dem unmaskierten S2 statt 31,7 %).
+        #  Dafuer stehen reduce_dimension(t, first) und drop_dimension(t)
+        #  unveraendert weiter im Graphen.
+        #
+        #  load_stac (local_pp / full_pp): das Item deklariert seit der
+        #  datacube-Extension ausdruecklich cube:dimensions ohne t. Damit
+        #  ist die Achse nicht mehr "unsichtbar vorhanden", sondern
+        #  schlicht nicht da - und BEIDE Knoten brechen den Job ab:
+        #    reduce_dimension -> "[400] ProcessParameterInvalid: The value
+        #    passed for parameter 'dimension' in process 'reduce_dimension'
+        #    is invalid: Must be one of ['x','y','bands'] but got 't'."
+        #    (Lauf 1211, lc_mask, local_preprocessing)
+        #  drop_dimension faellt danach in dieselbe Falle: seine Exception
+        #  DimensionNotAvailable heisst wortwoertlich "A dimension with the
+        #  specified name does not exist". Vor der Extension liefen beide
+        #  ins Leere, ohne Fehler. Deshalb entfallen sie hier zusammen -
+        #  einen davon stehen zu lassen wuerde denselben Abbruch nur einen
+        #  Knoten spaeter erzeugen.
+        if second_cube_from_stac:
+            pg.pop("reducedimension_dem", None)
+            filter_source = "renamelabels1"
+        else:
+            filter_source = "reducedimension_dem"
         pg["filterbands_lcmask"] = {
-            "arguments": {"data": {"from_node": "reducedimension_dem"},
+            "arguments": {"data": {"from_node": filter_source},
                           "bands": [band]},
             "process_id": "filter_bands",
         }
-        # ZEITACHSE (Fix): der Masken-Cube darf keine t-Dimension mehr
-        # tragen. reduce_dimension(t, first) zieht die Achse auf EINEN
-        # Eintrag zusammen, entfernt sie aber nicht - der Cube behaelt
-        # SpaceTimeKeys.
+        # drop_dimension NUR im load_collection-Fall (s. Block oben):
+        # reduce_dimension(t, first) zieht die Achse dort auf EINEN Eintrag
+        # zusammen, entfernt sie aber nicht - der Cube behaelt SpaceTimeKeys.
         #
         # Belegt am Serverlauf run_id 1141: der Masken-Cube kam mit dem
         # Partitioner SpaceTimeKey(0,0,1609459200000), also genau einem
@@ -2141,20 +2178,23 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         # Bei lc_overlay faellt das nicht auf: dort folgt merge_cubes, das
         # die Zeitachsen aneinander ausrichtet. mask() macht das nicht.
         #
-        # reduce_dimension BLEIBT davor stehen: drop_dimension verlangt
-        # GENAU EIN Label auf der Achse und wirft sonst
-        # DimensionLabelCountMismatch. Dass die WorldCover-Kollektion nur
-        # einen Zeitstempel liefert, ist eine Eigenschaft der Daten, keine
-        # Zusicherung des Graphen - die Reduktion stellt die Vorbedingung
-        # her, statt sie vorauszusetzen.
-        pg["dropdimension_lcmask"] = {
-            "arguments": {"data": {"from_node": "filterbands_lcmask"},
-                          "name": "t"},
-            "process_id": "drop_dimension",
-        }
+        # reduce_dimension bleibt in diesem Fall davor stehen:
+        # drop_dimension verlangt GENAU EIN Label auf der Achse und wirft
+        # sonst DimensionLabelCountMismatch. Dass die WorldCover-Kollektion
+        # nur einen Zeitstempel liefert, ist eine Eigenschaft der Daten,
+        # keine Zusicherung des Graphen - die Reduktion stellt die
+        # Vorbedingung her, statt sie vorauszusetzen.
+        mask_input = "filterbands_lcmask"
+        if not second_cube_from_stac:
+            pg["dropdimension_lcmask"] = {
+                "arguments": {"data": {"from_node": "filterbands_lcmask"},
+                              "name": "t"},
+                "process_id": "drop_dimension",
+            }
+            mask_input = "dropdimension_lcmask"
         pg["lcmaskbuild1"] = {
             "arguments": {
-                "data": {"from_node": "dropdimension_lcmask"},
+                "data": {"from_node": mask_input},
                 "process": {
                     "process_graph": {
                         "eq1": {
@@ -2570,9 +2610,13 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     steuert - hier geht es um das, was das Backend zurueckschreibt.
     """
     template = _load_bench_template(region, extent_size)
+    # second_cube_from_stac: der Zweitcube kommt gleich per load_stac von
+    # unserem Server - dessen STAC-Item deklariert seit der
+    # datacube-Extension nur ['x','y','bands'].
     pg = _build_workflow_pg(template, workflow, region=region,
                             resolution=resolution, dataset=dataset,
-                            resampling=resampling)
+                            resampling=resampling,
+                            second_cube_from_stac=True)
 
     # loadcollection2 entfernen und durch loadstac1 ersetzen
     pg.pop("loadcollection2", None)
@@ -2883,9 +2927,12 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     workflow=resample seinen Umweg passend skaliert.
     """
     template = _load_bench_template(region, extent_size)
+    # s. build_local_pp_scenario: der Zweitcube (loadstac2) kommt aus
+    # unserem STAC-Item, das keine Zeitachse mehr deklariert.
     pg = _build_workflow_pg(template, workflow, region=region,
                             resolution=resolution, dataset=dataset,
-                            resampling=resampling)
+                            resampling=resampling,
+                            second_cube_from_stac=True)
 
     pg.pop("loadcollection1", None)
     pg.pop("loadcollection2", None)
