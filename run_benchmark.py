@@ -71,6 +71,23 @@ def _oidc_provider_for(api_url: str):
             return cfg["oidc_provider"]
     return None
 
+
+def _backend_for_url(api_url: str):
+    """Backend-Schluessel ('cdse'/'terrascope') zu einer URL, oder None.
+
+    Gleiche Netloc-Logik wie _oidc_provider_for, nur mit dem Namen als
+    Ergebnis. None heisst "keine der bekannten Backend-URLs" - das trifft
+    z.B. auf "local" zu, das local_reference in seine results.json im
+    Run-Root schreibt (dort laeuft kein Backend-Job).
+    """
+    host = urllib.parse.urlparse(api_url or "").netloc.lower()
+    if not host:
+        return None
+    for name, cfg in BACKENDS.items():
+        if urllib.parse.urlparse(cfg["url"]).netloc.lower() == host:
+            return name
+    return None
+
 ALL_STRATEGIES = ["onthefly", "local_preprocessing", "full_preprocessing"]
 # local_reference ist die unabhaengige lokale Ground-Truth-Pipeline ohne
 # CDSE-Workflow-Job - separat opt-in, weil sie nicht direkt mit CDSE-Strategien
@@ -2927,6 +2944,73 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     return target_path
 
 
+# datacube-Extension (https://github.com/stac-extensions/datacube).
+# Version bewusst als Konstante: pystac erkennt die Extension ueber das
+# PRAEFIX (has_extension splittet am Versionsteil und vergleicht
+# "https://stac-extensions.github.io/datacube/"), die genaue Version ist
+# fuer die Erkennung also unkritisch. v2.2.0 ist die Version, die das
+# lokal installierte pystac 1.14.3 als SCHEMA_URI fuehrt; der oeffentliche
+# openEO-Backend-Output (Earth-Engine-Treiber, s. test_output/) deklariert
+# v2.1.0 - beide matchen dieselbe Praefix-Pruefung.
+STAC_DATACUBE_EXTENSION = (
+    "https://stac-extensions.github.io/datacube/v2.2.0/schema.json")
+
+
+def _cube_dimensions(grid: dict, epsg: int, band: str) -> dict:
+    """cube:dimensions-Block der datacube-Extension aus dem Ziel-Grid.
+
+    Warum ueberhaupt: ohne diesen Block leiten Client und Backend die
+    Dimensionen des per load_stac geladenen Cubes je selbst ab - und
+    kommen zu verschiedenen Ergebnissen. Der openEO-Python-Client meldet
+    ['x','y','bands'], das Backend legt intern zusaetzlich eine Zeitachse
+    an; im Joblog steht dazu "Dry-run load_stac: failed to parse cube
+    metadata (No datacube extension found in STAC object)" und "No
+    cube:dimensions metadata". Bei lc_mask kostet das die ganze Maske:
+    der Masken-Cube bekommt einen Zeitschluessel, der zu keinem
+    S2-Zeitschritt passt, und mask() entfernt nichts (99,6 %
+    Uebereinstimmung mit dem unmaskierten S2 statt 31,7 %).
+    Belegstellen: openeo-python-client Issue #743, CDSE-Forum
+    "Load_stac time dimension hidden", stac-extensions/datacube.
+
+    KEINE Zeitdimension: das hochgeladene Raster traegt keine. Genau das
+    ist die Aussage, die der Block transportiert - die Extension erlaubt
+    ausdruecklich, eine Dimension wegzulassen, und nur so ist "es gibt
+    hier kein t" ueberhaupt sagbar.
+
+    Alle Werte kommen aus demselben Ziel-Grid, aus dem auch
+    proj:shape/proj:bbox/proj:transform gebaut werden (grid stammt je nach
+    Aufrufer aus _grid_from_dst_meta oder read_s2_grid) - hartkodiert ist
+    nichts.
+
+    step: Betrag der Zellgroesse aus dem Transform. transform.e ist bei
+    einem north-up-Raster negativ; extent wird als [min, max] aufsteigend
+    geschrieben, deshalb hier der positive Abstand. Die Schreibrichtung
+    steckt unveraendert in proj:transform.
+    """
+    t = grid["transform"]
+    left, bottom, right, top = grid["bounds"]
+    return {
+        "x": {
+            "type": "spatial",
+            "axis": "x",
+            "extent": [float(left), float(right)],
+            "reference_system": int(epsg),
+            "step": abs(float(t.a)),
+        },
+        "y": {
+            "type": "spatial",
+            "axis": "y",
+            "extent": [float(bottom), float(top)],
+            "reference_system": int(epsg),
+            "step": abs(float(t.e)),
+        },
+        "bands": {
+            "type": "bands",
+            "values": [band],
+        },
+    }
+
+
 def build_stac_item(region: str, asset_href: str, epsg: int,
                     item_id: str, extent: dict = None,
                     dem_format: str = "gtiff",
@@ -3083,14 +3167,26 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
         }
         asset.update(proj_fields)
         properties.update(proj_fields)
+        # Dimensionen explizit deklarieren, statt sie das Backend raten zu
+        # lassen (s. _cube_dimensions). Gilt fuer JEDEN Datensatz und jedes
+        # dem_format - der Block beschreibt das Ziel-Grid, nicht den
+        # Container, und ist damit von gtiff/netcdf/zarr unabhaengig.
+        properties["cube:dimensions"] = _cube_dimensions(
+            grid, epsg, DATASETS[dataset]["band"])
+
+    stac_extensions = [
+        "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+        "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+    ]
+    # Nur deklarieren, was auch drinsteht: ohne grid gibt es keinen
+    # cube:dimensions-Block, dann waere die Extension eine leere Zusage.
+    if "cube:dimensions" in properties:
+        stac_extensions.append(STAC_DATACUBE_EXTENSION)
 
     return {
         "type": "Feature",
         "stac_version": "1.0.0",
-        "stac_extensions": [
-            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
-            "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
-        ],
+        "stac_extensions": stac_extensions,
         "id": item_id,
         "geometry": {
             "type": "Polygon",
@@ -3164,14 +3260,27 @@ def build_dem_stac_collection(collection_id: str, collection_url: str,
     if "eo:bands" in asset:
         summaries["eo:bands"] = asset["eo:bands"]
 
+    stac_extensions = [
+        "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+        "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+        "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
+    ]
+    # cube:dimensions auch auf der Collection: liest ein Client die
+    # Dimensionen von der Collection statt vom Item (bei load_stac auf eine
+    # Collection-URL der Normalfall), faende er sonst wieder nichts. Bei
+    # der Ein-Item-Collection ist der Block wortgleich der des Items -
+    # Collection-Felder stehen laut Extension im Wurzelobjekt, nicht in
+    # summaries.
+    cube_dims = props.get("cube:dimensions")
+    extra = {}
+    if cube_dims:
+        stac_extensions.append(STAC_DATACUBE_EXTENSION)
+        extra["cube:dimensions"] = copy.deepcopy(cube_dims)
+
     return {
         "type": "Collection",
         "stac_version": "1.0.0",
-        "stac_extensions": [
-            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
-            "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
-            "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
-        ],
+        "stac_extensions": stac_extensions,
         "id": collection_id,
         "description": ("Locally reprojected DEM (zarr store) hosted on "
                         "Hetzner for openEO load_stac; single-item "
@@ -3181,6 +3290,7 @@ def build_dem_stac_collection(collection_id: str, collection_url: str,
             "spatial": {"bbox": [list(item["bbox"])]},
             "temporal": {"interval": [[dt, dt]]},
         },
+        **extra,
         "item_assets": {"data": item_assets_data},
         "summaries": summaries,
         "links": [
@@ -3246,14 +3356,34 @@ def build_dem_tiles_collection(collection_id: str, collection_url: str,
         links.append({"rel": "item", "href": item_url,
                       "type": "application/geo+json"})
 
+    stac_extensions = [
+        "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+        "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+        "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
+    ]
+    # cube:dimensions ueber ALLE Kacheln: die x/y-Extents werden vereinigt,
+    # Zellgroesse, CRS und Band sind kachel-invariant. Das ist kein
+    # Widerspruch zur Regel oben (proj:shape/bbox/transform bleiben in den
+    # Items) - dort steht die Geometrie EINER Kachel, hier die Ausdehnung
+    # des GESAMTEN Cubes, und genau die beschreibt die Extension.
+    dims = [it.get("properties", {}).get("cube:dimensions")
+            for it, _ in items_with_urls]
+    extra = {}
+    if all(dims):
+        xs = [d["x"]["extent"] for d in dims]
+        ys = [d["y"]["extent"] for d in dims]
+        union_dims = copy.deepcopy(dims[0])
+        union_dims["x"]["extent"] = [min(a for a, _ in xs),
+                                     max(b for _, b in xs)]
+        union_dims["y"]["extent"] = [min(a for a, _ in ys),
+                                     max(b for _, b in ys)]
+        stac_extensions.append(STAC_DATACUBE_EXTENSION)
+        extra["cube:dimensions"] = union_dims
+
     return {
         "type": "Collection",
         "stac_version": "1.0.0",
-        "stac_extensions": [
-            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
-            "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
-            "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
-        ],
+        "stac_extensions": stac_extensions,
         "id": collection_id,
         "description": ("Locally reprojected DEM split into "
                         f"{len(items_with_urls)} spatial tiles (one item "
@@ -3264,6 +3394,7 @@ def build_dem_tiles_collection(collection_id: str, collection_url: str,
             "spatial": {"bbox": [union_bbox]},
             "temporal": {"interval": [[dt, dt]]},
         },
+        **extra,
         "item_assets": {"data": item_assets_data},
         "summaries": summaries,
         "links": links,
@@ -3692,7 +3823,8 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
             save_format=save_format,
         )
         _write_run_meta(outdir, resolution, dataset=dataset,
-                        save_format=save_format)
+                        save_format=save_format,
+                        backend=_backend_for_url(args.api_url))
         results = run_openeo(args.api_url, str(scenario_path), str(outdir),
                              job_timeout=args.job_timeout)
         # Nur Diagnose: der Rueckgabewert wird bewusst NICHT ausgewertet.
@@ -4274,7 +4406,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             save_format=save_format,
         )
         _write_run_meta(base, resolution, dataset=dataset,
-                        save_format=save_format)
+                        save_format=save_format,
+                        backend=_backend_for_url(args.api_url))
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
                                    job_timeout=args.job_timeout)
         # Nur Diagnose: der Rueckgabewert wird bewusst NICHT ausgewertet.
@@ -4408,7 +4541,8 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
     dataset = _dataset_of(args)
     print(f"  Strategie: full_preprocessing  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
     print(f"  Output: {base}  |  {target_info}  |  Aufloesung: {resolution:g} m")
-    _write_run_meta(base, resolution, dataset=dataset)
+    _write_run_meta(base, resolution, dataset=dataset,
+                    backend=_backend_for_url(args.api_url))
 
     try:
         # Schritt 1: S2 von CDSE
@@ -5036,7 +5170,8 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
                 "dataset": dataset,
             },
         }, f, indent=2)
-    _write_run_meta(base, resolution, dataset=dataset)
+    _write_run_meta(base, resolution, dataset=dataset,
+                    backend=_backend_for_url(args.api_url))
 
     print(f"\n{'='*60}")
     print(f"  Strategie: local_reference  |  Region: {region}  |  Extent: {args.extent_size}  |  Workflow: {args.workflow}  |  Run {repeat_idx+1}/{args.repeat}  |  {run_type}")
@@ -5505,6 +5640,80 @@ def _folder_matches_dataset(folder: Path, dataset: str) -> bool:
     return detected == dataset
 
 
+_BACKEND_RESULTS_CANDIDATES = (
+    "results.json",                      # onthefly (Run-Root)
+    "step3_main/results.json",           # local_preprocessing
+    "step5_main/results.json",           # full_preprocessing
+    "step1_s2_download/results.json",    # local_reference: S2-Download
+    "step2_dem_download/results.json",   # local_reference: DEM-Download
+)
+
+
+def _detect_folder_backend(folder: Path):
+    """Backend eines Run-Ordners ('cdse'/'terrascope'), oder None.
+
+    Reihenfolge:
+      1. run_meta.json (von allen Runs seit dieser Aenderung geschrieben)
+      2. backend_url der results.json - die erste, die auf eine bekannte
+         Backend-URL zeigt.
+
+    Der zweite Weg ist der wichtige fuer BESTEHENDE Ordner: bei
+    local_reference steht im Run-Root "backend_url": "local" (dort laeuft
+    kein Backend-Job), die beiden Downloads laufen aber sehr wohl gegen
+    das Backend und run_openeo legt ihre results.json mit der echten URL
+    in step1_s2_download/ bzw. step2_dem_download/ ab. Damit sind auch
+    Referenzlaeufe, die vor dieser Aenderung entstanden sind, ohne
+    nachtraegliches Markieren zuzuordnen.
+
+    None heisst "unbekannt", nicht "cdse" - die Auswertung dazu macht
+    _folder_matches_backend.
+    """
+    meta_path = folder / RUN_META_FILENAME
+    if meta_path.is_file():
+        try:
+            val = json.loads(meta_path.read_text()).get("backend")
+            if val in BACKENDS:
+                return val
+        except Exception:
+            pass
+    for rel in _BACKEND_RESULTS_CANDIDATES:
+        cand = folder / rel
+        if not cand.is_file():
+            continue
+        try:
+            url = json.loads(cand.read_text()).get("backend_url")
+        except Exception:
+            continue
+        name = _backend_for_url(url)
+        if name:
+            return name
+    return None
+
+
+def _folder_matches_backend(folder: Path, backend: str) -> bool:
+    """Passt der Run-Ordner zum geforderten Backend?
+
+    Warum das ueberhaupt gefiltert werden muss: die Backends halten
+    unterschiedliche Bestaende vor. Fuer denselben Ausschnitt und Zeitraum
+    liefert CDSE 16 S2-Aufnahmen (Juli+August 2024), Terrascope 3 (nur
+    August); das Hoehenmodell traegt 2011-01-06 bzw. 2012-11-20, und die
+    Nodata-Konvention ist -32768 bzw. 32767. Ein Terrascope-Messlauf gegen
+    eine CDSE-Referenz gemessen ergibt Zahlen, die wie Ergebnisse aussehen,
+    aber nichts messen (Lauf 1170, workflow=subtract, onthefly: MAE 50,41 /
+    RMSE 1255,27 gegen CDSE-Referenz, waehrend dieselbe Konfiguration auf
+    CDSE bei MAE 1,697 liegt; workflow=focal: MAE 111605, RMSE 8,9 Mio.).
+
+    Unbekannt (weder run_meta.json noch eine results.json mit bekannter
+    Backend-URL) wird NUR fuer das historische Default-Backend akzeptiert -
+    dieselbe Regel wie bei Datensatz und Aufloesung. Alle Laeufe vor
+    --backend liefen gegen CDSE.
+    """
+    detected = _detect_folder_backend(folder)
+    if detected is None:
+        return backend == DEFAULT_BACKEND
+    return detected == backend
+
+
 def _folder_matches_resolution(folder: Path, resolution: float) -> bool:
     """Passt der Run-Ordner zur geforderten Zellgroesse?
 
@@ -5525,7 +5734,8 @@ def _find_latest_run_dir(base: str, suffix: str, region: str,
                           extent_size: str = None,
                           workflow: str = None,
                           resolution: float = None,
-                          dataset: str = None):
+                          dataset: str = None,
+                          backend: str = None):
     """Neuesten outputs/run_*_{suffix} fuer Region zurueckgeben, oder None.
 
     Wenn extent_size gesetzt ist, werden nur Ordner beruecksichtigt, deren
@@ -5537,6 +5747,9 @@ def _find_latest_run_dir(base: str, suffix: str, region: str,
     ohne das wuerde ein 60-m-Run gegen eine 10-m-Referenz verglichen.
     Wenn dataset gesetzt ist, muss zusaetzlich das Datensatz-Paar passen -
     sonst wuerde ein Landcover-Lauf gegen eine DEM-Referenz verglichen.
+    Wenn backend gesetzt ist, muss der Ordner vom SELBEN Backend stammen -
+    die Bestaende von CDSE und Terrascope unterscheiden sich in Zeitreihe,
+    DEM-Datum und Nodata-Konvention (s. _folder_matches_backend).
     """
     base_p = Path(base)
     if not base_p.is_dir():
@@ -5560,6 +5773,8 @@ def _find_latest_run_dir(base: str, suffix: str, region: str,
         if resolution is not None and not _folder_matches_resolution(d, resolution):
             continue
         if dataset is not None and not _folder_matches_dataset(d, dataset):
+            continue
+        if backend is not None and not _folder_matches_backend(d, backend):
             continue
         candidates.append(d)
     if not candidates:
@@ -6104,7 +6319,8 @@ def run_accuracy_check(output_base: str, region: str,
                        reference_strategy: str = "onthefly",
                        resolution: float = None,
                        dataset: str = None,
-                       test_dir=None, reference_dir=None):
+                       test_dir=None, reference_dir=None,
+                       backend: str = None):
     """Neuesten {reference_strategy}-Run vs neuesten {test_strategy}-Run vergleichen.
 
     reference_strategy: "onthefly" (Default) oder "local_reference" (lokale
@@ -6134,6 +6350,11 @@ def run_accuracy_check(output_base: str, region: str,
     wird dort PIXELGEWICHTET ueber alle Date-TIFs, nicht per Median: ein
     Median von Quoten ueber unterschiedlich grosse Bilder verzerrt.
 
+    backend: 'cdse'/'terrascope'. Referenz UND Test muessen vom selben
+    Backend stammen - die Bestaende unterscheiden sich (s.
+    _folder_matches_backend). Ohne Angabe wird nicht gefiltert, das
+    entspricht dem Verhalten vor --backend.
+
     test_dir / reference_dir: konkrete Run-Ordner statt der Auswahl per
     _find_latest_run_dir. Ohne sie bleibt alles wie bisher - "neuester
     passender Ordner". Mit ihnen laesst sich EIN BESTIMMTER Lauf pruefen,
@@ -6159,9 +6380,10 @@ def run_accuracy_check(output_base: str, region: str,
     workflow_info = f"  |  Workflow: {workflow}" if workflow else ""
     res_info = f"  |  Aufloesung: {resolution:g} m" if resolution else ""
     ds_info = f"  |  Datensatz: {dataset}" if dataset else ""
+    be_info = f"  |  Backend: {backend}" if backend else ""
     print(f"  Accuracy-Check vs '{reference_strategy}'"
           f"  |  Region: {region}{extent_info}{workflow_info}{res_info}"
-          f"{ds_info}")
+          f"{ds_info}{be_info}")
 
     ref_suffix, _ = _ACCURACY_LAYOUT[reference_strategy]
     reference_dir = (Path(reference_dir) if reference_dir is not None
@@ -6169,7 +6391,8 @@ def run_accuracy_check(output_base: str, region: str,
                                                extent_size=extent_size,
                                                workflow=workflow,
                                                resolution=resolution,
-                                               dataset=dataset))
+                                               dataset=dataset,
+                                               backend=backend))
 
     # test_strategy auto-detecten: bevorzugt full_pp, dann local_pp, dann
     # (wenn reference != onthefly) auch onthefly. reference selbst ist
@@ -6187,7 +6410,8 @@ def run_accuracy_check(output_base: str, region: str,
                                     extent_size=extent_size,
                                     workflow=workflow,
                                     resolution=resolution,
-                                    dataset=dataset) is not None:
+                                    dataset=dataset,
+                                    backend=backend) is not None:
                 test_strategy = cand
                 break
 
@@ -6205,7 +6429,8 @@ def run_accuracy_check(output_base: str, region: str,
                                           extent_size=extent_size,
                                           workflow=workflow,
                                           resolution=resolution,
-                                          dataset=dataset))
+                                          dataset=dataset,
+                                          backend=backend))
 
     if not reference_dir or not test_dir:
         miss = reference_strategy if not reference_dir else test_strategy
@@ -6213,8 +6438,9 @@ def run_accuracy_check(output_base: str, region: str,
         wf_msg = f" und workflow='{workflow}'" if workflow else ""
         res_msg = f" und Aufloesung {resolution:g} m" if resolution else ""
         ds_msg = f" und Datensatz '{dataset}'" if dataset else ""
+        be_msg = f" auf Backend '{backend}'" if backend else ""
         print(f"  Skip: kein {miss}-Run fuer Region '{region}'"
-              f"{extent_msg}{wf_msg}{res_msg}{ds_msg} gefunden.")
+              f"{extent_msg}{wf_msg}{res_msg}{ds_msg}{be_msg} gefunden.")
         if not reference_dir:
             # Bewusst KEIN Ausweichen auf eine andere Strategie: ein
             # Vergleich gegen z.B. onthefly liefert eine plausibel
@@ -6494,7 +6720,8 @@ def _reference_is_usable(run_dir: Path, workflow: str = None) -> bool:
     return False
 
 
-def _preflight_reference(args, strategies, dataset, resolution) -> None:
+def _preflight_reference(args, strategies, dataset, resolution,
+                         backend: str = None) -> None:
     """Vor dem ersten Lauf pruefen, ob --reference-check ueberhaupt
     aufgehen kann - sonst gar nicht erst starten.
 
@@ -6518,7 +6745,8 @@ def _preflight_reference(args, strategies, dataset, resolution) -> None:
                                    extent_size=args.extent_size,
                                    workflow=args.workflow,
                                    resolution=resolution,
-                                   dataset=dataset)
+                                   dataset=dataset,
+                                   backend=backend)
     if ref_dir is not None and _reference_is_usable(ref_dir, args.workflow):
         print(f"  [reference-check] Referenz vorhanden: {ref_dir.name}")
         return
@@ -6528,7 +6756,8 @@ def _preflight_reference(args, strategies, dataset, resolution) -> None:
                 f"(aufgeraeumt?)")
     cfg = (f"Region={args.region}, Extent={args.extent_size}, "
            f"Workflow={args.workflow}, Aufloesung={resolution:g} m, "
-           f"Datensatz={dataset}")
+           f"Datensatz={dataset}"
+           + (f", Backend={backend}" if backend else ""))
     print(f"\n{'!'*72}")
     print(f"  --reference-check gesetzt, aber kein brauchbarer "
           f"local_reference-Lauf: {why}.")
@@ -6547,7 +6776,8 @@ def _preflight_reference(args, strategies, dataset, resolution) -> None:
     print(f"  Erst die Referenz erzeugen:")
     print(f"    py run_benchmark.py --strategy local_reference "
           f"--region {args.region} --extent-size {args.extent_size} "
-          f"--workflow {args.workflow}")
+          f"--workflow {args.workflow}"
+          + (f" --backend {backend}" if backend else ""))
     print(f"  Oder --allow-missing-reference setzen, um bewusst ohne "
           f"Vergleich zu messen.")
     print(f"{'!'*72}")
@@ -7121,9 +7351,16 @@ def main() -> None:
     print(f"Repeats:    {args.repeat}")
     print(f"Run-Type:   {args.run_type}")
 
+    # Backend-Schluessel aus der tatsaechlich benutzten URL: --api-url hat
+    # Vorrang vor --backend, und nur die URL sagt, gegen welchen Bestand
+    # gemessen wird. Faellt zurueck auf --backend, falls jemand eine
+    # unbekannte URL setzt.
+    backend_key = _backend_for_url(args.api_url) or args.backend
+
     # Erst pruefen, dann messen: ohne local_reference kann --reference-check
     # nichts vergleichen, und die Laeufe waeren fuer die Auswertung wertlos.
-    _preflight_reference(args, strategies, dataset, _resolution_of(args))
+    _preflight_reference(args, strategies, dataset, _resolution_of(args),
+                         backend=backend_key)
 
     all_results = []
     runners = {
@@ -7185,7 +7422,8 @@ def main() -> None:
                                    resampling_method=args.local_resampling,
                                    reference_strategy="onthefly",
                                    resolution=_resolution_of(args),
-                                   dataset=dataset)
+                                   dataset=dataset,
+                                   backend=backend_key)
         else:
             # Kein eigener Lauf in dieser Session (z.B. --repeat 0):
             # unveraendert der neueste passende Ordner von der Platte.
@@ -7197,7 +7435,8 @@ def main() -> None:
                                resampling_method=args.local_resampling,
                                reference_strategy="onthefly",
                                resolution=_resolution_of(args),
-                               dataset=dataset)
+                               dataset=dataset,
+                               backend=backend_key)
 
     if args.reference_check:
         # Pro CDSE-Strategie (onthefly, local_pp, full_pp) ein Vergleich
@@ -7231,6 +7470,7 @@ def main() -> None:
                         reference_strategy="local_reference",
                         resolution=resolution,
                         dataset=dataset,
+                        backend=backend_key,
                     )
                 continue
             # Strategie lief nicht in dieser Session: wie bisher der
@@ -7240,7 +7480,8 @@ def main() -> None:
                                     extent_size=args.extent_size,
                                     workflow=args.workflow,
                                     resolution=resolution,
-                                    dataset=dataset) is None:
+                                    dataset=dataset,
+                                    backend=backend_key) is None:
                 continue
             any_run = True
             run_accuracy_check(
@@ -7253,6 +7494,7 @@ def main() -> None:
                 reference_strategy="local_reference",
                 resolution=resolution,
                 dataset=dataset,
+                backend=backend_key,
             )
         if not any_run:
             print("\n[--reference-check] Keine CDSE-Strategie-Runs gefunden "

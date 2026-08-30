@@ -237,21 +237,34 @@ def run_config(row: dict, run_dir: Path) -> dict:
     if resolution is None:
         resolution = rb._detect_folder_resolution(run_dir)
     dataset = row.get("dataset") or rb._detect_folder_dataset(run_dir)
+    # Backend: erst der Ordner (run_meta.json bzw. die backend_url der
+    # results.json - bei local_reference die der Download-Schritte), dann
+    # die runs-Spalte. Fehlt beides, gilt wie ueberall das historische
+    # Default: alles vor --backend lief gegen CDSE.
+    backend = (rb._detect_folder_backend(run_dir)
+               or rb._backend_for_url(row.get("backend_url"))
+               or rb.DEFAULT_BACKEND)
     return {
         "region": region,
         "extent_size": extent_size,
         "workflow": workflow,
         "resolution": float(resolution) if resolution is not None else None,
         "dataset": dataset or rb.DEFAULT_DATASET,
+        "backend": backend,
         "resampling": row.get("local_resampling") or None,
     }
 
 
 def _config_key(cfg: dict, strategy: str) -> tuple:
     """Vergleichsschluessel: gleiche Region, Extent, Workflow, Aufloesung,
-    Datensatz und Strategie."""
+    Datensatz, BACKEND und Strategie.
+
+    Das Backend gehoert dazu, weil CDSE und Terrascope verschiedene
+    Bestaende vorhalten - eine Geschwister-Zeile vom anderen Backend ist
+    keine Vorlage, sondern eine falsche Referenz.
+    """
     return (strategy, cfg["region"], cfg["extent_size"], cfg["workflow"],
-            cfg["resolution"], cfg["dataset"])
+            cfg["resolution"], cfg["dataset"], cfg["backend"])
 
 
 def _has_result_tifs(run_dir: Path, strategy: str, workflow: str) -> bool:
@@ -315,6 +328,11 @@ def sibling_reference_dir(acc_refs: list, cfg: dict, strategy: str,
             continue
         if not ref_dir.is_dir():
             continue
+        # Auch die Vorlage selbst muss vom richtigen Backend stammen:
+        # Geschwister-Zeilen koennen aus der Zeit VOR dem Backend-Filter
+        # stammen und auf eine Referenz des anderen Backends zeigen.
+        if not rb._folder_matches_backend(ref_dir, cfg["backend"]):
+            continue
         return ref_dir
     return None
 
@@ -342,7 +360,8 @@ def resolve_reference(output_dir: str, cfg: dict, preferred_dir: Path):
                                       extent_size=cfg["extent_size"],
                                       workflow=cfg["workflow"],
                                       resolution=cfg["resolution"],
-                                      dataset=cfg["dataset"])
+                                      dataset=cfg["dataset"],
+                                      backend=cfg["backend"])
     if ref_dir is not None and not _has_result_tifs(
             ref_dir, REFERENCE_STRATEGY, cfg["workflow"]):
         # Ordner da, aber ohne Raster (cleanup-after-accuracy): als Referenz
@@ -428,7 +447,8 @@ def _table_columns(conn, table: str) -> set:
 def fetch_runs(conn, run_cols: set) -> list:
     """Alle Runs als Dicts - nur mit den Spalten, die es in dieser DB gibt."""
     wanted = ["run_id", "crs_strategy", "status", "timestamp", "extent_size",
-              "workflow", "local_resampling", "resolution_m", "dataset"]
+              "workflow", "local_resampling", "resolution_m", "dataset",
+              "backend_url", "backend_name"]
     sel = [c for c in wanted if c in run_cols]
     rows = conn.execute(
         f"SELECT {', '.join(sel)} FROM runs ORDER BY run_id").fetchall()
@@ -553,8 +573,9 @@ def build_plan(conn, args, index: dict) -> list:
         ref_dir, dir_note = resolve_reference(args.output_dir, cfg, preferred)
         if ref_dir is None:
             entry.update(action="skip",
-                         reason=f"keine local_reference fuer Region="
-                                f"{cfg['region']}, Extent={cfg['extent_size']}, "
+                         reason=f"keine local_reference fuer Backend="
+                                f"{cfg['backend']}, Region={cfg['region']}, "
+                                f"Extent={cfg['extent_size']}, "
                                 f"Workflow={cfg['workflow']}, "
                                 f"Aufloesung={cfg['resolution']}, "
                                 f"Datensatz={cfg['dataset']} vorhanden"
@@ -590,7 +611,8 @@ def print_plan(plan: list, args) -> None:
               f"{rb._tif_dir(e['run_dir'], e['strategy']).name or '.'}/")
         print(f"    Referenz: {e['ref_dir'].name}  ({e['ref_strategy']}, "
               f"{e['ref_note']})")
-        print(f"    Konfig:   Region={cfg['region']}, Extent={cfg['extent_size']}, "
+        print(f"    Konfig:   Backend={cfg['backend']}, "
+              f"Region={cfg['region']}, Extent={cfg['extent_size']}, "
               f"Workflow={cfg['workflow']}, Aufloesung={cfg['resolution']}, "
               f"Datensatz={cfg['dataset']}, "
               f"Resampling={cfg['resampling'] or args.resampling}")
@@ -629,6 +651,7 @@ def execute_plan(plan: list, args) -> dict:
             resolution=cfg["resolution"],
             dataset=cfg["dataset"],
             reference_dir=e["ref_dir"],
+            backend=cfg["backend"],
         )
         if result is None:
             stats["fail"] += 1
