@@ -1,0 +1,1300 @@
+2026-08-07 11:24:49,906 - INFO - Created test directory: C:\Users\Yanic\Documents\openEO\openeobench\test_output
+2026-08-07 11:24:49,908 - INFO - ================================================================================
+2026-08-07 11:24:49,908 - INFO - Starting openEObench Command Tests
+2026-08-07 11:24:49,908 - INFO - ================================================================================
+2026-08-07 11:24:49,908 - INFO - 
+[1/21] Testing: Help
+2026-08-07 11:24:49,908 - INFO - ------------------------------------------------------------
+2026-08-07 11:24:49,908 - INFO - Testing command: Help
+2026-08-07 11:24:49,908 - INFO - Description: Display help information
+2026-08-07 11:24:49,909 - INFO - Command: python openeobench --help
+2026-08-07 11:24:50,947 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+usage: openeobench [-h]
+                   {service,run,run-summary,result-summary,service-summary,process,process-summary,visualize} ...
+
+openEObench - Benchmarking and testing tool for OpenEO endpoints
+
+positional arguments:
+  {service,run,run-summary,result-summary,service-summary,process,process-summary,visualize}
+                        Available commands
+    service             Check OpenEO service endpoints
+    run                 Run OpenEO scenarios on backends
+    run-summary         Generate timing summary from OpenEO run results
+    result-summary      Generate comprehensive summary statistics from OpenEO
+                        result outputs
+    service-summary     Generate statistics summary from service check results
+    process             Check OpenEO process availability and compliance
+    process-summary     Generate cross-backend process compliance summary
+    visualize           Create visual matrix and statistics of GeoTIFF results
+
+options:
+  -h, --help            show this help message and exit
+
+Examples:
+  # Check endpoints from CSV file (creates new timestamped file)
+  openeobench service -i endpoints.csv -o results/
+  
+  # Check endpoints and append to daily file
+  openeobench service -i endpoints.csv -o results/ --append
+  
+  # Check a single URL (creates new timestamped file)
+  openeobench service -u https://openeo.example.com/.well-known/openeo -o results/
+  
+  # Check a single URL and append to daily file
+  openeobench service -u https://openeo.example.com/.well-known/openeo -o results/ --append
+  
+  # Run OpenEO scenario on a backend
+  openeobench run --api-url https://openeo.example.com -i scenario.json -o results/
+  
+  # Generate timing summary from run results
+  openeobench run-summary -i output/folder1 output/folder2 -o timing_summary.csv
+  
+  # Generate file statistics summary from run results (CSV)
+  openeobench result-summary output/folder1 output/folder2 --output file_stats.csv
+  
+  # Generate file statistics summary from run results (Markdown)
+  openeobench result-summary output/folder1 output/folder2 --output file_stats.md --format md
+  
+  # Generate statistics summary from folder (CSV output)
+  openeobench service-summary -i results/ -o summary.csv
+  
+  # Generate statistics summary from folder (Markdown output)
+  openeobench service-summary -i results/ -o summary.md
+  
+  # Generate statistics from single CSV file
+  openeobench service-summary -i results/2025-06-26.csv -o summary.md
+  
+  # Check process compliance for single backend
+  openeobench process --url https://openeo.vito.be/openeo/1.1 -o process_results.csv
+  
+  # Check process compliance for multiple backends
+  openeobench process -i backends.csv -o process_compliance.csv
+  
+  # Generate process compliance summary (CSV)
+  openeobench process-summary process_results/ --output process_summary.csv --format csv
+  
+  # Generate process compliance summary (Markdown)  
+  openeobench process-summary process_results/ --output process_summary.md --format md
+  
+  # Create visual matrix of GeoTIFF results with format options
+  openeobench visualize output/folder1 output/folder2 --output visualization.md --format both
+  
+  # Create only PNG matrix
+  openeobench visualize output/folder1 output/folder2 --output visualization.png --format png
+  
+  # Create only markdown report
+  openeobench visualize output/folder1 output/folder2 --output visualization.md --format md
+  
+  # Visualize individual TIFF files
+  openeobench visualize path/to/file1.tif path/to/file2.tif --output comparison.md --format both
+  
+  # Mix folders and individual files
+  openeobench visualize output/folder1 path/to/specific_file.tif --output mixed_visualization.md
+        
+
+2026-08-07 11:24:50,947 - INFO - ------------------------------------------------------------
+2026-08-07 11:24:50,947 - INFO - 
+[2/21] Testing: Service check from CSV
+2026-08-07 11:24:50,947 - INFO - ------------------------------------------------------------
+2026-08-07 11:24:50,947 - INFO - Testing command: Service check from CSV
+2026-08-07 11:24:50,948 - INFO - Description: Check endpoints from CSV file
+2026-08-07 11:24:50,948 - INFO - Command: python openeobench service -i backends.csv -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\service_results
+2026-08-07 11:25:15,411 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Checking CopernicusDataSpace: https://openeo.dataspace.copernicus.eu/openeo/1.2
+Checking VITO: https://openeo.vito.be/openeo/1.2
+Checking EODC: https://openeo.eodc.eu/openeo/1.2.0
+Results saved to C:\Users\Yanic\Documents\openEO\openeobench\test_output\service_results\2026-08-07_11-24-51.csv
+
+2026-08-07 11:25:15,411 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:15,412 - INFO - 
+[3/21] Testing: Service check from CSV with append
+2026-08-07 11:25:15,412 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:15,412 - INFO - Testing command: Service check from CSV with append
+2026-08-07 11:25:15,412 - INFO - Description: Check endpoints from CSV file with append
+2026-08-07 11:25:15,412 - INFO - Command: python openeobench service -i backends.csv -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\service_results --append
+2026-08-07 11:25:38,494 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Checking CopernicusDataSpace: https://openeo.dataspace.copernicus.eu/openeo/1.2
+Checking VITO: https://openeo.vito.be/openeo/1.2
+Checking EODC: https://openeo.eodc.eu/openeo/1.2.0
+Results saved to C:\Users\Yanic\Documents\openEO\openeobench\test_output\service_results\2026-08-07.csv
+
+2026-08-07 11:25:38,494 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:38,494 - INFO - 
+[4/21] Testing: Service check single URL
+2026-08-07 11:25:38,494 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:38,494 - INFO - Testing command: Service check single URL
+2026-08-07 11:25:38,494 - INFO - Description: Check single URL
+2026-08-07 11:25:38,494 - INFO - Command: python openeobench service -u https://openeo.dataspace.copernicus.eu/.well-known/openeo -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\service_results
+2026-08-07 11:25:39,685 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Checking openeo.dataspace.copernicus.eu: https://openeo.dataspace.copernicus.eu/.well-known/openeo
+Results saved to C:\Users\Yanic\Documents\openEO\openeobench\test_output\service_results\2026-08-07_11-25-39_single.csv
+
+Results:
+URL: https://openeo.dataspace.copernicus.eu/.well-known/openeo
+Response Time: 481.67 ms
+HTTP Code: 200
+Errors: OK
+Body Size: 420 bytes
+
+2026-08-07 11:25:39,686 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:39,686 - INFO - 
+[5/21] Testing: Service check single URL with append
+2026-08-07 11:25:39,686 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:39,686 - INFO - Testing command: Service check single URL with append
+2026-08-07 11:25:39,686 - INFO - Description: Check single URL with append
+2026-08-07 11:25:39,686 - INFO - Command: python openeobench service -u https://openeo.dataspace.copernicus.eu/.well-known/openeo -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\service_results --append
+2026-08-07 11:25:40,849 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Checking openeo.dataspace.copernicus.eu: https://openeo.dataspace.copernicus.eu/.well-known/openeo
+Results saved to C:\Users\Yanic\Documents\openEO\openeobench\test_output\service_results\2026-08-07_single.csv
+
+Results:
+URL: https://openeo.dataspace.copernicus.eu/.well-known/openeo
+Response Time: 454.83 ms
+HTTP Code: 200
+Errors: OK
+Body Size: 420 bytes
+
+2026-08-07 11:25:40,849 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:40,849 - INFO - 
+[6/21] Testing: Service summary from folder (CSV)
+2026-08-07 11:25:40,849 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:40,849 - INFO - Testing command: Service summary from folder (CSV)
+2026-08-07 11:25:40,849 - INFO - Description: Generate service summary from outputs folder to CSV
+2026-08-07 11:25:40,850 - INFO - Command: python openeobench service-summary -i outputs/ -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\summary.csv
+2026-08-07 11:25:41,613 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Error processing file process_cdse.csv: 'URL'
+
+Generating statistics for period: None to None
+Writing results to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\summary.csv
+================
+URL: https://earthengine.openeo.org/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 142.99
+Response Time StdDev: 53.39
+Normalized Response Time: 1449.690341
+Normalized Time StdDev: 541.276717
+================
+URL: https://earthengine.openeo.org/v1.0
+Success Ratio: 100.00
+Average Response Time: 136.37
+Response Time StdDev: 26.29
+Normalized Response Time: 37.089441
+Normalized Time StdDev: 7.151075
+================
+URL: https://earthengine.openeo.org/v1.0/collections
+Success Ratio: 100.00
+Average Response Time: 716.20
+Response Time StdDev: 365.07
+Normalized Response Time: 0.284339
+Normalized Time StdDev: 0.144937
+================
+URL: https://earthengine.openeo.org/v1.0/processes
+Success Ratio: 100.00
+Average Response Time: 205.09
+Response Time StdDev: 74.93
+Normalized Response Time: 1.446801
+Normalized Time StdDev: 0.528581
+================
+URL: https://openeo.dataspace.copernicus.eu/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 235.08
+Response Time StdDev: 162.13
+Normalized Response Time: 757.001669
+Normalized Time StdDev: 522.075399
+================
+URL: https://openeo.dataspace.copernicus.eu/openeo
+Success Ratio: 99.72
+Average Response Time: 267.96
+Response Time StdDev: 302.22
+Normalized Response Time: 82.249824
+Normalized Time StdDev: 92.902189
+================
+URL: https://openeo.dataspace.copernicus.eu/openeo/collections
+Success Ratio: 100.00
+Average Response Time: 239.40
+Response Time StdDev: 267.53
+Normalized Response Time: 6.223914
+Normalized Time StdDev: 6.951605
+================
+URL: https://openeo.dataspace.copernicus.eu/openeo/processes
+Success Ratio: 100.00
+Average Response Time: 1213.99
+Response Time StdDev: 285.90
+Normalized Response Time: 1.062510
+Normalized Time StdDev: 0.250204
+================
+URL: https://openeo.eodc.eu/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 260.08
+Response Time StdDev: 235.31
+Normalized Response Time: 1416.602487
+Normalized Time StdDev: 1281.698389
+================
+URL: https://openeo.eodc.eu/openeo/1.2.0
+Success Ratio: 100.00
+Average Response Time: 201.56
+Response Time StdDev: 18.06
+Normalized Response Time: 61.943456
+Normalized Time StdDev: 5.551509
+================
+URL: https://openeo.eodc.eu/openeo/1.2.0/collections
+Success Ratio: 100.00
+Average Response Time: 560.68
+Response Time StdDev: 152.00
+Normalized Response Time: 3.653361
+Normalized Time StdDev: 0.990449
+================
+URL: https://openeo.eodc.eu/openeo/1.2.0/processes
+Success Ratio: 100.00
+Average Response Time: 419.84
+Response Time StdDev: 39.63
+Normalized Response Time: 1.247892
+Normalized Time StdDev: 0.117788
+================
+URL: https://openeo.eurac.edu
+Success Ratio: 100.00
+Average Response Time: 212.11
+Response Time StdDev: 12.17
+Normalized Response Time: 127.090962
+Normalized Time StdDev: 7.290654
+================
+URL: https://openeo.eurac.edu/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 219.81
+Response Time StdDev: 12.90
+Normalized Response Time: 2500.901214
+Normalized Time StdDev: 146.751396
+================
+URL: https://openeo.eurac.edu/collections
+Success Ratio: 100.00
+Average Response Time: 554.09
+Response Time StdDev: 52.59
+Normalized Response Time: 2.123268
+Normalized Time StdDev: 0.201510
+================
+URL: https://openeo.eurac.edu/processes
+Success Ratio: 100.00
+Average Response Time: 464.03
+Response Time StdDev: 72.01
+Normalized Response Time: 3.341238
+Normalized Time StdDev: 0.518521
+================
+URL: https://openeo.mundialis.de/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 118.28
+Response Time StdDev: 56.70
+Normalized Response Time: 1164.608136
+Normalized Time StdDev: 558.291169
+================
+URL: https://openeo.mundialis.de/api/v1.0
+Success Ratio: 100.00
+Average Response Time: 152.03
+Response Time StdDev: 118.15
+Normalized Response Time: 103.991232
+Normalized Time StdDev: 80.816248
+================
+URL: https://openeo.mundialis.de/api/v1.0/collections
+Success Ratio: 100.00
+Average Response Time: 109.61
+Response Time StdDev: 79.83
+Normalized Response Time: 7.643602
+Normalized Time StdDev: 5.566679
+================
+URL: https://openeo.mundialis.de/api/v1.0/processes
+Success Ratio: 100.00
+Average Response Time: 175.35
+Response Time StdDev: 103.21
+Normalized Response Time: 1.670098
+Normalized Time StdDev: 0.983072
+================
+URL: https://openeo.sentinel-hub.com/production
+Success Ratio: 100.00
+Average Response Time: 100.52
+Response Time StdDev: 10.69
+Normalized Response Time: 39.788013
+Normalized Time StdDev: 4.231455
+================
+URL: https://openeo.sentinel-hub.com/production/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 90.10
+Response Time StdDev: 20.92
+Normalized Response Time: 846.456662
+Normalized Time StdDev: 196.551418
+================
+URL: https://openeo.sentinel-hub.com/production/collections
+Success Ratio: 100.00
+Average Response Time: 125.20
+Response Time StdDev: 22.42
+Normalized Response Time: 0.912064
+Normalized Time StdDev: 0.163312
+================
+URL: https://openeo.sentinel-hub.com/production/processes
+Success Ratio: 100.00
+Average Response Time: 156.20
+Response Time StdDev: 25.91
+Normalized Response Time: 0.918542
+Normalized Time StdDev: 0.152377
+================
+URL: https://openeo.vito.be/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 102.99
+Response Time StdDev: 17.69
+Normalized Response Time: 390.593648
+Normalized Time StdDev: 67.086069
+================
+URL: https://openeo.vito.be/openeo
+Success Ratio: 100.00
+Average Response Time: 154.22
+Response Time StdDev: 19.79
+Normalized Response Time: 45.451155
+Normalized Time StdDev: 5.852450
+================
+URL: https://openeo.vito.be/openeo/collections
+Success Ratio: 100.00
+Average Response Time: 210.23
+Response Time StdDev: 120.60
+Normalized Response Time: 1.165301
+Normalized Time StdDev: 0.669234
+================
+URL: https://openeo.vito.be/openeo/processes
+Success Ratio: 100.00
+Average Response Time: 378.50
+Response Time StdDev: 136.98
+Normalized Response Time: 0.329311
+Normalized Time StdDev: 0.119175
+================
+URL: https://openeocloud.vito.be/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 130.97
+Response Time StdDev: 485.34
+Normalized Response Time: 470.565846
+Normalized Time StdDev: 1743.821953
+================
+URL: https://openeocloud.vito.be/openeo/1.2
+Success Ratio: 100.00
+Average Response Time: 464.94
+Response Time StdDev: 377.28
+Normalized Response Time: 125.620945
+Normalized Time StdDev: 101.934308
+================
+URL: https://openeocloud.vito.be/openeo/1.2/collections
+Success Ratio: 100.00
+Average Response Time: 249.01
+Response Time StdDev: 316.12
+Normalized Response Time: 0.840549
+Normalized Time StdDev: 1.428268
+================
+URL: https://openeocloud.vito.be/openeo/1.2/processes
+Success Ratio: 100.00
+Average Response Time: 248.54
+Response Time StdDev: 106.27
+Normalized Response Time: 0.747722
+Normalized Time StdDev: 0.319706
+================
+URL: https://umm-api.apps.eo4eu.eu/EO
+Success Ratio: 99.60
+Average Response Time: 207.58
+Response Time StdDev: 100.77
+Normalized Response Time: 93.886194
+Normalized Time StdDev: 45.577423
+================
+URL: https://umm-api.apps.eo4eu.eu/EO/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 228.68
+Response Time StdDev: 117.82
+Normalized Response Time: 2389.523865
+Normalized Time StdDev: 1231.074367
+================
+URL: https://umm-api.apps.eo4eu.eu/EO/collections
+Success Ratio: 100.00
+Average Response Time: 1374.08
+Response Time StdDev: 429.17
+Normalized Response Time: 0.545524
+Normalized Time StdDev: 0.170386
+================
+URL: https://umm-api.apps.eo4eu.eu/EO/processes
+Success Ratio: 100.00
+Average Response Time: 725.86
+Response Time StdDev: 213.91
+Normalized Response Time: 5.120466
+Normalized Time StdDev: 1.508979
+
+CSV file created successfully: C:\Users\Yanic\Documents\openEO\openeobench\test_output\summary.csv
+
+2026-08-07 11:25:41,613 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:41,613 - INFO - 
+[7/21] Testing: Service summary from folder (MD)
+2026-08-07 11:25:41,614 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:41,614 - INFO - Testing command: Service summary from folder (MD)
+2026-08-07 11:25:41,614 - INFO - Description: Generate service summary from outputs folder to Markdown
+2026-08-07 11:25:41,614 - INFO - Command: python openeobench service-summary -i outputs/ -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\summary.md
+2026-08-07 11:25:42,376 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Error processing file process_cdse.csv: 'URL'
+
+Generating statistics for period: None to None
+Writing results to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\summary.md
+================
+URL: https://earthengine.openeo.org/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 142.99
+Response Time StdDev: 53.39
+Normalized Response Time: 1449.690341
+Normalized Time StdDev: 541.276717
+================
+URL: https://earthengine.openeo.org/v1.0
+Success Ratio: 100.00
+Average Response Time: 136.37
+Response Time StdDev: 26.29
+Normalized Response Time: 37.089441
+Normalized Time StdDev: 7.151075
+================
+URL: https://earthengine.openeo.org/v1.0/collections
+Success Ratio: 100.00
+Average Response Time: 716.20
+Response Time StdDev: 365.07
+Normalized Response Time: 0.284339
+Normalized Time StdDev: 0.144937
+================
+URL: https://earthengine.openeo.org/v1.0/processes
+Success Ratio: 100.00
+Average Response Time: 205.09
+Response Time StdDev: 74.93
+Normalized Response Time: 1.446801
+Normalized Time StdDev: 0.528581
+================
+URL: https://openeo.dataspace.copernicus.eu/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 235.08
+Response Time StdDev: 162.13
+Normalized Response Time: 757.001669
+Normalized Time StdDev: 522.075399
+================
+URL: https://openeo.dataspace.copernicus.eu/openeo
+Success Ratio: 99.72
+Average Response Time: 267.96
+Response Time StdDev: 302.22
+Normalized Response Time: 82.249824
+Normalized Time StdDev: 92.902189
+================
+URL: https://openeo.dataspace.copernicus.eu/openeo/collections
+Success Ratio: 100.00
+Average Response Time: 239.40
+Response Time StdDev: 267.53
+Normalized Response Time: 6.223914
+Normalized Time StdDev: 6.951605
+================
+URL: https://openeo.dataspace.copernicus.eu/openeo/processes
+Success Ratio: 100.00
+Average Response Time: 1213.99
+Response Time StdDev: 285.90
+Normalized Response Time: 1.062510
+Normalized Time StdDev: 0.250204
+================
+URL: https://openeo.eodc.eu/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 260.08
+Response Time StdDev: 235.31
+Normalized Response Time: 1416.602487
+Normalized Time StdDev: 1281.698389
+================
+URL: https://openeo.eodc.eu/openeo/1.2.0
+Success Ratio: 100.00
+Average Response Time: 201.56
+Response Time StdDev: 18.06
+Normalized Response Time: 61.943456
+Normalized Time StdDev: 5.551509
+================
+URL: https://openeo.eodc.eu/openeo/1.2.0/collections
+Success Ratio: 100.00
+Average Response Time: 560.68
+Response Time StdDev: 152.00
+Normalized Response Time: 3.653361
+Normalized Time StdDev: 0.990449
+================
+URL: https://openeo.eodc.eu/openeo/1.2.0/processes
+Success Ratio: 100.00
+Average Response Time: 419.84
+Response Time StdDev: 39.63
+Normalized Response Time: 1.247892
+Normalized Time StdDev: 0.117788
+================
+URL: https://openeo.eurac.edu
+Success Ratio: 100.00
+Average Response Time: 212.11
+Response Time StdDev: 12.17
+Normalized Response Time: 127.090962
+Normalized Time StdDev: 7.290654
+================
+URL: https://openeo.eurac.edu/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 219.81
+Response Time StdDev: 12.90
+Normalized Response Time: 2500.901214
+Normalized Time StdDev: 146.751396
+================
+URL: https://openeo.eurac.edu/collections
+Success Ratio: 100.00
+Average Response Time: 554.09
+Response Time StdDev: 52.59
+Normalized Response Time: 2.123268
+Normalized Time StdDev: 0.201510
+================
+URL: https://openeo.eurac.edu/processes
+Success Ratio: 100.00
+Average Response Time: 464.03
+Response Time StdDev: 72.01
+Normalized Response Time: 3.341238
+Normalized Time StdDev: 0.518521
+================
+URL: https://openeo.mundialis.de/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 118.28
+Response Time StdDev: 56.70
+Normalized Response Time: 1164.608136
+Normalized Time StdDev: 558.291169
+================
+URL: https://openeo.mundialis.de/api/v1.0
+Success Ratio: 100.00
+Average Response Time: 152.03
+Response Time StdDev: 118.15
+Normalized Response Time: 103.991232
+Normalized Time StdDev: 80.816248
+================
+URL: https://openeo.mundialis.de/api/v1.0/collections
+Success Ratio: 100.00
+Average Response Time: 109.61
+Response Time StdDev: 79.83
+Normalized Response Time: 7.643602
+Normalized Time StdDev: 5.566679
+================
+URL: https://openeo.mundialis.de/api/v1.0/processes
+Success Ratio: 100.00
+Average Response Time: 175.35
+Response Time StdDev: 103.21
+Normalized Response Time: 1.670098
+Normalized Time StdDev: 0.983072
+================
+URL: https://openeo.sentinel-hub.com/production
+Success Ratio: 100.00
+Average Response Time: 100.52
+Response Time StdDev: 10.69
+Normalized Response Time: 39.788013
+Normalized Time StdDev: 4.231455
+================
+URL: https://openeo.sentinel-hub.com/production/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 90.10
+Response Time StdDev: 20.92
+Normalized Response Time: 846.456662
+Normalized Time StdDev: 196.551418
+================
+URL: https://openeo.sentinel-hub.com/production/collections
+Success Ratio: 100.00
+Average Response Time: 125.20
+Response Time StdDev: 22.42
+Normalized Response Time: 0.912064
+Normalized Time StdDev: 0.163312
+================
+URL: https://openeo.sentinel-hub.com/production/processes
+Success Ratio: 100.00
+Average Response Time: 156.20
+Response Time StdDev: 25.91
+Normalized Response Time: 0.918542
+Normalized Time StdDev: 0.152377
+================
+URL: https://openeo.vito.be/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 102.99
+Response Time StdDev: 17.69
+Normalized Response Time: 390.593648
+Normalized Time StdDev: 67.086069
+================
+URL: https://openeo.vito.be/openeo
+Success Ratio: 100.00
+Average Response Time: 154.22
+Response Time StdDev: 19.79
+Normalized Response Time: 45.451155
+Normalized Time StdDev: 5.852450
+================
+URL: https://openeo.vito.be/openeo/collections
+Success Ratio: 100.00
+Average Response Time: 210.23
+Response Time StdDev: 120.60
+Normalized Response Time: 1.165301
+Normalized Time StdDev: 0.669234
+================
+URL: https://openeo.vito.be/openeo/processes
+Success Ratio: 100.00
+Average Response Time: 378.50
+Response Time StdDev: 136.98
+Normalized Response Time: 0.329311
+Normalized Time StdDev: 0.119175
+================
+URL: https://openeocloud.vito.be/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 130.97
+Response Time StdDev: 485.34
+Normalized Response Time: 470.565846
+Normalized Time StdDev: 1743.821953
+================
+URL: https://openeocloud.vito.be/openeo/1.2
+Success Ratio: 100.00
+Average Response Time: 464.94
+Response Time StdDev: 377.28
+Normalized Response Time: 125.620945
+Normalized Time StdDev: 101.934308
+================
+URL: https://openeocloud.vito.be/openeo/1.2/collections
+Success Ratio: 100.00
+Average Response Time: 249.01
+Response Time StdDev: 316.12
+Normalized Response Time: 0.840549
+Normalized Time StdDev: 1.428268
+================
+URL: https://openeocloud.vito.be/openeo/1.2/processes
+Success Ratio: 100.00
+Average Response Time: 248.54
+Response Time StdDev: 106.27
+Normalized Response Time: 0.747722
+Normalized Time StdDev: 0.319706
+================
+URL: https://umm-api.apps.eo4eu.eu/EO
+Success Ratio: 99.60
+Average Response Time: 207.58
+Response Time StdDev: 100.77
+Normalized Response Time: 93.886194
+Normalized Time StdDev: 45.577423
+================
+URL: https://umm-api.apps.eo4eu.eu/EO/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 228.68
+Response Time StdDev: 117.82
+Normalized Response Time: 2389.523865
+Normalized Time StdDev: 1231.074367
+================
+URL: https://umm-api.apps.eo4eu.eu/EO/collections
+Success Ratio: 100.00
+Average Response Time: 1374.08
+Response Time StdDev: 429.17
+Normalized Response Time: 0.545524
+Normalized Time StdDev: 0.170386
+================
+URL: https://umm-api.apps.eo4eu.eu/EO/processes
+Success Ratio: 100.00
+Average Response Time: 725.86
+Response Time StdDev: 213.91
+Normalized Response Time: 5.120466
+Normalized Time StdDev: 1.508979
+
+CSV file created successfully: C:\Users\Yanic\Documents\openEO\openeobench\test_output\summary.md
+
+2026-08-07 11:25:42,376 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:42,377 - INFO - 
+[8/21] Testing: Service summary from single CSV
+2026-08-07 11:25:42,377 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:42,377 - INFO - Using alternative file outputs/2025-06-21.csv for command Service summary from single CSV
+2026-08-07 11:25:42,377 - INFO - Testing command: Service summary from single CSV
+2026-08-07 11:25:42,377 - INFO - Description: Generate service summary from single CSV file
+2026-08-07 11:25:42,377 - INFO - Command: python openeobench service-summary -i outputs/2025-06-21.csv -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\single_summary.md
+2026-08-07 11:25:43,056 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+
+Generating statistics from: outputs/2025-06-21.csv
+Writing results to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\single_summary.md
+================
+URL: https://earthengine.openeo.org/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 143.38
+Response Time StdDev: 18.04
+Normalized Response Time: 1453.667214
+Normalized Time StdDev: 182.902761
+================
+URL: https://earthengine.openeo.org/v1.0
+Success Ratio: 100.00
+Average Response Time: 136.33
+Response Time StdDev: 17.25
+Normalized Response Time: 37.077989
+Normalized Time StdDev: 4.691096
+================
+URL: https://earthengine.openeo.org/v1.0/collections
+Success Ratio: 100.00
+Average Response Time: 732.23
+Response Time StdDev: 434.66
+Normalized Response Time: 0.290701
+Normalized Time StdDev: 0.172565
+================
+URL: https://earthengine.openeo.org/v1.0/processes
+Success Ratio: 100.00
+Average Response Time: 193.14
+Response Time StdDev: 18.62
+Normalized Response Time: 1.362511
+Normalized Time StdDev: 0.131379
+================
+URL: https://openeo.dataspace.copernicus.eu/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 225.67
+Response Time StdDev: 32.91
+Normalized Response Time: 726.676586
+Normalized Time StdDev: 105.985449
+================
+URL: https://openeo.dataspace.copernicus.eu/openeo
+Success Ratio: 100.00
+Average Response Time: 246.99
+Response Time StdDev: 133.51
+Normalized Response Time: 75.928258
+Normalized Time StdDev: 41.043537
+================
+URL: https://openeo.dataspace.copernicus.eu/openeo/collections
+Success Ratio: 100.00
+Average Response Time: 231.05
+Response Time StdDev: 45.35
+Normalized Response Time: 6.004068
+Normalized Time StdDev: 1.178538
+================
+URL: https://openeo.dataspace.copernicus.eu/openeo/processes
+Success Ratio: 100.00
+Average Response Time: 1259.12
+Response Time StdDev: 259.04
+Normalized Response Time: 1.101648
+Normalized Time StdDev: 0.226647
+================
+URL: https://openeo.eodc.eu/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 234.49
+Response Time StdDev: 38.48
+Normalized Response Time: 1277.208511
+Normalized Time StdDev: 209.618143
+================
+URL: https://openeo.eodc.eu/openeo/1.2.0
+Success Ratio: 100.00
+Average Response Time: 204.74
+Response Time StdDev: 24.94
+Normalized Response Time: 62.920528
+Normalized Time StdDev: 7.665378
+================
+URL: https://openeo.eodc.eu/openeo/1.2.0/collections
+Success Ratio: 100.00
+Average Response Time: 559.80
+Response Time StdDev: 206.68
+Normalized Response Time: 3.647609
+Normalized Time StdDev: 1.346699
+================
+URL: https://openeo.eodc.eu/openeo/1.2.0/processes
+Success Ratio: 100.00
+Average Response Time: 422.85
+Response Time StdDev: 33.70
+Normalized Response Time: 1.256844
+Normalized Time StdDev: 0.100177
+================
+URL: https://openeo.eurac.edu
+Success Ratio: 100.00
+Average Response Time: 214.69
+Response Time StdDev: 8.34
+Normalized Response Time: 128.638342
+Normalized Time StdDev: 4.996136
+================
+URL: https://openeo.eurac.edu/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 219.02
+Response Time StdDev: 10.30
+Normalized Response Time: 2491.912127
+Normalized Time StdDev: 117.236676
+================
+URL: https://openeo.eurac.edu/collections
+Success Ratio: 100.00
+Average Response Time: 518.72
+Response Time StdDev: 14.31
+Normalized Response Time: 1.987737
+Normalized Time StdDev: 0.054819
+================
+URL: https://openeo.eurac.edu/processes
+Success Ratio: 100.00
+Average Response Time: 441.22
+Response Time StdDev: 10.16
+Normalized Response Time: 3.176993
+Normalized Time StdDev: 0.073179
+================
+URL: https://openeo.mundialis.de/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 113.14
+Response Time StdDev: 21.81
+Normalized Response Time: 1114.000879
+Normalized Time StdDev: 214.735676
+================
+URL: https://openeo.mundialis.de/api/v1.0
+Success Ratio: 100.00
+Average Response Time: 163.25
+Response Time StdDev: 149.14
+Normalized Response Time: 111.665983
+Normalized Time StdDev: 102.013672
+================
+URL: https://openeo.mundialis.de/api/v1.0/collections
+Success Ratio: 100.00
+Average Response Time: 107.61
+Response Time StdDev: 25.82
+Normalized Response Time: 7.504067
+Normalized Time StdDev: 1.800826
+================
+URL: https://openeo.mundialis.de/api/v1.0/processes
+Success Ratio: 100.00
+Average Response Time: 170.40
+Response Time StdDev: 20.77
+Normalized Response Time: 1.623000
+Normalized Time StdDev: 0.197801
+================
+URL: https://openeo.sentinel-hub.com/production
+Success Ratio: 100.00
+Average Response Time: 102.47
+Response Time StdDev: 8.32
+Normalized Response Time: 40.561347
+Normalized Time StdDev: 3.291626
+================
+URL: https://openeo.sentinel-hub.com/production/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 87.51
+Response Time StdDev: 13.78
+Normalized Response Time: 822.122359
+Normalized Time StdDev: 129.453092
+================
+URL: https://openeo.sentinel-hub.com/production/collections
+Success Ratio: 100.00
+Average Response Time: 124.73
+Response Time StdDev: 10.12
+Normalized Response Time: 0.908606
+Normalized Time StdDev: 0.073693
+================
+URL: https://openeo.sentinel-hub.com/production/processes
+Success Ratio: 100.00
+Average Response Time: 157.76
+Response Time StdDev: 17.06
+Normalized Response Time: 0.927708
+Normalized Time StdDev: 0.100337
+================
+URL: https://openeo.vito.be/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 120.53
+Response Time StdDev: 31.73
+Normalized Response Time: 457.133376
+Normalized Time StdDev: 120.338942
+================
+URL: https://openeo.vito.be/openeo
+Success Ratio: 100.00
+Average Response Time: 159.35
+Response Time StdDev: 30.65
+Normalized Response Time: 47.036824
+Normalized Time StdDev: 9.048778
+================
+URL: https://openeo.vito.be/openeo/collections
+Success Ratio: 100.00
+Average Response Time: 237.69
+Response Time StdDev: 133.03
+Normalized Response Time: 1.318069
+Normalized Time StdDev: 0.737735
+================
+URL: https://openeo.vito.be/openeo/processes
+Success Ratio: 100.00
+Average Response Time: 441.11
+Response Time StdDev: 166.25
+Normalized Response Time: 0.383782
+Normalized Time StdDev: 0.144641
+================
+URL: https://openeocloud.vito.be/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 112.77
+Response Time StdDev: 23.41
+Normalized Response Time: 405.180632
+Normalized Time StdDev: 84.124293
+================
+URL: https://openeocloud.vito.be/openeo/1.2
+Success Ratio: 100.00
+Average Response Time: 458.06
+Response Time StdDev: 253.66
+Normalized Response Time: 123.760223
+Normalized Time StdDev: 68.536355
+================
+URL: https://openeocloud.vito.be/openeo/1.2/collections
+Success Ratio: 100.00
+Average Response Time: 268.85
+Response Time StdDev: 221.10
+Normalized Response Time: 0.884146
+Normalized Time StdDev: 0.727127
+================
+URL: https://openeocloud.vito.be/openeo/1.2/processes
+Success Ratio: 100.00
+Average Response Time: 242.70
+Response Time StdDev: 74.13
+Normalized Response Time: 0.730137
+Normalized Time StdDev: 0.223019
+================
+URL: https://umm-api.apps.eo4eu.eu/EO
+Success Ratio: 100.00
+Average Response Time: 187.53
+Response Time StdDev: 10.02
+Normalized Response Time: 84.818092
+Normalized Time StdDev: 4.531333
+================
+URL: https://umm-api.apps.eo4eu.eu/EO/.well-known/openeo
+Success Ratio: 100.00
+Average Response Time: 232.64
+Response Time StdDev: 175.32
+Normalized Response Time: 2430.869271
+Normalized Time StdDev: 1831.947965
+================
+URL: https://umm-api.apps.eo4eu.eu/EO/collections
+Success Ratio: 100.00
+Average Response Time: 1274.21
+Response Time StdDev: 289.78
+Normalized Response Time: 0.505872
+Normalized Time StdDev: 0.115044
+================
+URL: https://umm-api.apps.eo4eu.eu/EO/processes
+Success Ratio: 100.00
+Average Response Time: 627.43
+Response Time StdDev: 110.95
+Normalized Response Time: 4.426121
+Normalized Time StdDev: 0.782702
+
+Markdown file created successfully: C:\Users\Yanic\Documents\openEO\openeobench\test_output\single_summary.md
+
+2026-08-07 11:25:43,056 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:43,056 - INFO - 
+[9/21] Testing: Run scenario (help)
+2026-08-07 11:25:43,056 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:43,056 - INFO - Testing command: Run scenario (help)
+2026-08-07 11:25:43,056 - INFO - Description: Display run command help
+2026-08-07 11:25:43,057 - INFO - Command: python openeobench run --help
+2026-08-07 11:25:43,708 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+usage: openeobench run [-h] --api-url API_URL -i INPUT [-o OUTPUT]
+
+options:
+  -h, --help           show this help message and exit
+  --api-url API_URL    URL of the OpenEO backend
+  -i, --input INPUT    Path to the process graph JSON file (scenario)
+  -o, --output OUTPUT  Output directory for results (optional)
+
+2026-08-07 11:25:43,709 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:43,709 - INFO - 
+[10/21] Testing: Run scenario
+2026-08-07 11:25:43,709 - INFO - ------------------------------------------------------------
+2026-08-07 11:25:43,709 - INFO - Testing command: Run scenario
+2026-08-07 11:25:43,709 - INFO - Description: Run OpenEO scenario on Copernicus Data Space backend
+2026-08-07 11:25:43,709 - INFO - Command: python openeobench run --api-url https://openeo.dataspace.copernicus.eu -i scenarios/bratislava_10km_2018_openeo_platform.json -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\run_results
+2026-08-07 11:30:43,753 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:43,753 - INFO - 
+[11/21] Testing: Run summary
+2026-08-07 11:30:43,753 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:43,757 - INFO - Testing command: Run summary
+2026-08-07 11:30:43,757 - INFO - Description: Generate timing summary from run results
+2026-08-07 11:30:43,757 - INFO - Command: python openeobench run-summary -i C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1 C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2 -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\timing_summary.csv
+2026-08-07 11:30:44,551 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Found 1 geospatial files in C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1
+  - result_mock_output1.tif
+Found 1 geospatial files in C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2
+  - result_mock_output2.tif
+Found 2 results files
+Run summary saved to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\timing_summary.csv
+
+2026-08-07 11:30:44,551 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:44,551 - INFO - 
+[12/21] Testing: Result summary (CSV)
+2026-08-07 11:30:44,551 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:44,554 - INFO - Testing command: Result summary (CSV)
+2026-08-07 11:30:44,555 - INFO - Description: Generate file statistics summary (CSV)
+2026-08-07 11:30:44,555 - INFO - Command: python openeobench result-summary C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1 C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2 --output C:\Users\Yanic\Documents\openEO\openeobench\test_output\file_stats.csv
+2026-08-07 11:30:45,238 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Found 2 results files
+File statistics summary saved to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\file_stats.csv
+
+2026-08-07 11:30:45,238 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:45,238 - INFO - 
+[13/21] Testing: Result summary (MD)
+2026-08-07 11:30:45,238 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:45,242 - INFO - Testing command: Result summary (MD)
+2026-08-07 11:30:45,242 - INFO - Description: Generate file statistics summary (Markdown)
+2026-08-07 11:30:45,242 - INFO - Command: python openeobench result-summary C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1 C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2 --output C:\Users\Yanic\Documents\openEO\openeobench\test_output\file_stats.md --format md
+2026-08-07 11:30:45,933 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Found 2 results files
+File statistics summary saved to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\file_stats.md
+
+2026-08-07 11:30:45,933 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:45,933 - INFO - 
+[14/21] Testing: Process compliance single backend
+2026-08-07 11:30:45,933 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:45,934 - INFO - Testing command: Process compliance single backend
+2026-08-07 11:30:45,934 - INFO - Description: Check process compliance for single backend
+2026-08-07 11:30:45,934 - INFO - Command: python openeobench process --url https://openeo.vito.be/openeo/1.1 -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\process_results.csv
+2026-08-07 11:30:51,445 - ERROR - STDERR:
+Traceback (most recent call last):
+  File "C:\Users\Yanic\Documents\openEO\openeobench\openeobench", line 394, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "C:\Users\Yanic\Documents\openEO\openeobench\openeobench", line 337, in main
+    process_single_backend(backend_name, args.url, args.output)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Yanic\Documents\openEO\openeobench\process_checker.py", line 479, in process_single_backend
+    print(f"\u2713 {backend_name}: {result['total_processes']} processes available")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Yanic\AppData\Local\Python\pythoncore-3.14-64\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2713' in position 0: character maps to <undefined>
+
+2026-08-07 11:30:51,445 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+
+2026-08-07 11:30:51,446 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:51,446 - INFO - 
+[15/21] Testing: Process compliance multiple backends
+2026-08-07 11:30:51,446 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:51,446 - INFO - Testing command: Process compliance multiple backends
+2026-08-07 11:30:51,446 - INFO - Description: Check process compliance for multiple backends
+2026-08-07 11:30:51,446 - INFO - Command: python openeobench process -i backends.csv -o C:\Users\Yanic\Documents\openEO\openeobench\test_output\process_compliance.csv
+2026-08-07 11:30:53,036 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Checking CopernicusDataSpace...
+Error reading CSV file: 'charmap' codec can't encode character '\u2713' in position 0: character maps to <undefined>
+
+2026-08-07 11:30:53,036 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:53,036 - INFO - 
+[16/21] Testing: Process summary (CSV)
+2026-08-07 11:30:53,036 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:53,040 - INFO - Testing command: Process summary (CSV)
+2026-08-07 11:30:53,040 - INFO - Description: Generate process compliance summary (CSV)
+2026-08-07 11:30:53,040 - INFO - Command: python openeobench process-summary C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_process_results --output C:\Users\Yanic\Documents\openEO\openeobench\test_output\process_summary.csv --format csv
+2026-08-07 11:30:53,720 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Process summary saved to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\process_summary.csv
+
+2026-08-07 11:30:53,720 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:53,720 - INFO - 
+[17/21] Testing: Process summary (MD)
+2026-08-07 11:30:53,720 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:53,723 - INFO - Testing command: Process summary (MD)
+2026-08-07 11:30:53,724 - INFO - Description: Generate process compliance summary (Markdown)
+2026-08-07 11:30:53,724 - INFO - Command: python openeobench process-summary C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_process_results --output C:\Users\Yanic\Documents\openEO\openeobench\test_output\process_summary.md --format md
+2026-08-07 11:30:54,400 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+Process summary saved to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\process_summary.md
+
+2026-08-07 11:30:54,401 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:54,401 - INFO - 
+[18/21] Testing: Visualize (help)
+2026-08-07 11:30:54,401 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:54,401 - INFO - Testing command: Visualize (help)
+2026-08-07 11:30:54,401 - INFO - Description: Display visualize command help
+2026-08-07 11:30:54,401 - INFO - Command: python openeobench visualize --help
+2026-08-07 11:30:55,096 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+usage: openeobench visualize [-h] --output OUTPUT [--format {md,png,both}]
+                             [--png-single]
+                             input [input ...]
+
+positional arguments:
+  input                 Input folders, files, or patterns to visualize
+                        (supports .tif/.tiff files)
+
+options:
+  -h, --help            show this help message and exit
+  --output OUTPUT       Output file path
+  --format {md,png,both}
+                        Output format: md (markdown), png (PNG matrix), or
+                        both (default: both)
+  --png-single          Create individual PNG files for each image
+
+2026-08-07 11:30:55,097 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:55,097 - INFO - 
+[19/21] Testing: Visualize folders with markdown format
+2026-08-07 11:30:55,097 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:55,100 - INFO - Testing command: Visualize folders with markdown format
+2026-08-07 11:30:55,100 - INFO - Description: Create visual matrix from folders (Markdown)
+2026-08-07 11:30:55,100 - INFO - Command: python openeobench visualize C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1 C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2 --output C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization.md --format md
+2026-08-07 11:30:56,157 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+2026-08-07 11:30:55,691 - scenario_runner - INFO - Visualizing results for patterns: ['C:\\Users\\Yanic\\Documents\\openEO\\openeobench\\test_output\\mock_output1', 'C:\\Users\\Yanic\\Documents\\openEO\\openeobench\\test_output\\mock_output2'], output: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization.md
+2026-08-07 11:30:55,691 - scenario_runner - ERROR - GDAL is required for visualization but not available. Trying to continue with limited functionality.
+2026-08-07 11:30:55,693 - scenario_runner - WARNING - gdal_translate command not found or timed out, some visualization methods will be unavailable.
+2026-08-07 11:30:55,693 - scenario_runner - WARNING - matplotlib not available, falling back to simpler visualization methods.
+2026-08-07 11:30:55,693 - scenario_runner - WARNING - PIL not available, some fallback visualization methods will be limited.
+2026-08-07 11:30:55,693 - scenario_runner - WARNING - gdal_array not available, using simplified thumbnail generation.
+2026-08-07 11:30:55,693 - scenario_runner - ERROR - No visualization methods available! Will attempt to continue with minimal functionality.
+2026-08-07 11:30:55,693 - scenario_runner - INFO - Searching for pattern: output\*C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1*
+2026-08-07 11:30:55,693 - scenario_runner - INFO - Searching for pattern: output\*C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2*
+2026-08-07 11:30:55,694 - scenario_runner - INFO - Matched 2 folders and 0 individual files.
+2026-08-07 11:30:55,694 - scenario_runner - INFO - Found folders: mock_output1, mock_output2
+2026-08-07 11:30:55,959 - scenario_runner - INFO - Found 1 GeoTIFF/raster files in mock_output1
+2026-08-07 11:30:56,066 - scenario_runner - INFO - Found 1 GeoTIFF/raster files in mock_output2
+2026-08-07 11:30:56,066 - scenario_runner - INFO - Processing file 1 of 2
+2026-08-07 11:30:56,066 - scenario_runner - ERROR - No visualization libraries available
+2026-08-07 11:30:56,070 - scenario_runner - WARNING - Error extracting statistics from C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1\result_mock_output1.tif: [WinError 2] Das System kann die angegebene Datei nicht finden
+2026-08-07 11:30:56,070 - scenario_runner - INFO - Successfully processed result_mock_output1.tif from mock_output1
+2026-08-07 11:30:56,070 - scenario_runner - INFO - Processing file 2 of 2
+2026-08-07 11:30:56,070 - scenario_runner - ERROR - No visualization libraries available
+2026-08-07 11:30:56,072 - scenario_runner - WARNING - Error extracting statistics from C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2\result_mock_output2.tif: [WinError 2] Das System kann die angegebene Datei nicht finden
+2026-08-07 11:30:56,072 - scenario_runner - INFO - Successfully processed result_mock_output2.tif from mock_output2
+2026-08-07 11:30:56,073 - scenario_runner - INFO - Markdown visualization saved to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization.md
+2026-08-07 11:30:56,073 - scenario_runner - INFO - Folder mock_output1: 1 files, 1 with stats, 0 with thumbnails
+2026-08-07 11:30:56,073 - scenario_runner - INFO - Folder mock_output2: 1 files, 1 with stats, 0 with thumbnails
+2026-08-07 11:30:56,075 - scenario_runner - INFO - Visualization complete. Created: Markdown: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization.md
+2026-08-07 11:30:56,075 - scenario_runner - INFO - Total errors: 0 out of 2 images processed
+Visualization saved to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization.md
+
+2026-08-07 11:30:56,157 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:56,157 - INFO - 
+[20/21] Testing: Visualize folders with PNG format
+2026-08-07 11:30:56,157 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:56,160 - INFO - Testing command: Visualize folders with PNG format
+2026-08-07 11:30:56,160 - INFO - Description: Create visual matrix from folders (PNG)
+2026-08-07 11:30:56,160 - INFO - Command: python openeobench visualize C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1 C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2 --output C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization.png --format png
+2026-08-07 11:30:57,051 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+2026-08-07 11:30:56,757 - scenario_runner - INFO - Visualizing results for patterns: ['C:\\Users\\Yanic\\Documents\\openEO\\openeobench\\test_output\\mock_output1', 'C:\\Users\\Yanic\\Documents\\openEO\\openeobench\\test_output\\mock_output2'], output: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization.png
+2026-08-07 11:30:56,758 - scenario_runner - ERROR - GDAL is required for visualization but not available. Trying to continue with limited functionality.
+2026-08-07 11:30:56,759 - scenario_runner - WARNING - gdal_translate command not found or timed out, some visualization methods will be unavailable.
+2026-08-07 11:30:56,760 - scenario_runner - WARNING - matplotlib not available, falling back to simpler visualization methods.
+2026-08-07 11:30:56,760 - scenario_runner - WARNING - PIL not available, some fallback visualization methods will be limited.
+2026-08-07 11:30:56,760 - scenario_runner - WARNING - gdal_array not available, using simplified thumbnail generation.
+2026-08-07 11:30:56,760 - scenario_runner - ERROR - No visualization methods available! Will attempt to continue with minimal functionality.
+2026-08-07 11:30:56,760 - scenario_runner - INFO - Searching for pattern: output\*C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1*
+2026-08-07 11:30:56,760 - scenario_runner - INFO - Searching for pattern: output\*C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2*
+2026-08-07 11:30:56,760 - scenario_runner - INFO - Matched 2 folders and 0 individual files.
+2026-08-07 11:30:56,760 - scenario_runner - INFO - Found folders: mock_output1, mock_output2
+2026-08-07 11:30:56,864 - scenario_runner - INFO - Found 1 GeoTIFF/raster files in mock_output1
+2026-08-07 11:30:56,966 - scenario_runner - INFO - Found 1 GeoTIFF/raster files in mock_output2
+2026-08-07 11:30:56,966 - scenario_runner - INFO - Processing file 1 of 2
+2026-08-07 11:30:56,969 - scenario_runner - WARNING - Error extracting statistics from C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1\result_mock_output1.tif: [WinError 2] Das System kann die angegebene Datei nicht finden
+2026-08-07 11:30:56,969 - scenario_runner - INFO - Successfully processed result_mock_output1.tif from mock_output1
+2026-08-07 11:30:56,969 - scenario_runner - INFO - Processing file 2 of 2
+2026-08-07 11:30:56,971 - scenario_runner - WARNING - Error extracting statistics from C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2\result_mock_output2.tif: [WinError 2] Das System kann die angegebene Datei nicht finden
+2026-08-07 11:30:56,971 - scenario_runner - INFO - Successfully processed result_mock_output2.tif from mock_output2
+2026-08-07 11:30:56,971 - scenario_runner - INFO - Folder mock_output1: 1 files, 1 with stats, 0 with thumbnails
+2026-08-07 11:30:56,971 - scenario_runner - INFO - Folder mock_output2: 1 files, 1 with stats, 0 with thumbnails
+2026-08-07 11:30:56,971 - scenario_runner - ERROR - matplotlib is required for PNG matrix visualization
+2026-08-07 11:30:56,972 - scenario_runner - ERROR - matplotlib is required for PNG visualization
+2026-08-07 11:30:56,972 - scenario_runner - ERROR - matplotlib is required for PNG visualization
+2026-08-07 11:30:56,972 - scenario_runner - INFO - Visualization complete. Created: PNG matrix: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization_matrix.png, Individual PNGs: C:\Users\Yanic\Documents\openEO\openeobench\test_output\png_outputs
+2026-08-07 11:30:56,972 - scenario_runner - INFO - Total errors: 0 out of 2 images processed
+Visualization saved to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization.png
+
+2026-08-07 11:30:57,051 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:57,051 - INFO - 
+[21/21] Testing: Visualize folders with both formats
+2026-08-07 11:30:57,052 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:57,055 - INFO - Testing command: Visualize folders with both formats
+2026-08-07 11:30:57,055 - INFO - Description: Create visual matrix from folders (both MD and PNG)
+2026-08-07 11:30:57,055 - INFO - Command: python openeobench visualize C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1 C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2 --output C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization_both.md --format both
+2026-08-07 11:30:57,961 - INFO - STDOUT:
+Warning: rioxarray not available, advanced image loading features will be limited
+Warning: GDAL not available, some visualization features will be limited
+Warning: matplotlib not available, visualizations will be skipped
+Warning: PIL not available, further fallback visualization methods will be limited
+2026-08-07 11:30:57,671 - scenario_runner - INFO - Visualizing results for patterns: ['C:\\Users\\Yanic\\Documents\\openEO\\openeobench\\test_output\\mock_output1', 'C:\\Users\\Yanic\\Documents\\openEO\\openeobench\\test_output\\mock_output2'], output: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization_both.md
+2026-08-07 11:30:57,671 - scenario_runner - ERROR - GDAL is required for visualization but not available. Trying to continue with limited functionality.
+2026-08-07 11:30:57,673 - scenario_runner - WARNING - gdal_translate command not found or timed out, some visualization methods will be unavailable.
+2026-08-07 11:30:57,673 - scenario_runner - WARNING - matplotlib not available, falling back to simpler visualization methods.
+2026-08-07 11:30:57,673 - scenario_runner - WARNING - PIL not available, some fallback visualization methods will be limited.
+2026-08-07 11:30:57,673 - scenario_runner - WARNING - gdal_array not available, using simplified thumbnail generation.
+2026-08-07 11:30:57,673 - scenario_runner - ERROR - No visualization methods available! Will attempt to continue with minimal functionality.
+2026-08-07 11:30:57,673 - scenario_runner - INFO - Searching for pattern: output\*C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1*
+2026-08-07 11:30:57,673 - scenario_runner - INFO - Searching for pattern: output\*C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2*
+2026-08-07 11:30:57,674 - scenario_runner - INFO - Matched 2 folders and 0 individual files.
+2026-08-07 11:30:57,674 - scenario_runner - INFO - Found folders: mock_output1, mock_output2
+2026-08-07 11:30:57,775 - scenario_runner - INFO - Found 1 GeoTIFF/raster files in mock_output1
+2026-08-07 11:30:57,876 - scenario_runner - INFO - Found 1 GeoTIFF/raster files in mock_output2
+2026-08-07 11:30:57,876 - scenario_runner - INFO - Processing file 1 of 2
+2026-08-07 11:30:57,876 - scenario_runner - ERROR - No visualization libraries available
+2026-08-07 11:30:57,879 - scenario_runner - WARNING - Error extracting statistics from C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output1\result_mock_output1.tif: [WinError 2] Das System kann die angegebene Datei nicht finden
+2026-08-07 11:30:57,880 - scenario_runner - INFO - Successfully processed result_mock_output1.tif from mock_output1
+2026-08-07 11:30:57,880 - scenario_runner - INFO - Processing file 2 of 2
+2026-08-07 11:30:57,880 - scenario_runner - ERROR - No visualization libraries available
+2026-08-07 11:30:57,883 - scenario_runner - WARNING - Error extracting statistics from C:\Users\Yanic\Documents\openEO\openeobench\test_output\mock_output2\result_mock_output2.tif: [WinError 2] Das System kann die angegebene Datei nicht finden
+2026-08-07 11:30:57,883 - scenario_runner - INFO - Successfully processed result_mock_output2.tif from mock_output2
+2026-08-07 11:30:57,884 - scenario_runner - INFO - Markdown visualization saved to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization_both.md
+2026-08-07 11:30:57,884 - scenario_runner - INFO - Folder mock_output1: 1 files, 1 with stats, 0 with thumbnails
+2026-08-07 11:30:57,884 - scenario_runner - INFO - Folder mock_output2: 1 files, 1 with stats, 0 with thumbnails
+2026-08-07 11:30:57,885 - scenario_runner - ERROR - matplotlib is required for PNG matrix visualization
+2026-08-07 11:30:57,885 - scenario_runner - ERROR - matplotlib is required for PNG visualization
+2026-08-07 11:30:57,885 - scenario_runner - ERROR - matplotlib is required for PNG visualization
+2026-08-07 11:30:57,885 - scenario_runner - INFO - Visualization complete. Created: Markdown: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization_both.md, PNG matrix: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization_both_matrix.png, Individual PNGs: C:\Users\Yanic\Documents\openEO\openeobench\test_output\png_outputs
+2026-08-07 11:30:57,885 - scenario_runner - INFO - Total errors: 0 out of 2 images processed
+Visualization saved to: C:\Users\Yanic\Documents\openEO\openeobench\test_output\visualization_both.md
+
+2026-08-07 11:30:57,961 - INFO - ------------------------------------------------------------
+2026-08-07 11:30:57,961 - INFO - 
+================================================================================
+2026-08-07 11:30:57,961 - INFO - TEST SUMMARY
+2026-08-07 11:30:57,961 - INFO - ================================================================================
+2026-08-07 11:30:57,961 - INFO - Total commands tested: 21
+2026-08-07 11:30:57,967 - INFO - Success rate: 90.5%
+2026-08-07 11:30:57,967 - INFO - 
+Detailed Results:
+2026-08-07 11:30:57,991 - INFO - 
+Log file saved to: command_test_log_20260807_112449.log
+2026-08-07 11:30:57,991 - INFO - Test output directory: C:\Users\Yanic\Documents\openEO\openeobench\test_output

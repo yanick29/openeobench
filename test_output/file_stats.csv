@@ -1,0 +1,3 @@
+run,num_files,file_1_name,file_1_min,file_1_max,file_1_mean,file_1_stddev,file_1_count,file_1_nodata_count,file_1_datatype,file_1_crs,file_1_raster_size,file_1_nodata_value,file_1_pixel_size,file_1_projection,file_1_projection_zone,file_1_datum,file_1_ellipsoid
+unknown_unknown,1,result_mock_output1.tif,0.000000,1.000000,0.500000,0.000000,1000,0,Float32,EPSG:4326,100x100,N/A,0.001x0.001,N/A,N/A,WGS 84,WGS 84
+unknown_unknown,1,result_mock_output2.tif,0.000000,1.000000,0.500000,0.000000,1000,0,Float32,EPSG:4326,100x100,N/A,0.001x0.001,N/A,N/A,WGS 84,WGS 84

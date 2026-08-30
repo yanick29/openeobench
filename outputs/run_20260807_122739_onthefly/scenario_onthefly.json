@@ -1,0 +1,128 @@
+{
+  "process_graph": {
+    "loadcollection1": {
+      "arguments": {
+        "id": "SENTINEL2_L2A",
+        "bands": [
+          "B04"
+        ],
+        "properties": {
+          "eo:cloud_cover": {
+            "process_graph": {
+              "lte1": {
+                "arguments": {
+                  "x": {
+                    "from_parameter": "value"
+                  },
+                  "y": 80
+                },
+                "process_id": "lte",
+                "result": true
+              }
+            }
+          }
+        },
+        "spatial_extent": {
+          "west": 13.3,
+          "south": 52.45,
+          "east": 13.45,
+          "north": 52.55
+        },
+        "temporal_extent": [
+          "2024-07-01",
+          "2024-08-31"
+        ]
+      },
+      "process_id": "load_collection"
+    },
+    "loadcollection2": {
+      "arguments": {
+        "id": "ESA_WORLDCOVER_10M_2021_V2",
+        "spatial_extent": {
+          "west": 13.3,
+          "south": 52.45,
+          "east": 13.45,
+          "north": 52.55
+        },
+        "temporal_extent": [
+          "2021-01-01",
+          "2021-12-31"
+        ]
+      },
+      "process_id": "load_collection"
+    },
+    "merge1": {
+      "arguments": {
+        "cube1": {
+          "from_node": "loadcollection1"
+        },
+        "cube2": {
+          "from_node": "reducedimension_dem"
+        },
+        "overlap_resolver": {
+          "process_graph": {
+            "lcpassthrough1": {
+              "arguments": {
+                "x": {
+                  "from_parameter": "y"
+                },
+                "y": 0
+              },
+              "process_id": "add",
+              "result": true
+            }
+          }
+        }
+      },
+      "process_id": "merge_cubes"
+    },
+    "saveresult1": {
+      "arguments": {
+        "data": {
+          "from_node": "merge1"
+        },
+        "format": "GTiff",
+        "options": {}
+      },
+      "process_id": "save_result",
+      "result": true
+    },
+    "renamelabels1": {
+      "arguments": {
+        "data": {
+          "from_node": "loadcollection2"
+        },
+        "dimension": "bands",
+        "target": [
+          "B04"
+        ],
+        "source": [
+          "MAP"
+        ]
+      },
+      "process_id": "rename_labels"
+    },
+    "reducedimension_dem": {
+      "arguments": {
+        "data": {
+          "from_node": "renamelabels1"
+        },
+        "dimension": "t",
+        "reducer": {
+          "process_graph": {
+            "first1": {
+              "arguments": {
+                "data": {
+                  "from_parameter": "data"
+                }
+              },
+              "process_id": "first",
+              "result": true
+            }
+          }
+        }
+      },
+      "process_id": "reduce_dimension"
+    }
+  }
+}

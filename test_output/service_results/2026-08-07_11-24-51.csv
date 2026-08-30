@@ -1,0 +1,4 @@
+URL;Timestamp;Response Time (ms);HTTP Code;Errors;Body Size (bytes)
+https://openeo.dataspace.copernicus.eu/openeo/1.2;1786094691.587823;707.31;200;OK;3687
+https://openeo.vito.be/openeo/1.2;1786094691.587823;1909.85;200;OK;3325
+https://openeo.eodc.eu/openeo/1.2.0;1786094691.587823;;Timeout;Request timed out;0

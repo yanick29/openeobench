@@ -1,0 +1,14 @@
+{
+  "job_id": "test-job-123",
+  "status": "finished",
+  "created": "2025-01-01T00:00:00Z",
+  "started": "2025-01-01T00:01:00Z",
+  "finished": "2025-01-01T00:05:00Z",
+  "timing": {
+    "submit": 1.5,
+    "queue": 60.0,
+    "execution": 240.0,
+    "download": 30.0,
+    "total": 300.0
+  }
+}

@@ -9,7 +9,8 @@ nicht. Im erzeugten Graphen trugen S2-Cube und Masken-Cube beide das
 Bandlabel "B04", weil rename_labels die Klassenkarte auf B04 umbenannte.
 
 Geprueft wird:
-  1. lc_mask: Klassenkarte behaelt ihren eigenen Bandnamen, Labels sind
+  1. lc_mask: der Masken-Cube verliert seine Zeitachse (drop_dimension),
+     die Klassenkarte behaelt ihren eigenen Bandnamen, Labels sind
      disjunkt, die Maskenbedingung haengt am Klassenband.
   2. rename_labels(source=...) ist bei lc_mask identisch zu lc_overlay -
      also nichts zu aendern, weder direkt noch ueber load_stac.
@@ -61,7 +62,8 @@ def _lc_mask_pg(module, dataset: str = LC) -> dict:
 def _relevant(pg: dict) -> dict:
     """Nur die Knoten, um die es hier geht - kompakt zum Anschauen."""
     keys = ["loadcollection1", "renamelabels1", "reducedimension_dem",
-            "filterbands_lcmask", "lcmaskbuild1", "lcmask1", "saveresult1"]
+            "filterbands_lcmask", "dropdimension_lcmask", "lcmaskbuild1",
+            "lcmask1", "saveresult1"]
     out = {}
     for k in keys:
         if k not in pg:
@@ -90,38 +92,68 @@ def test_vorher_nachher(tmp: Path) -> None:
     print("\n  NACHHER:")
     print("   " + json.dumps(_relevant(new), indent=2).replace("\n", "\n   "))
 
-    band = rb.DATASETS[LC]["band"]
-    s2_bands = old["loadcollection1"]["arguments"]["bands"]
-
-    # Vorher: Klassenkarte hiess wie das S2-Band.
-    assert old["renamelabels1"]["arguments"]["target"] == ["B04"], old
-    assert set(old["renamelabels1"]["arguments"]["target"]) & set(s2_bands)
+    # Vorher: Masken-Cube haengt direkt an filter_bands und traegt damit
+    # weiterhin die t-Achse aus reduce_dimension (ein Label, aber vorhanden).
+    assert "dropdimension_lcmask" not in old, old
     assert old["lcmaskbuild1"]["arguments"]["data"] == \
-        {"from_node": "reducedimension_dem"}
-    assert "filterbands_lcmask" not in old
+        {"from_node": "filterbands_lcmask"}, old["lcmaskbuild1"]
 
-    # Nachher: eigener Name, disjunkt zu S2, Bedingung am Klassenband.
-    assert new["renamelabels1"]["arguments"]["target"] == [band], new
-    assert not (set(new["renamelabels1"]["arguments"]["target"])
-                & set(s2_bands)), "Labels ueberlappen weiterhin"
-    assert new["filterbands_lcmask"]["arguments"]["bands"] == [band]
-    assert new["filterbands_lcmask"]["arguments"]["data"] == \
-        {"from_node": "reducedimension_dem"}
+    # Nachher: drop_dimension entfernt die Zeitachse, die Bedingung haengt
+    # daran.
+    dd = new["dropdimension_lcmask"]
+    assert dd == {
+        "arguments": {"data": {"from_node": "filterbands_lcmask"},
+                      "name": "t"},
+        "process_id": "drop_dimension",
+    }, dd
     assert new["lcmaskbuild1"]["arguments"]["data"] == \
-        {"from_node": "filterbands_lcmask"}
-    # Maskenziel und Ergebnis-Cube unveraendert: S2 wird maskiert.
-    assert new["lcmask1"]["arguments"]["data"] == \
-        {"from_node": "loadcollection1"}
-    assert new["lcmask1"]["arguments"]["mask"] == \
-        {"from_node": "lcmaskbuild1"}
-    assert new["saveresult1"]["arguments"]["data"] == {"from_node": "lcmask1"}
-    assert "merge1" not in new
+        {"from_node": "dropdimension_lcmask"}, new["lcmaskbuild1"]
+    # reduce_dimension bleibt stehen - drop_dimension verlangt genau ein
+    # Label auf der Achse.
+    assert new["reducedimension_dem"] == old["reducedimension_dem"]
+    assert new["reducedimension_dem"]["arguments"]["dimension"] == "t"
 
     # Sonst aendert sich nichts am Graphen.
     diff = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
     print(f"\n  Unterschiedliche Knoten: {diff}")
-    assert diff == ["filterbands_lcmask", "lcmaskbuild1", "renamelabels1"], diff
-    print(f"  OK: S2={s2_bands}, Klassenkarte=[{band!r}] - disjunkt.")
+    assert diff == ["dropdimension_lcmask", "lcmaskbuild1"], diff
+    print("  OK: drop_dimension(t) eingefuegt, sonst identisch.")
+
+
+def test_maskenkette(tmp: Path) -> None:
+    """Invarianten des lc_mask-Graphen, unabhaengig von HEAD geprueft."""
+    print("\n--- Test 1b: Invarianten der Maskenkette ---")
+    pg = _lc_mask_pg(rb)
+    band = rb.DATASETS[LC]["band"]
+    s2_bands = pg["loadcollection1"]["arguments"]["bands"]
+
+    # Bandnamen bleiben disjunkt (Fix der vorigen Aufgabe).
+    assert pg["renamelabels1"]["arguments"]["target"] == [band], pg
+    assert not (set(pg["renamelabels1"]["arguments"]["target"])
+                & set(s2_bands)), "Labels ueberlappen"
+    assert pg["filterbands_lcmask"]["arguments"]["bands"] == [band]
+
+    # Kette vom Zweitcube bis zum Ergebnis, Glied fuer Glied.
+    kette = [
+        ("renamelabels1", "rename_labels", "loadcollection2"),
+        ("reducedimension_dem", "reduce_dimension", "renamelabels1"),
+        ("filterbands_lcmask", "filter_bands", "reducedimension_dem"),
+        ("dropdimension_lcmask", "drop_dimension", "filterbands_lcmask"),
+        ("lcmaskbuild1", "apply", "dropdimension_lcmask"),
+    ]
+    for name, process_id, quelle in kette:
+        node = pg[name]
+        assert node["process_id"] == process_id, (name, node["process_id"])
+        assert node["arguments"]["data"] == {"from_node": quelle}, (name, node)
+        print(f"  {quelle:<20} -> {name} ({process_id})")
+
+    # Maskenziel und Ergebnis-Cube: S2 wird maskiert, nicht die Klassenkarte.
+    assert pg["lcmask1"]["arguments"]["data"] == {"from_node": "loadcollection1"}
+    assert pg["lcmask1"]["arguments"]["mask"] == {"from_node": "lcmaskbuild1"}
+    assert pg["saveresult1"]["arguments"]["data"] == {"from_node": "lcmask1"}
+    assert "merge1" not in pg, "merge_cubes gehoert nicht in lc_mask"
+    print(f"  {'lcmaskbuild1':<20} -> lcmask1 (mask auf loadcollection1)")
+    print(f"  OK: S2={s2_bands}, Klassenkarte=[{band!r}], Maske ohne t.")
 
 
 def test_source_wie_lc_overlay(tmp: Path) -> None:
@@ -221,6 +253,7 @@ def main() -> int:
     print(f"Temp: {tmp}")
     try:
         test_vorher_nachher(tmp)
+        test_maskenkette(tmp)
         test_source_wie_lc_overlay(tmp)
         test_andere_workflows_unveraendert(tmp)
         test_workflow_erkennung(tmp)

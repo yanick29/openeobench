@@ -1,0 +1,4 @@
+process,level,status,compatibility,reason
+load_collection,L1,available,compatible,Process available and compatible
+save_result,L1,available,compatible,Process available and compatible
+ndvi,L2,available,compatible,Process available and compatible

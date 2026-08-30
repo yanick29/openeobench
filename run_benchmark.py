@@ -1962,8 +1962,7 @@ def _load_bench_template(region: str, extent_size: str = "medium") -> dict:
 def _build_workflow_pg(template: dict, workflow: str, region: str = None,
                        resolution: float = DEFAULT_RESOLUTION_M,
                        dataset: str = DEFAULT_DATASET,
-                       resampling: str = "nearest",
-                       second_cube_from_stac: bool = False) -> dict:
+                       resampling: str = "nearest") -> dict:
     """Baut den process_graph fuer den gewuenschten Workflow.
 
     Alle Workflows starten von der merge_add-Baseline (bench_onthefly_{region}.json)
@@ -1999,14 +1998,6 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
                  -> reducedimension_dem (t entfernen)
                  -> [optional resample-Kette]
                  -> merge1.cube2
-
-    second_cube_from_stac: der Zweitcube kommt per load_stac von unserem
-    Server (local_pp / full_pp) statt aus einer Backend-Kollektion. Seit
-    das STAC-Item die datacube-Extension traegt, deklariert es
-    ausdruecklich nur ['x','y','bands'] - eine Zeitachse gibt es dort also
-    gar nicht mehr, und jeder Knoten, der auf 't' arbeitet, wird vom
-    Backend abgelehnt. Ausgewertet wird das bisher NUR im lc_mask-Zweig
-    (s. dort); Default False = bisheriges Verhalten fuer alle anderen.
     """
     pg = copy.deepcopy(template["process_graph"])
     # Zweitraster-Kollektion setzen (No-Op bei dataset='dem').
@@ -2128,43 +2119,15 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         # bliebe der Rest unbenannt im Cube und der apply-Ausdruck liefe
         # auch darueber. Gleiche Konstruktion wie filterbands_lc in
         # lc_overlay, nur eine Stufe frueher.
-        # ZEITACHSE - haengt daran, WOHER der Zweitcube kommt:
-        #
-        #  load_collection (onthefly): ESA_WORLDCOVER hat eine echte
-        #  t-Dimension mit dem Aufnahmedatum 2021-01-01. Sie muss weg,
-        #  sonst traegt der Masken-Cube SpaceTimeKeys, die zu keinem
-        #  S2-Zeitschritt passen, und mask() entfernt nichts (99,6 %
-        #  Uebereinstimmung mit dem unmaskierten S2 statt 31,7 %).
-        #  Dafuer stehen reduce_dimension(t, first) und drop_dimension(t)
-        #  unveraendert weiter im Graphen.
-        #
-        #  load_stac (local_pp / full_pp): das Item deklariert seit der
-        #  datacube-Extension ausdruecklich cube:dimensions ohne t. Damit
-        #  ist die Achse nicht mehr "unsichtbar vorhanden", sondern
-        #  schlicht nicht da - und BEIDE Knoten brechen den Job ab:
-        #    reduce_dimension -> "[400] ProcessParameterInvalid: The value
-        #    passed for parameter 'dimension' in process 'reduce_dimension'
-        #    is invalid: Must be one of ['x','y','bands'] but got 't'."
-        #    (Lauf 1211, lc_mask, local_preprocessing)
-        #  drop_dimension faellt danach in dieselbe Falle: seine Exception
-        #  DimensionNotAvailable heisst wortwoertlich "A dimension with the
-        #  specified name does not exist". Vor der Extension liefen beide
-        #  ins Leere, ohne Fehler. Deshalb entfallen sie hier zusammen -
-        #  einen davon stehen zu lassen wuerde denselben Abbruch nur einen
-        #  Knoten spaeter erzeugen.
-        if second_cube_from_stac:
-            pg.pop("reducedimension_dem", None)
-            filter_source = "renamelabels1"
-        else:
-            filter_source = "reducedimension_dem"
         pg["filterbands_lcmask"] = {
-            "arguments": {"data": {"from_node": filter_source},
+            "arguments": {"data": {"from_node": "reducedimension_dem"},
                           "bands": [band]},
             "process_id": "filter_bands",
         }
-        # drop_dimension NUR im load_collection-Fall (s. Block oben):
-        # reduce_dimension(t, first) zieht die Achse dort auf EINEN Eintrag
-        # zusammen, entfernt sie aber nicht - der Cube behaelt SpaceTimeKeys.
+        # ZEITACHSE (Fix): der Masken-Cube darf keine t-Dimension mehr
+        # tragen. reduce_dimension(t, first) zieht die Achse auf EINEN
+        # Eintrag zusammen, entfernt sie aber nicht - der Cube behaelt
+        # SpaceTimeKeys.
         #
         # Belegt am Serverlauf run_id 1141: der Masken-Cube kam mit dem
         # Partitioner SpaceTimeKey(0,0,1609459200000), also genau einem
@@ -2178,23 +2141,20 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         # Bei lc_overlay faellt das nicht auf: dort folgt merge_cubes, das
         # die Zeitachsen aneinander ausrichtet. mask() macht das nicht.
         #
-        # reduce_dimension bleibt in diesem Fall davor stehen:
-        # drop_dimension verlangt GENAU EIN Label auf der Achse und wirft
-        # sonst DimensionLabelCountMismatch. Dass die WorldCover-Kollektion
-        # nur einen Zeitstempel liefert, ist eine Eigenschaft der Daten,
-        # keine Zusicherung des Graphen - die Reduktion stellt die
-        # Vorbedingung her, statt sie vorauszusetzen.
-        mask_input = "filterbands_lcmask"
-        if not second_cube_from_stac:
-            pg["dropdimension_lcmask"] = {
-                "arguments": {"data": {"from_node": "filterbands_lcmask"},
-                              "name": "t"},
-                "process_id": "drop_dimension",
-            }
-            mask_input = "dropdimension_lcmask"
+        # reduce_dimension BLEIBT davor stehen: drop_dimension verlangt
+        # GENAU EIN Label auf der Achse und wirft sonst
+        # DimensionLabelCountMismatch. Dass die WorldCover-Kollektion nur
+        # einen Zeitstempel liefert, ist eine Eigenschaft der Daten, keine
+        # Zusicherung des Graphen - die Reduktion stellt die Vorbedingung
+        # her, statt sie vorauszusetzen.
+        pg["dropdimension_lcmask"] = {
+            "arguments": {"data": {"from_node": "filterbands_lcmask"},
+                          "name": "t"},
+            "process_id": "drop_dimension",
+        }
         pg["lcmaskbuild1"] = {
             "arguments": {
-                "data": {"from_node": mask_input},
+                "data": {"from_node": "dropdimension_lcmask"},
                 "process": {
                     "process_graph": {
                         "eq1": {
@@ -2610,13 +2570,9 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     steuert - hier geht es um das, was das Backend zurueckschreibt.
     """
     template = _load_bench_template(region, extent_size)
-    # second_cube_from_stac: der Zweitcube kommt gleich per load_stac von
-    # unserem Server - dessen STAC-Item deklariert seit der
-    # datacube-Extension nur ['x','y','bands'].
     pg = _build_workflow_pg(template, workflow, region=region,
                             resolution=resolution, dataset=dataset,
-                            resampling=resampling,
-                            second_cube_from_stac=True)
+                            resampling=resampling)
 
     # loadcollection2 entfernen und durch loadstac1 ersetzen
     pg.pop("loadcollection2", None)
@@ -2927,12 +2883,9 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     workflow=resample seinen Umweg passend skaliert.
     """
     template = _load_bench_template(region, extent_size)
-    # s. build_local_pp_scenario: der Zweitcube (loadstac2) kommt aus
-    # unserem STAC-Item, das keine Zeitachse mehr deklariert.
     pg = _build_workflow_pg(template, workflow, region=region,
                             resolution=resolution, dataset=dataset,
-                            resampling=resampling,
-                            second_cube_from_stac=True)
+                            resampling=resampling)
 
     pg.pop("loadcollection1", None)
     pg.pop("loadcollection2", None)
@@ -2989,73 +2942,6 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     with open(target_path, "w") as f:
         json.dump(scenario, f, indent=2)
     return target_path
-
-
-# datacube-Extension (https://github.com/stac-extensions/datacube).
-# Version bewusst als Konstante: pystac erkennt die Extension ueber das
-# PRAEFIX (has_extension splittet am Versionsteil und vergleicht
-# "https://stac-extensions.github.io/datacube/"), die genaue Version ist
-# fuer die Erkennung also unkritisch. v2.2.0 ist die Version, die das
-# lokal installierte pystac 1.14.3 als SCHEMA_URI fuehrt; der oeffentliche
-# openEO-Backend-Output (Earth-Engine-Treiber, s. test_output/) deklariert
-# v2.1.0 - beide matchen dieselbe Praefix-Pruefung.
-STAC_DATACUBE_EXTENSION = (
-    "https://stac-extensions.github.io/datacube/v2.2.0/schema.json")
-
-
-def _cube_dimensions(grid: dict, epsg: int, band: str) -> dict:
-    """cube:dimensions-Block der datacube-Extension aus dem Ziel-Grid.
-
-    Warum ueberhaupt: ohne diesen Block leiten Client und Backend die
-    Dimensionen des per load_stac geladenen Cubes je selbst ab - und
-    kommen zu verschiedenen Ergebnissen. Der openEO-Python-Client meldet
-    ['x','y','bands'], das Backend legt intern zusaetzlich eine Zeitachse
-    an; im Joblog steht dazu "Dry-run load_stac: failed to parse cube
-    metadata (No datacube extension found in STAC object)" und "No
-    cube:dimensions metadata". Bei lc_mask kostet das die ganze Maske:
-    der Masken-Cube bekommt einen Zeitschluessel, der zu keinem
-    S2-Zeitschritt passt, und mask() entfernt nichts (99,6 %
-    Uebereinstimmung mit dem unmaskierten S2 statt 31,7 %).
-    Belegstellen: openeo-python-client Issue #743, CDSE-Forum
-    "Load_stac time dimension hidden", stac-extensions/datacube.
-
-    KEINE Zeitdimension: das hochgeladene Raster traegt keine. Genau das
-    ist die Aussage, die der Block transportiert - die Extension erlaubt
-    ausdruecklich, eine Dimension wegzulassen, und nur so ist "es gibt
-    hier kein t" ueberhaupt sagbar.
-
-    Alle Werte kommen aus demselben Ziel-Grid, aus dem auch
-    proj:shape/proj:bbox/proj:transform gebaut werden (grid stammt je nach
-    Aufrufer aus _grid_from_dst_meta oder read_s2_grid) - hartkodiert ist
-    nichts.
-
-    step: Betrag der Zellgroesse aus dem Transform. transform.e ist bei
-    einem north-up-Raster negativ; extent wird als [min, max] aufsteigend
-    geschrieben, deshalb hier der positive Abstand. Die Schreibrichtung
-    steckt unveraendert in proj:transform.
-    """
-    t = grid["transform"]
-    left, bottom, right, top = grid["bounds"]
-    return {
-        "x": {
-            "type": "spatial",
-            "axis": "x",
-            "extent": [float(left), float(right)],
-            "reference_system": int(epsg),
-            "step": abs(float(t.a)),
-        },
-        "y": {
-            "type": "spatial",
-            "axis": "y",
-            "extent": [float(bottom), float(top)],
-            "reference_system": int(epsg),
-            "step": abs(float(t.e)),
-        },
-        "bands": {
-            "type": "bands",
-            "values": [band],
-        },
-    }
 
 
 def build_stac_item(region: str, asset_href: str, epsg: int,
@@ -3214,26 +3100,14 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
         }
         asset.update(proj_fields)
         properties.update(proj_fields)
-        # Dimensionen explizit deklarieren, statt sie das Backend raten zu
-        # lassen (s. _cube_dimensions). Gilt fuer JEDEN Datensatz und jedes
-        # dem_format - der Block beschreibt das Ziel-Grid, nicht den
-        # Container, und ist damit von gtiff/netcdf/zarr unabhaengig.
-        properties["cube:dimensions"] = _cube_dimensions(
-            grid, epsg, DATASETS[dataset]["band"])
-
-    stac_extensions = [
-        "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
-        "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
-    ]
-    # Nur deklarieren, was auch drinsteht: ohne grid gibt es keinen
-    # cube:dimensions-Block, dann waere die Extension eine leere Zusage.
-    if "cube:dimensions" in properties:
-        stac_extensions.append(STAC_DATACUBE_EXTENSION)
 
     return {
         "type": "Feature",
         "stac_version": "1.0.0",
-        "stac_extensions": stac_extensions,
+        "stac_extensions": [
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+            "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+        ],
         "id": item_id,
         "geometry": {
             "type": "Polygon",
@@ -3307,27 +3181,14 @@ def build_dem_stac_collection(collection_id: str, collection_url: str,
     if "eo:bands" in asset:
         summaries["eo:bands"] = asset["eo:bands"]
 
-    stac_extensions = [
-        "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
-        "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
-        "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
-    ]
-    # cube:dimensions auch auf der Collection: liest ein Client die
-    # Dimensionen von der Collection statt vom Item (bei load_stac auf eine
-    # Collection-URL der Normalfall), faende er sonst wieder nichts. Bei
-    # der Ein-Item-Collection ist der Block wortgleich der des Items -
-    # Collection-Felder stehen laut Extension im Wurzelobjekt, nicht in
-    # summaries.
-    cube_dims = props.get("cube:dimensions")
-    extra = {}
-    if cube_dims:
-        stac_extensions.append(STAC_DATACUBE_EXTENSION)
-        extra["cube:dimensions"] = copy.deepcopy(cube_dims)
-
     return {
         "type": "Collection",
         "stac_version": "1.0.0",
-        "stac_extensions": stac_extensions,
+        "stac_extensions": [
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+            "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+            "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
+        ],
         "id": collection_id,
         "description": ("Locally reprojected DEM (zarr store) hosted on "
                         "Hetzner for openEO load_stac; single-item "
@@ -3337,7 +3198,6 @@ def build_dem_stac_collection(collection_id: str, collection_url: str,
             "spatial": {"bbox": [list(item["bbox"])]},
             "temporal": {"interval": [[dt, dt]]},
         },
-        **extra,
         "item_assets": {"data": item_assets_data},
         "summaries": summaries,
         "links": [
@@ -3403,34 +3263,14 @@ def build_dem_tiles_collection(collection_id: str, collection_url: str,
         links.append({"rel": "item", "href": item_url,
                       "type": "application/geo+json"})
 
-    stac_extensions = [
-        "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
-        "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
-        "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
-    ]
-    # cube:dimensions ueber ALLE Kacheln: die x/y-Extents werden vereinigt,
-    # Zellgroesse, CRS und Band sind kachel-invariant. Das ist kein
-    # Widerspruch zur Regel oben (proj:shape/bbox/transform bleiben in den
-    # Items) - dort steht die Geometrie EINER Kachel, hier die Ausdehnung
-    # des GESAMTEN Cubes, und genau die beschreibt die Extension.
-    dims = [it.get("properties", {}).get("cube:dimensions")
-            for it, _ in items_with_urls]
-    extra = {}
-    if all(dims):
-        xs = [d["x"]["extent"] for d in dims]
-        ys = [d["y"]["extent"] for d in dims]
-        union_dims = copy.deepcopy(dims[0])
-        union_dims["x"]["extent"] = [min(a for a, _ in xs),
-                                     max(b for _, b in xs)]
-        union_dims["y"]["extent"] = [min(a for a, _ in ys),
-                                     max(b for _, b in ys)]
-        stac_extensions.append(STAC_DATACUBE_EXTENSION)
-        extra["cube:dimensions"] = union_dims
-
     return {
         "type": "Collection",
         "stac_version": "1.0.0",
-        "stac_extensions": stac_extensions,
+        "stac_extensions": [
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+            "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+            "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
+        ],
         "id": collection_id,
         "description": ("Locally reprojected DEM split into "
                         f"{len(items_with_urls)} spatial tiles (one item "
@@ -3441,7 +3281,6 @@ def build_dem_tiles_collection(collection_id: str, collection_url: str,
             "spatial": {"bbox": [union_bbox]},
             "temporal": {"interval": [[dt, dt]]},
         },
-        **extra,
         "item_assets": {"data": item_assets_data},
         "summaries": summaries,
         "links": links,

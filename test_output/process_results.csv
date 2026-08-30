@@ -1,0 +1,181 @@
+process,level,status,compatibility,reason,experimental
+absolute,l1,available,compatible,,no
+add,l1,available,compatible,,no
+and,l1,available,compatible,,no
+apply,l1,available,compatible,,no
+apply_dimension,l1,available,compatible,,no
+arccos,l1,available,compatible,,no
+arcsin,l1,available,compatible,,no
+arctan,l1,available,compatible,,no
+array_concat,l1,available,compatible,,yes
+array_create,l1,available,compatible,,yes
+array_element,l1,available,compatible,,no
+between,l1,available,compatible,,no
+ceil,l1,available,compatible,,no
+clip,l1,available,compatible,,no
+constant,l1,available,compatible,,no
+cos,l1,available,compatible,,no
+divide,l1,available,compatible,,no
+e,l1,available,compatible,,no
+eq,l1,available,compatible,,no
+exp,l1,available,compatible,,no
+first,l1,available,compatible,,no
+floor,l1,available,compatible,,no
+gt,l1,available,compatible,,no
+gte,l1,available,compatible,,no
+int,l1,available,compatible,,no
+last,l1,available,compatible,,no
+ln,l1,available,compatible,,no
+load_collection,l1,available,compatible,,no
+log,l1,available,compatible,,no
+lt,l1,available,compatible,,no
+lte,l1,available,compatible,,no
+max,l1,available,compatible,,no
+mean,l1,available,compatible,,no
+median,l1,available,compatible,,no
+min,l1,available,compatible,,no
+mod,l1,available,compatible,,no
+multiply,l1,available,compatible,,no
+neq,l1,available,compatible,,no
+not,l1,available,compatible,,no
+or,l1,available,compatible,,no
+pi,l1,available,compatible,,no
+power,l1,available,compatible,,no
+product,l1,available,compatible,,no
+quantiles,l1,available,compatible,,no
+reduce_dimension,l1,available,compatible,,no
+round,l1,available,compatible,,no
+save_result,l1,available,mismatch,"Return type mismatch: expected ['object'], got ['boolean']",no
+sd,l1,available,compatible,,no
+sgn,l1,available,compatible,,no
+sin,l1,available,compatible,,no
+sqrt,l1,available,compatible,,no
+subtract,l1,available,compatible,,no
+sum,l1,available,compatible,,no
+tan,l1,available,compatible,,no
+variance,l1,available,compatible,,no
+add_dimension,l2,available,compatible,,no
+aggregate_spatial,l2,available,mismatch,Parameter 'target_dimension' missing types: null,no
+aggregate_temporal,l2,available,compatible,,no
+aggregate_temporal_period,l2,available,compatible,,no
+all,l2,available,compatible,,no
+any,l2,available,compatible,,no
+apply_kernel,l2,available,compatible,,no
+arcosh,l2,available,compatible,,no
+arctan2,l2,available,compatible,,no
+array_find,l2,available,compatible,,no
+arsinh,l2,available,compatible,,no
+artanh,l2,available,compatible,,no
+cosh,l2,available,compatible,,no
+count,l2,available,compatible,,no
+date_between,l2,not_available,unknown,Process not available in backend,no
+date_difference,l2,not_available,unknown,Process not available in backend,no
+date_shift,l2,available,compatible,,yes
+dimension_labels,l2,available,compatible,,no
+drop_dimension,l2,available,compatible,,no
+extrema,l2,available,compatible,,no
+filter_bands,l2,available,compatible,,no
+filter_bbox,l2,available,compatible,,no
+filter_spatial,l2,available,compatible,,no
+filter_temporal,l2,available,compatible,,no
+filter_vector,l2,not_available,unknown,Process not available in backend,no
+if,l2,available,compatible,,no
+inspect,l2,available,compatible,,yes
+is_nan,l2,available,compatible,,no
+is_nodata,l2,available,compatible,,no
+is_valid,l2,available,compatible,,no
+linear_scale_range,l2,available,compatible,,no
+mask,l2,available,compatible,,no
+mask_polygon,l2,available,compatible,,no
+nan,l2,not_available,unknown,Process not available in backend,no
+normalized_difference,l2,available,compatible,,no
+rename_dimension,l2,available,compatible,,no
+rename_labels,l2,available,compatible,,no
+resample_spatial,l2,available,compatible,,no
+sinh,l2,available,compatible,,no
+sort,l2,available,compatible,,no
+tanh,l2,available,compatible,,no
+text_begins,l2,available,compatible,,no
+text_concat,l2,available,compatible,,no
+text_contains,l2,available,compatible,,no
+text_ends,l2,available,compatible,,no
+vector_buffer,l2,available,compatible,,no
+vector_reproject,l2,not_available,unknown,Process not available in backend,no
+xor,l2,available,compatible,,no
+aggregate_spatial_window,l3,not_available,unknown,Process not available in backend,no
+anomaly,l3,not_available,unknown,Process not available in backend,no
+apply_neighborhood,l3,available,compatible,,no
+ard_normalized_radar_backscatter,l3,available,compatible,,yes
+ard_surface_reflectance,l3,not_available,unknown,Process not available in backend,no
+array_append,l3,available,compatible,,yes
+array_apply,l3,available,compatible,,no
+array_contains,l3,available,compatible,,no
+array_create_labeled,l3,not_available,unknown,Process not available in backend,no
+array_filter,l3,available,compatible,,no
+array_find_label,l3,not_available,unknown,Process not available in backend,no
+array_interpolate_linear,l3,available,mismatch,"Return type mismatch: expected ['array'], got ['number', 'null']",yes
+array_labels,l3,available,compatible,,no
+array_modify,l3,not_available,unknown,Process not available in backend,no
+climatological_normal,l3,not_available,unknown,Process not available in backend,no
+cloud_detection,l3,not_available,unknown,Process not available in backend,no
+create_data_cube,l3,not_available,unknown,Process not available in backend,no
+cummax,l3,not_available,unknown,Process not available in backend,no
+cummin,l3,not_available,unknown,Process not available in backend,no
+cumproduct,l3,not_available,unknown,Process not available in backend,no
+cumsum,l3,not_available,unknown,Process not available in backend,no
+filter_labels,l3,available,compatible,,yes
+fit_curve,l3,not_available,unknown,Process not available in backend,no
+fit_regr_random_forest,l3,not_available,unknown,Process not available in backend,no
+flatten_dimensions,l3,not_available,unknown,Process not available in backend,no
+is_infinite,l3,not_available,unknown,Process not available in backend,no
+load_geojson,l3,available,compatible,,yes
+load_ml_model,l3,available,unknown,Cannot verify compatibility - missing specification,yes
+load_stac,l3,available,compatible,,yes
+merge_cubes,l3,available,compatible,,no
+ndvi,l3,available,compatible,,no
+order,l3,available,compatible,,no
+predict_curve,l3,not_available,unknown,Process not available in backend,no
+rearrange,l3,available,compatible,,no
+reduce_spatial,l3,not_available,unknown,Process not available in backend,no
+resample_cube_spatial,l3,available,compatible,,no
+resample_cube_temporal,l3,not_available,unknown,Process not available in backend,no
+run_udf,l3,available,compatible,,no
+run_udf_externally,l3,not_available,unknown,Process not available in backend,no
+save_ml_model,l3,available,unknown,Cannot verify compatibility - missing specification,yes
+trim_cube,l3,not_available,unknown,Process not available in backend,no
+unflatten_dimensions,l3,not_available,unknown,Process not available in backend,no
+vector_to_random_points,l3,not_available,unknown,Process not available in backend,no
+vector_to_regular_points,l3,not_available,unknown,Process not available in backend,no
+apply_polygon,l4,available,mismatch,Missing required parameter 'geometries'; Extra parameter 'polygons' not in official spec,yes
+atmospheric_correction,l4,available,compatible,,yes
+load_uploaded_files,l4,available,compatible,,yes
+load_url,l4,available,compatible,,yes
+sar_backscatter,l4,available,compatible,,yes
+aspect,custom,available,unknown,Process not in any standard profile,yes
+chunk_polygon,custom,available,unknown,Process not in any standard profile,yes
+convert_data_type,custom,available,unknown,Process not in any standard profile,yes
+corsa_compress,custom,available,unknown,Process not in any standard profile,yes
+corsa_compress_v2,custom,available,unknown,Process not in any standard profile,yes
+corsa_decompress,custom,available,unknown,Process not in any standard profile,yes
+corsa_decompress_v2,custom,available,unknown,Process not in any standard profile,yes
+discard_result,custom,available,unknown,Process not in any standard profile,no
+fit_class_catboost,custom,available,unknown,Process not in any standard profile,yes
+fit_class_random_forest,custom,available,unknown,Process not in any standard profile,yes
+get_geometries,custom,available,unknown,Process not in any standard profile,no
+load_result,custom,available,unknown,Process not in any standard profile,yes
+mask_l1c,custom,available,unknown,Process not in any standard profile,yes
+mask_scl_dilation,custom,available,unknown,Process not in any standard profile,yes
+predict_catboost,custom,available,unknown,Process not in any standard profile,yes
+predict_onnx,custom,available,unknown,Process not in any standard profile,yes
+predict_probabilities,custom,available,unknown,Process not in any standard profile,yes
+predict_random_forest,custom,available,unknown,Process not in any standard profile,yes
+query_stac,custom,available,unknown,Process not in any standard profile,yes
+raster_to_vector,custom,available,unknown,Process not in any standard profile,yes
+read_vector,custom,available,unknown,Process not in any standard profile,no
+resolution_merge,custom,available,unknown,Process not in any standard profile,yes
+sleep,custom,available,unknown,Process not in any standard profile,no
+slope,custom,available,unknown,Process not in any standard profile,yes
+text_merge,custom,available,unknown,Process not in any standard profile,no
+to_scl_dilation_mask,custom,available,unknown,Process not in any standard profile,yes
+to_vector_cube,custom,available,unknown,Process not in any standard profile,no
+vector_to_raster,custom,available,unknown,Process not in any standard profile,yes

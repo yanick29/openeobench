@@ -1,0 +1,32 @@
+{
+  "backend_url": "https://openeo.dataspace.copernicus.eu/openeo/1.2",
+  "backend_name": "openeo_dataspace_copernicus_eu",
+  "process_graph": "scenario_onthefly",
+  "status": "failed",
+  "job_id": null,
+  "job_status": null,
+  "start_time": 1786098424.4056811,
+  "submit_time": null,
+  "start_job_time": null,
+  "job_execution_time": null,
+  "download_time": null,
+  "total_time": null,
+  "queue_time": null,
+  "processing_time": null,
+  "file_path": null,
+  "process_graph_file": "processgraph.json",
+  "error": "Failed to connect to backend: HTTPSConnectionPool(host='openeo.dataspace.copernicus.eu', port=443): Max retries exceeded with url: /openeo/1.2/ (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)')))",
+  "job_status_history": {},
+  "timestamp": "2026-08-07T12:27:04.405713",
+  "environment": {
+    "git_commit": "b2ab50b02d5a16dcee306333c66a466296a45586",
+    "git_dirty": true,
+    "openeo_version": "0.48.0",
+    "rasterio_version": "1.5.0",
+    "numpy_version": "2.4.3",
+    "proj_version": "9.7.1",
+    "gdal_version": "3.12.1",
+    "python_version": "3.14.3",
+    "platform": "win32"
+  }
+}
