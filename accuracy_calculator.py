@@ -63,6 +63,31 @@ def _resolve_resampling(resampling_method):
     return resampling_method
 
 
+class AlignedRasters(tuple):
+    """(ref_data, test_data, ref_profile) plus die DEKLARIERTEN Nodata-Werte
+    beider Quelldateien als Attribute .ref_nodata / .test_nodata.
+
+    Warum ein tuple-Subtyp statt vier Rueckgabewerten: alle bestehenden
+    Aufrufstellen packen genau drei Werte aus (accuracy_calculator.main,
+    run_benchmark._compare_tif_pair und _compare_tif_pair_categorical). Ein
+    viertes Element wuerde sie mit "too many values to unpack" brechen. So
+    bleibt das Auspacken unveraendert, und wer die Sentinels braucht, liest
+    sie als Attribut.
+
+    Die Werte sind das, was in der Datei steht (rasterio src.nodata):
+    None wenn die Datei kein Nodata deklariert, sonst ein float - bei den
+    lokal gerechneten Referenzen NaN, bei CDSE-Ergebnissen -32768.0, bei
+    Terrascope 32767.0.
+    """
+
+    def __new__(cls, ref_data, test_data, ref_profile,
+                ref_nodata=None, test_nodata=None):
+        obj = super().__new__(cls, (ref_data, test_data, ref_profile))
+        obj.ref_nodata = ref_nodata
+        obj.test_nodata = test_nodata
+        return obj
+
+
 def align_rasters(ref_path, test_path, resampling_method="nearest"):
     """
     Align test raster to reference raster grid.
@@ -76,6 +101,10 @@ def align_rasters(ref_path, test_path, resampling_method="nearest"):
     echten Pixel-Unterschied "wegresamplen" koennten.
 
     Returns aligned numpy arrays for both rasters und das Referenz-Profile.
+    Der Rueckgabewert ist ein AlignedRasters (Dreiertupel wie bisher), das
+    zusaetzlich .ref_nodata und .test_nodata traegt - die in den Dateien
+    deklarierten Sentinels. Ohne sie kann der Aufrufer nicht wissen, welcher
+    Zahlenwert "ungueltig" bedeutet, und rechnet ihn als Messwert mit.
     """
     resampling = _resolve_resampling(resampling_method)
 
@@ -84,10 +113,12 @@ def align_rasters(ref_path, test_path, resampling_method="nearest"):
         ref_profile = ref_src.profile
         ref_crs = ref_src.crs
         ref_transform = ref_src.transform
+        ref_nodata = ref_src.nodata
 
     with rasterio.open(test_path) as test_src:
         test_crs = test_src.crs
         test_transform = test_src.transform
+        test_nodata = test_src.nodata
         test_shape = (test_src.count, test_src.height, test_src.width)
 
         ref_count = ref_data.shape[0]
@@ -114,7 +145,8 @@ def align_rasters(ref_path, test_path, resampling_method="nearest"):
                     dtype=np.float64,
                 )
                 test_aligned = np.concatenate([test_aligned, pad], axis=0)
-            return ref_data, test_aligned, ref_profile
+            return AlignedRasters(ref_data, test_aligned, ref_profile,
+                                  ref_nodata, test_nodata)
 
         # Sonst: auf Referenz-Grid reprojizieren mit der gewaehlten Methode.
         test_aligned = np.zeros(ref_data.shape, dtype=np.float64)
@@ -129,19 +161,62 @@ def align_rasters(ref_path, test_path, resampling_method="nearest"):
                 resampling=resampling,
             )
 
-    return ref_data, test_aligned, ref_profile
+    return AlignedRasters(ref_data, test_aligned, ref_profile,
+                          ref_nodata, test_nodata)
 
 
-def calculate_metrics(reference, test, nodata=None, exclude_zeros=False):
+def _sentinel_mask(band, sentinel):
+    """Boolesche Maske "dieser Wert ist GUELTIG" fuer einen Sentinel.
+
+    None (Datei deklariert kein Nodata) und NaN brauchen keine eigene
+    Maske: NaN faellt schon ueber np.isfinite raus, und ein Vergleich
+    `band != nan` waere ohnehin ueberall True.
+    """
+    if sentinel is None:
+        return None
+    try:
+        s = float(sentinel)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(s):
+        return None
+    return band != s
+
+
+def calculate_metrics(reference, test, nodata=None, exclude_zeros=False,
+                      ref_nodata=None, test_nodata=None):
     """
     Calculate accuracy metrics between reference and test arrays.
 
     `exclude_zeros=True` behandelt zusaetzlich Pixel mit Wert 0 als nodata
     (typisch fuer Sentinel-2). Default False -> 0-Pixel zaehlen mit.
 
+    NODATA, GETRENNT JE SEITE: Referenz und Test tragen in diesem Benchmark
+    verschiedene Sentinels. Die lokal gerechnete Referenz schreibt NaN, ein
+    CDSE-Ergebnis -32768, ein Terrascope-Ergebnis +32767. Ein einzelner
+    Wert fuer beide Seiten kann das nicht abbilden - deshalb ref_nodata und
+    test_nodata. Beide haben Vorrang vor dem alten Sammelparameter
+    `nodata`, der weiter funktioniert (er gilt dann fuer beide Seiten).
+
+    Belegt an Lauf 1165 (Terrascope, berlin/medium/merge_add, local_pp):
+    107433 Zellen des Testrasters tragen exakt 32767 und wurden gegen
+    Hoehenwerte um 40 gerechnet -> MAE 1,6233 / RMSE 189,9962, waehrend
+    dieselbe Konfiguration auf CDSE bei MAE 0,00128 / RMSE 0,00178 liegt.
+    Bei workflow=focal zieht die 3x3-Faltung jede betroffene Zelle ueber
+    acht Nachbarn: MAE 112463, RMSE 8927245.
+
+    NaN gilt IMMER als ungueltig, unabhaengig vom deklarierten Sentinel.
+    Das ist eine Aenderung gegenueber vorher: bislang schaltete ein
+    gesetztes `nodata` die isfinite-Pruefung aus, ein NaN-Pixel waere also
+    als Messwert eingegangen.
+
     Returns:
         dict with RMSE, MAE, and other statistics per band
     """
+    # Getrennte Werte haben Vorrang; fehlt einer, gilt der Sammelparameter
+    # fuer diese Seite - so bleibt der bisherige Ein-Wert-Aufruf gueltig.
+    ref_sentinel = ref_nodata if ref_nodata is not None else nodata
+    test_sentinel = test_nodata if test_nodata is not None else nodata
     results = {
         "bands": [],
         "overall": {}
@@ -153,11 +228,15 @@ def calculate_metrics(reference, test, nodata=None, exclude_zeros=False):
         ref_band = reference[band_idx].astype(np.float64)
         test_band = test[band_idx].astype(np.float64)
         
-        # Create valid mask (exclude nodata and zeros)
-        if nodata is not None:
-            valid_mask = (ref_band != nodata) & (test_band != nodata)
-        else:
-            valid_mask = np.isfinite(ref_band) & np.isfinite(test_band)
+        # Create valid mask (exclude nodata and zeros).
+        # isfinite IMMER zuerst - NaN ist in jedem Fall ungueltig, auch
+        # wenn die Datei zusaetzlich einen Zahlen-Sentinel deklariert.
+        valid_mask = np.isfinite(ref_band) & np.isfinite(test_band)
+        for band, sentinel in ((ref_band, ref_sentinel),
+                               (test_band, test_sentinel)):
+            extra = _sentinel_mask(band, sentinel)
+            if extra is not None:
+                valid_mask = valid_mask & extra
         
         # Optional: zero values als nodata behandeln (typisch fuer Sentinel-2)
         if exclude_zeros:

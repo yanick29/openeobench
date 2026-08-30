@@ -5797,11 +5797,27 @@ def _compare_tif_pair(ref_tif: Path, test_tif: Path,
         return (None, None, 0, 0, 0)
 
     try:
-        ref_data, test_data, _ = align_rasters(
+        aligned = align_rasters(
             str(ref_tif), str(test_tif),
             resampling_method=resampling_method,
         )
-        results = calculate_metrics(ref_data, test_data)
+        ref_data, test_data, _ = aligned
+        # Die in den Dateien deklarierten Sentinels je Seite durchreichen.
+        # Ohne sie zaehlt ein Terrascope-Ergebnis seine 32767-Zellen als
+        # Messwerte mit (Lauf 1165: 107433 Zellen, MAE 1,6233 statt
+        # 0,00128; bei workflow=focal MAE 112463). CDSE-Ergebnisse und die
+        # lokale Referenz tragen beide NaN - dort greift schon die
+        # isfinite-Maske, die Werte sollten sich also NICHT aendern.
+        # DAS IST EINE ERWARTUNG, KEINE ZUSICHERUNG: sobald eine
+        # CDSE-Datei doch einen Zahlen-Sentinel deklariert, aendert sich
+        # ihr Wert - und zwar zu Recht. Nach dem Einspielen gehoert ein
+        # Kontrollvergleich einer bekannten CDSE-Konfiguration gegen den
+        # alten Wert dazu (s. Kommentar in calculate_metrics).
+        results = calculate_metrics(
+            ref_data, test_data,
+            ref_nodata=getattr(aligned, "ref_nodata", None),
+            test_nodata=getattr(aligned, "test_nodata", None),
+        )
     except Exception as exc:
         print(f"  Vergleich fehlgeschlagen ({ref_tif.name}): {exc}")
         return (None, None, 0, 0, 0)
