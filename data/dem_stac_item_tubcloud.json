@@ -1,0 +1,52 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "id": "dem_reprojected_32633_tubcloud",
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          13.3,
+          52.45
+        ],
+        [
+          13.45,
+          52.45
+        ],
+        [
+          13.45,
+          52.55
+        ],
+        [
+          13.3,
+          52.55
+        ],
+        [
+          13.3,
+          52.45
+        ]
+      ]
+    ]
+  },
+  "bbox": [
+    13.3,
+    52.45,
+    13.45,
+    52.55
+  ],
+  "properties": {
+    "datetime": "2011-01-01T00:00:00Z",
+    "proj:epsg": 32633
+  },
+  "links": [],
+  "assets": {
+    "dem": {
+      "href": "https://tubcloud.tu-berlin.de/public.php/dav/files/BTS39qoq349zMKL/dem_reprojected_32633.tif",
+      "type": "image/tiff; application=geotiff",
+      "roles": [
+        "data"
+      ]
+    }
+  }
+}

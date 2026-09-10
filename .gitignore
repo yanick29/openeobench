@@ -23,3 +23,23 @@ benchmark_results.duckdb
 # Logs
 scenario_runner.log
 latency_results.json
+# Messlaeufe und Protokolle
+outputs/
+logs/
+
+# Messlaeufe und Protokolle
+outputs/
+logs/
+
+# Sicherungskopien
+*_backup_*.duckdb
+*_backup_*.py
+*.bak
+*.save
+*~
+
+# Zwischendateien
+analyse_kapitel7.txt
+stac_probe_*.json
+probe_*.py
+patch_plots.py

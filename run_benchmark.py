@@ -4789,6 +4789,20 @@ def _nodata_to_nan(data, nodata):
     if math.isnan(nd):
         return out
     out[out == nd] = np.nan
+    # Bilineare Reprojektion ueber eine Nodata-Grenze erzeugt Werte, die
+    # dem Sentinel nahekommen, ihn aber nicht exakt treffen. Gemessen an
+    # outputs/run_20260823_181942_local_reference (rom, medium, merge_add):
+    # fuenf Zellen in Zeile 33 mit Werten um -32737 statt -32768, direkt
+    # unterhalb einer NaN-Zeile. Der exakte Vergleich liess sie durch, MAE
+    # 0,127 und RMSE 66 statt 0,001. Deshalb zusaetzlich alles maskieren,
+    # was innerhalb von 2768 Einheiten am Sentinel liegt. Echte Werte liegen
+    # bei Sentinel-2 unter 20000 und beim DEM zwischen -500 und 9000, die
+    # Schwelle bei 30000 trifft keinen davon.
+    if abs(nd) >= 30000:
+        if nd < 0:
+            out[out < -30000] = np.nan
+        else:
+            out[out > 30000] = np.nan
     return out
 
 
