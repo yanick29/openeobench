@@ -30,6 +30,14 @@ for _o in ORDNER.values():
     _o.mkdir(parents=True, exist_ok=True)
 
 
+ZEITANTEILE = [("bezug", "Bezug der Eingangsdaten", "#7f3b08"),
+               ("preprocessing_time", "lokale Vorbereitung", "#e08214"),
+               ("annahme", "Jobannahme", "#d9d9d9"),
+               ("queue_time", "Warteschlange", "#b2b2b2"),
+               ("processing_time", "Rechenzeit Backend", "#1f4e79"),
+               ("download_time", "Ergebnisdownload", "#7fb3d5"),
+               ("sonstiges", "Sonstiges", "#efefef")]
+
 def ziel(bereich: str, dateiname: str) -> Path:
     """Ablagepfad einer Abbildung. bereich ist ff1, ff2, ff3 oder anhang."""
     return ORDNER[bereich] / dateiname
@@ -42,7 +50,7 @@ plt.rcParams.update({
 })
 
 STIL = {
-    "local_preprocessing": dict(color="#1f4e79", marker="o", label="local_preprocessing"),
+    "local_preprocessing": dict(color="#1f4e79", marker="o", label="local_pp"),
     "onthefly":            dict(color="#e08214", marker="s", label="onthefly"),
 }
 # Erst die punktweisen Operationen, dann die nachbarschafts- und zeitbezogenen.
@@ -80,7 +88,7 @@ def genauigkeit_operationen():
       ORDER BY r.run_id
     """)
 
-    # Die Region steht bei onthefly nicht im scenario-Namen. Zuordnung ueber
+    # Die Region steht bei onthefly nicht im scenario-Namen. Zuordnung über
     # die Blockzuordnung aus den Protokolldateien.
     import csv
     zu = {}
@@ -96,7 +104,7 @@ def genauigkeit_operationen():
         print("keine Daten fuer A1/A2, blockzuordnung.csv vorhanden?")
         return
 
-    # Genauigkeitswerte sind je Konfiguration ueber alle Wiederholungen
+    # Genauigkeitswerte sind je Konfiguration über alle Wiederholungen
     # identisch, ein Wert je Konfiguration genuegt.
     df = df.drop_duplicates(["block", "workflow", "crs_strategy"])
 
@@ -211,7 +219,7 @@ def genauigkeitsfaktor():
     ax.set_xticks(x)
     ax.set_xticklabels(OPERATIONEN, rotation=45, ha="right")
     ax.set_xlim(-0.6, len(OPERATIONEN) - 0.4)
-    ax.set_ylabel("Faktor MAE onthefly zu local_preprocessing")
+    ax.set_ylabel("Faktor MAE onthefly zu local_pp")
     ax.grid(axis="y", which="major", linewidth=0.4, color="#d5d5d5")
     ax.set_axisbelow(True)
     for rand in ("top", "right"):
@@ -227,7 +235,7 @@ def genauigkeitsfaktor():
 
 
 def genauigkeit_regionen():
-    """MAE von merge_add ueber neun Regionen, beide Strategien.
+    """MAE von merge_add über neun Regionen, beide Strategien.
 
     Der Regionsvergleich variiert das Ziel-CRS. Die Regionen liegen in acht
     UTM-Zonen und auf beiden Hemisphaeren, sortiert nach dem Verhaeltnis
@@ -317,10 +325,10 @@ def genauigkeit_regionen():
 
 
 def _zeitdaten():
-    """Laeufe aus A1, A2 und B mit je Lauf gebildeten Zeitanteilen.
+    """Läufe aus A1, A2 und B mit je Lauf gebildeten Zeitanteilen.
 
     Die Anteile werden je Lauf berechnet und erst danach gemittelt.
-    Spaltenweise Kennzahlen stammen aus verschiedenen Laeufen und ergaeben in
+    Spaltenweise Kennzahlen stammen aus verschiedenen Läufen und ergaeben in
     der Summe keinen realen Lauf.
     """
     import csv
@@ -342,7 +350,7 @@ def _zeitdaten():
             zu[int(z["run_id"])] = z["block"]
     df["block"] = df.run_id.map(lambda i: zu.get(i, ""))
     df = df[df.block.isin(["A1", "A2", "B"])].copy()
-    # Jobannahme: Uebergabe bis Eintritt in die Warteschlange.
+    # Jobannahme: Übergabe bis Eintritt in die Warteschlange.
     df["annahme"] = (df.job_execution_time - df.queue_time
                      - df.processing_time).clip(lower=0)
     # Rest bis zur Gesamtzeit: Upload, STAC-Erzeugung, Abruf der Jobdetails.
@@ -400,7 +408,7 @@ def zeitanteile():
     fig, ax = plt.subplots(figsize=(6.3, 2.6))
     _zeitbalken(ax, m, anzahl, strategien,
                 [f"{s}\n(n={anzahl.get(s, 0)})" for s in strategien])
-    ax.set_xlabel("Zeit in Sekunden, Mittel ueber die Laeufe, "
+    ax.set_xlabel("Zeit in Sekunden, Mittel über die Läufe, "
                   "merge_add bei Ausdehnung medium")
     griffe, namen = ax.get_legend_handles_labels()
     fig.legend(griffe, namen, loc="lower center", ncol=4, frameon=False,
@@ -472,7 +480,7 @@ def zeitanteile_operationen():
     hoehe = fig.get_figheight()
     fig.subplots_adjust(left=0.155, right=0.985, top=1 - 0.32 / hoehe,
                         bottom=1.02 / hoehe)
-    fig.text(0.57, 0.72 / hoehe, "Zeit in Sekunden, Mittel ueber die Laeufe, "
+    fig.text(0.57, 0.72 / hoehe, "Zeit in Sekunden, Mittel über die Läufe, "
              "Ausdehnung medium", ha="center", fontsize=8.5)
     fig.text(0.57, 0.06 / hoehe, hinweis, ha="center", fontsize=6.5,
              color="#555555")
@@ -494,7 +502,7 @@ def laufzeitstreuung():
 
     Gestapelte Balken zeigen Mittelwerte und verbergen, wie stark die Laufzeit
     schwankt. Hier steht jeder Lauf als eigener Punkt, dazu ein Strich fuer den
-    Median. Bei sechs Laeufen je Operation waere ein Boxplot irrefuehrend, weil
+    Median. Bei sechs Läufen je Operation waere ein Boxplot irrefuehrend, weil
     er eine Verteilung suggeriert, die aus so wenigen Werten nicht ablesbar ist.
     """
     import csv
@@ -529,7 +537,7 @@ def laufzeitstreuung():
                        & (df.crs_strategy == strategie)].processing_time.values
             if not len(werte):
                 continue
-            # Box fuer die Streuung, Einzelpunkte darueber. Bei sechs Laeufen je
+            # Box fuer die Streuung, Einzelpunkte darüber. Bei sechs Läufen je
             # Operation sagen Quartile allein wenig aus, deshalb bleiben die
             # Rohwerte sichtbar. Die Verteilung ist ausserdem zweigipflig, das
             # verdeckt eine Box sonst.
@@ -551,7 +559,7 @@ def laufzeitstreuung():
     ax.set_xticklabels(OPERATIONEN, rotation=45, ha="right")
     ax.set_xlim(-0.6, len(OPERATIONEN) - 0.4)
     # Nullpunkt erzwingen: bei abgeschnittener Achse erscheint der Abstand
-    # zwischen 62 und 126 Sekunden groesser, als er ist.
+    # zwischen 62 und 126 Sekunden größer, als er ist.
     ax.set_ylim(0, df.processing_time.max() * 1.08)
     ax.set_ylabel("Rechenzeit im Backend in Sekunden")
     ax.grid(axis="y", linewidth=0.4, color="#d5d5d5")
@@ -578,7 +586,7 @@ def datenzugriff_operationen():
     """Datenzugriff und Rechenzeit je Operation, nur local_preprocessing.
 
     Alle Operationen laden dasselbe vorbereitete DEM-Asset von 4,80 MB. Der
-    Datenzugriff wird ueber das Zugriffsprotokoll des Hosting-Servers gemessen
+    Datenzugriff wird über das Zugriffsprotokoll des Hosting-Servers gemessen
     und ist deshalb unabhaengig vom Backend beobachtbar.
 
     Der Vergleich beantwortet, ob CDSE den Zuschnitt von filter_bbox in den
@@ -616,14 +624,14 @@ def datenzugriff_operationen():
     x = np.arange(len(OPERATIONEN))
     fig, (links, rechts) = plt.subplots(1, 2, figsize=(6.3, 3.0))
 
-    # Links: uebertragenes Volumen, Bezugslinie ist die Dateigroesse
+    # Links: übertragenes Volumen, Bezugslinie ist die Dateigröße
     mb = [float(m.loc[o, "bytes"]) / 1e6 if o in m.index else np.nan
           for o in OPERATIONEN]
     farben = ["#e08214" if o == "filter_bbox" else "#1f4e79" for o in OPERATIONEN]
     links.bar(x, mb, 0.62, color=farben, edgecolor="white", linewidth=0.5)
     asset_mb = float(m.asset.iloc[0]) / 1e6
     links.axhline(asset_mb, color="#666666", linewidth=0.9, linestyle=(0, (4, 3)))
-    links.annotate(f"Dateigroesse {asset_mb:.2f} MB", (len(OPERATIONEN) - 0.5, asset_mb),
+    links.annotate(f"Dateigröße {asset_mb:.2f} MB", (len(OPERATIONEN) - 0.5, asset_mb),
                    textcoords="offset points", xytext=(0, 3), ha="right",
                    fontsize=7, color="#555555")
     for i, w in enumerate(mb):
@@ -631,7 +639,7 @@ def datenzugriff_operationen():
             links.annotate(f"{w:.2f}", (i, w), textcoords="offset points",
                            xytext=(0, 2), ha="center", fontsize=6.5,
                            color="#444444")
-    links.set_ylabel("Uebertragenes Volumen in MB")
+    links.set_ylabel("Übertragenes Volumen in MB")
     links.set_ylim(0, asset_mb * 1.25)
 
     # Rechts: Rechenzeit, Einzelwerte plus Median
@@ -678,9 +686,9 @@ def fehlerstruktur_regionen():
     """MAE gegen RMSE je Region, beide Strategien.
 
     Das Verhaeltnis von RMSE zu MAE beschreibt die Struktur des Fehlers. Liegen
-    beide Masse dicht beieinander, ist die Abweichung gleichmaessig ueber die
+    beide Masse dicht beieinander, ist die Abweichung gleichmaessig über die
     Flaeche verteilt. Ein weit hoeherer RMSE bedeutet, dass die Abweichung fast
-    ueberall klein ist und an wenigen Stellen sehr gross wird, weil der RMSE
+    überall klein ist und an wenigen Stellen sehr gross wird, weil der RMSE
     quadriert und grosse Einzelwerte deshalb staerker gewichtet.
 
     Die gestrichelten Linien markieren feste Verhaeltnisse. Auf der untersten
@@ -761,9 +769,9 @@ def fehlerstruktur_regionen():
 
 
 def skalierung():
-    """Rechenzeit gegen Eingangsgroesse ueber fuenf Ausdehnungen.
+    """Rechenzeit gegen Eingangsgröße über fuenf Ausdehnungen.
 
-    Aufgetragen ist die vom Backend abgerechnete Eingangsgroesse, nicht die
+    Aufgetragen ist die vom Backend abgerechnete Eingangsgröße, nicht die
     Kategorie small bis xxlarge. Aus der Steigung auf doppelt logarithmischen
     Achsen laesst sich ablesen, wie die Zeit mit der Datenmenge waechst. Eine
     Steigung von eins bedeutet proportionales Wachstum, eine flachere Steigung
@@ -812,14 +820,14 @@ def skalierung():
             "extent_size").input_pixels_mp.median()
         for stufe, n in fehl.items():
             if stufe in bezug.index:
-                ax.annotate(f"onthefly scheitert\n({n} von {n} Laeufen)",
+                ax.annotate(f"onthefly scheitert\n({n} von {n} Läufen)",
                             (bezug[stufe], ax.get_ylim()[0]),
                             textcoords="offset points", xytext=(0, 14),
                             ha="center", fontsize=6.5, color="#b35806")
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("Eingangsgroesse in Megapixeln, vom Backend abgerechnet")
+    ax.set_xlabel("Eingangsgröße in Megapixeln, vom Backend abgerechnet")
     ax.set_ylabel("Rechenzeit im Backend in Sekunden")
     ax.grid(linewidth=0.4, color="#e0e0e0")
     ax.set_axisbelow(True)
@@ -858,7 +866,7 @@ def backendvergleich():
     CDSE 16 Sentinel-2-Aufnahmen, Terrascope 3, davon eine zu 56 Prozent leer.
     Jede Installation wird gegen eine eigene lokale Referenz gemessen, die
     Absolutwerte sind zwischen den Installationen deshalb nicht streng
-    vergleichbar. Das Muster ueber die Operationen ist es.
+    vergleichbar. Das Muster über die Operationen ist es.
 
     focal fehlt fuer Terrascope: die 3x3-Faltung mittelt den Nodata-Sentinel
     32767 mit gueltigen Nachbarn zu Zwischenwerten, die kein Sentinel mehr
@@ -950,7 +958,7 @@ def fehlerverteilung():
     Wolke je Strategie. Bei merge_add liegen zusaetzlich die neun Regionen des
     Regionsvergleichs, bei den uebrigen Operationen Berlin und Hamburg.
 
-    Werte einer Konfiguration sind ueber die Wiederholungen identisch, gezeigt
+    Werte einer Konfiguration sind über die Wiederholungen identisch, gezeigt
     wird die Streuung zwischen den Konfigurationen.
     """
     import csv
@@ -1031,15 +1039,15 @@ def fehlerverteilung():
 
 
 def zugriff_formate():
-    """Datenzugriff bei merge_add und filter_bbox ueber fuenf DEM-Formate.
+    """Datenzugriff bei merge_add und filter_bbox über fuenf DEM-Formate.
 
     Nur zwei Operationen, weil alle Operationen ohne raeumlichen Zuschnitt
-    denselben Zugriff erzeugen. Fuer cog und striped ist das ueber alle sieben
+    denselben Zugriff erzeugen. Fuer cog und striped ist das über alle sieben
     Operationen geprueft, dort liegen die Werte bitgleich. merge_add steht
     deshalb stellvertretend fuer diese Gruppe, filter_bbox ist die einzige
     Operation mit Zuschnitt, hier auf ein Viertel der Flaeche.
 
-    Die gestrichelte Linie je Format markiert die Dateigroesse des
+    Die gestrichelte Linie je Format markiert die Dateigröße des
     hochgeladenen Assets. Wird sie erreicht, liest das Backend die Datei
     vollstaendig.
     """
@@ -1091,15 +1099,15 @@ def zugriff_formate():
                                 textcoords="offset points", xytext=(0, 2),
                                 ha="center", fontsize=6.5, color="#444444")
 
-    # Dateigroesse je Format als kurze Linie ueber der Gruppe
+    # Dateigröße je Format als kurze Linie über der Gruppe
     for i, f in enumerate(formate):
         gr = float(df[df["format"] == f].asset_bytes.max()) / 1e6
         oben.plot([i - 0.42, i + 0.42], [gr, gr], color="#666666",
                   linewidth=1.0, linestyle=(0, (4, 3)), zorder=4)
     oben.plot([], [], color="#666666", linewidth=1.0, linestyle=(0, (4, 3)),
-              label="Dateigroesse des Assets")
+              label="Dateigröße des Assets")
 
-    oben.set_ylabel("Uebertragenes Volumen in MB")
+    oben.set_ylabel("Übertragenes Volumen in MB")
     oben.set_ylim(0, 6.6)
     unten.set_ylabel("Anfragen")
     unten.set_ylim(0, max(df.anfragen) * 1.22)
@@ -1133,7 +1141,7 @@ def zugriff_formate():
 def credits_aufschluesselung():
     """Abgerechnete Credits je Strategie und Ausdehnung.
 
-    Die Credits sind die Abrechnungsgroesse des Backends und damit die
+    Die Credits sind die Abrechnungsgröße des Backends und damit die
     einzige Kostenkennzahl, die unabhaengig von der Laufzeit vorliegt. Bei
     local_preprocessing faellt zusaetzlich der vorgelagerte Bezug des
     Hoehenmodells an, der als eigener Batch-Job eigene Credits kostet.
@@ -1203,7 +1211,7 @@ def tagesabhaengigkeit():
     einer Beobachtung ein Beleg, und Laufzeitvergleiche zwischen Konfigurationen
     aus verschiedenen Messtagen lassen sich entsprechend einordnen.
 
-    Gezeigt sind alle merge_add-Laeufe bei mittlerer Ausdehnung aus dem
+    Gezeigt sind alle merge_add-Läufe bei mittlerer Ausdehnung aus dem
     Operationsvergleich, der Regionsstichprobe und dem Regionsvergleich.
     """
     import csv
@@ -1293,9 +1301,9 @@ def tagesabhaengigkeit():
 
 
 def skalierung_backends():
-    """Rechenzeit ueber die Gebietsgroesse, beide Installationen nebeneinander.
+    """Rechenzeit über die Gebietsgröße, beide Installationen nebeneinander.
 
-    Aufgetragen ist die Rechenzeit im Backend gegen die Kantenlaenge des
+    Aufgetragen ist die Rechenzeit im Backend gegen die Kantenlänge des
     Ausschnitts, beide Achsen logarithmisch. Aus der Steigung laesst sich
     ablesen, wie die Zeit mit der Flaeche waechst. Eine Steigung von 2 bedeutet
     proportionales Wachstum mit der Flaeche, eine flachere Steigung heisst, dass
@@ -1323,7 +1331,7 @@ def skalierung_backends():
     if df.empty:
         print("keine Daten"); return
 
-    # Kantenlaenge des Ausschnitts in km, aus der Messmatrix
+    # Kantenlänge des Ausschnitts in km, aus der Messmatrix
     KANTE = {"small": 5, "medium": 12, "large": 50, "xlarge": 100, "xxlarge": 200}
     stufen = ["small", "medium", "large", "xlarge", "xxlarge"]
 
@@ -1360,7 +1368,7 @@ def skalierung_backends():
         ax.set_yscale("log")
         ax.set_xticks([KANTE[s] for s in stufen])
         ax.set_xticklabels([f"{KANTE[s]}" for s in stufen])
-        ax.set_xlabel("Kantenlaenge des Ausschnitts in km")
+        ax.set_xlabel("Kantenlänge des Ausschnitts in km")
         ax.set_title(backend)
         ax.grid(which="major", linewidth=0.4, color="#d5d5d5")
         ax.set_axisbelow(True)
@@ -1372,7 +1380,7 @@ def skalierung_backends():
     from matplotlib.lines import Line2D
     griffe.append(Line2D([0], [0], linestyle="none", marker="x", markersize=9,
                          markeredgewidth=2.2, color=STIL["onthefly"]["color"]))
-    namen.append("scheitert in allen 5 Laeufen, Backendfehler")
+    namen.append("scheitert in allen 5 Läufen, Backendfehler")
     fig.legend(griffe, namen, loc="lower center", ncol=3, frameon=False,
                bbox_to_anchor=(0.5, -0.02), fontsize=7.5)
     fig.tight_layout(rect=(0, 0.07, 1, 1))
@@ -1404,7 +1412,7 @@ def tradeoff():
     Die Gesamtdauer enthaelt bei local_pp den vorgelagerten DEM-Bezug, weil
     bei onthefly dieselbe Transformationsarbeit im Messlauf steckt. Die
     MAE-Achse ist logarithmisch, die Zeitachse beginnt bei null.
-    Werte sind Mediane ueber Berlin und Hamburg.
+    Werte sind Mediane über Berlin und Hamburg.
     """
     import csv
     df = hole("""
@@ -1486,7 +1494,7 @@ def gitterversatz():
     """Versatz zwischen Backend-Gitter und Referenzgitter je Gebietsstufe.
 
     Die lokale Referenz reprojiziert immer auf exakt 10,0 m. Weicht die
-    Zellgroesse des Backend-Ergebnisses davon ab, laufen beide Gitter ueber die
+    Zellgröße des Backend-Ergebnisses davon ab, laufen beide Gitter über die
     Breite auseinander. Gezeigt ist der daraus folgende Versatz am Rand des
     Ausschnitts in Zellen, also Abweichung mal Spaltenzahl. Ab einer Zelle
     vergleicht ein pixelweiser Vergleich nicht mehr denselben Ort.
@@ -1494,7 +1502,7 @@ def gitterversatz():
     Die Abweichung je Zelle steht im Text, sie ergibt sich aus dem Versatz
     geteilt durch die Spaltenzahl.
 
-    Werte aus den Ergebnisdateien der local_preprocessing-Laeufe bei berlin,
+    Werte aus den Ergebnisdateien der local_preprocessing-Läufe bei berlin,
     merge_add, cog, gelesen am 02.09.2026:
       small   run_20260826_125724  10.000000000 m   529 x   528
       medium  run_20260819_162031  10.000000000 m  1152 x  1070
@@ -1503,7 +1511,7 @@ def gitterversatz():
       xxlarge run_20260826_215638  10.000000000 m 21437 x 21376
     xxlarge lief mit --dem-tiles 4, das DEM lag also in vier Kacheln vor.
     --force-target-crs allein aendert bei large nichts, geprueft am 02.09.
-    mit run 1310, Zellgroesse weiterhin 9,998138149.
+    mit run 1310, Zellgröße weiterhin 9,998138149.
     """
     stufen = ["small", "medium", "large", "xlarge", "xxlarge"]
     zell = [10.000000000, 10.000000000, 9.998138149, 9.981381493, 10.000000000]
@@ -1549,7 +1557,7 @@ def genauigkeit_einzeln():
 
     Je Region und Fehlermass eine Datei mit einem einzigen Panel. Die Legende
     steht nicht im Bild, sondern gehoert in die Bildunterschrift der
-    uebergeordneten Abbildung, damit sie nicht viermal wiederholt wird.
+    übergeordneten Abbildung, damit sie nicht viermal wiederholt wird.
     Dieselbe Ordinatenskala in allen vier, damit die Panels vergleichbar sind.
     """
     import csv
@@ -1575,7 +1583,7 @@ def genauigkeit_einzeln():
 
     x = np.arange(len(OPERATIONEN))
     for spalte, name in (("mae", "mae"), ("rmse", "rmse")):
-        # gemeinsame Skala je Fehlermass ueber beide Regionen
+        # gemeinsame Skala je Fehlermass über beide Regionen
         alle = df[spalte].dropna()
         ylim = (alle.min() / 3, alle.max() * 3)
         for block, region, kurz in (("A1", "Berlin", "berlin"),
@@ -1706,11 +1714,11 @@ def grenzfall_fullpp():
     """Laufzeit der drei Strategien im Vergleich, small bis large.
 
     full_pp transformiert alle Eingangsdaten lokal, also sechzehn
-    Sentinel-2-Aufnahmen und das Hoehenmodell, und stellt sie ueber load_stac
+    Sentinel-2-Aufnahmen und das Hoehenmodell, und stellt sie über load_stac
     bereit. Das Backend transformiert dann nichts mehr, fuehrt aber die
     Operation weiterhin aus.
 
-    Einschraenkung: full_pp gibt netCDF aus, weil mit GeoTIFF alle neun Laeufe
+    Einschraenkung: full_pp gibt netCDF aus, weil mit GeoTIFF alle neun Läufe
     an einer beschaedigten Zwischendatei scheiterten. local_pp und onthefly
     geben GeoTIFF aus. Der Vergleich der Gesamtdauer enthaelt damit einen
     Formatunterschied. Vergleichbar ist die Vorverarbeitung, sie laeuft in
@@ -1747,13 +1755,7 @@ def grenzfall_fullpp():
     df["sonstiges"] = (df.total_time - df.job_execution_time
                        - df.download_time - df.preprocessing_time).clip(lower=0)
 
-    ANTEILE = [("bezug", "Bezug der Eingangsdaten", "#7f3b08"),
-               ("preprocessing_time", "lokale Vorbereitung", "#e08214"),
-               ("annahme", "Jobannahme", "#d9d9d9"),
-               ("queue_time", "Warteschlange", "#b2b2b2"),
-               ("processing_time", "Rechenzeit Backend", "#1f4e79"),
-               ("download_time", "Ergebnisdownload", "#7fb3d5"),
-               ("sonstiges", "Sonstiges", "#efefef")]
+    ANTEILE = ZEITANTEILE
     KURZ = {"onthefly": "onthefly", "local_preprocessing": "local_pp",
             "full_preprocessing": "full_pp"}
     strategien = ["onthefly", "local_preprocessing", "full_preprocessing"]
@@ -1817,14 +1819,14 @@ def grenzfall_fullpp():
 
 
 def aufschlag():
-    """Mengen- und Laufzeitaufschlag von local_pp gegenueber onthefly.
+    """Mengen- und Laufzeitaufschlag von local_pp gegenüber onthefly.
 
     Links der Anteil, um den das Backend bei local_pp mehr Eingangsmenge
     abrechnet, rechts der Anteil, um den die Gesamtdauer laenger ausfaellt.
     Beide beziehen sich auf die Skalierungsreihe bei merge_add.
 
-    Der Mengenaufschlag bleibt ueber die Stufen konstant, die Laufzeitdifferenz
-    tritt erst bei large auf. Der groessere Ausschnitt erklaert die Differenz
+    Der Mengenaufschlag bleibt über die Stufen konstant, die Laufzeitdifferenz
+    tritt erst bei large auf. Der größere Ausschnitt erklaert die Differenz
     damit nur zum Teil.
     """
     df = hole("""
