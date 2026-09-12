@@ -43,3 +43,4 @@ analyse_kapitel7.txt
 stac_probe_*.json
 probe_*.py
 patch_plots.py
+.claude/

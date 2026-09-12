@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_benchmark.py - Automatisierter Ablauf fuer die beiden CRS-Strategien
+run_benchmark.py - Automatisierter Ablauf für die beiden CRS-Strategien
 
 Strategien:
   onthefly            - Cross-CRS merge direkt auf CDSE
@@ -41,15 +41,15 @@ from database import import_nginx_access_log, import_run
 CDSE_URL = "https://openeo.dataspace.copernicus.eu/openeo/1.2"
 TERRASCOPE_URL = "https://openeo.terrascope.be/openeo/1.2"
 
-# --backend: waehlbare openEO-Backends. Setzt NUR Endpunkt und
+# --backend: wählbare openEO-Backends. Setzt NUR Endpunkt und
 # OIDC-Anbieter - Prozessgraphen, Strategien, Formate, Workflows, der
-# Hosting-Server und die STAC-Erzeugung bleiben identisch, damit Laeufe
-# ueber Backends hinweg vergleichbar sind.
+# Hosting-Server und die STAC-Erzeugung bleiben identisch, damit Läufe
+# über Backends hinweg vergleichbar sind.
 #
-# oidc_provider=None heisst: authenticate_oidc() ohne provider_id, also
+# oidc_provider=None heißt: authenticate_oidc() ohne provider_id, also
 # das bisherige Verhalten. Terrascope hat genau EINEN Anbieter ("CDSE",
-# dieselbe Identitaet wie beim Direktzugang), der wird explizit gesetzt,
-# damit die Anmeldung nicht von einer Auto-Auswahl des Clients abhaengt.
+# dieselbe Identität wie beim Direktzugang), der wird explizit gesetzt,
+# damit die Anmeldung nicht von einer Auto-Auswahl des Clients abhängt.
 BACKENDS = {
     "cdse":       {"url": CDSE_URL,       "oidc_provider": None},
     "terrascope": {"url": TERRASCOPE_URL, "oidc_provider": "CDSE"},
@@ -58,7 +58,7 @@ DEFAULT_BACKEND = "cdse"
 
 
 def _oidc_provider_for(api_url: str):
-    """OIDC-Anbieter zu einer Backend-URL, oder None fuer den Default.
+    """OIDC-Anbieter zu einer Backend-URL, oder None für den Default.
 
     Bewusst aus der URL abgeleitet statt durch alle run_openeo-Aufrufe
     gereicht: so bekommt auch ein per --api-url direkt angegebener
@@ -73,12 +73,12 @@ def _oidc_provider_for(api_url: str):
 
 
 def _backend_for_url(api_url: str):
-    """Backend-Schluessel ('cdse'/'terrascope') zu einer URL, oder None.
+    """Backend-Schlüssel ('cdse'/'terrascope') zu einer URL, oder None.
 
     Gleiche Netloc-Logik wie _oidc_provider_for, nur mit dem Namen als
-    Ergebnis. None heisst "keine der bekannten Backend-URLs" - das trifft
+    Ergebnis. None heißt "keine der bekannten Backend-URLs" - das trifft
     z.B. auf "local" zu, das local_reference in seine results.json im
-    Run-Root schreibt (dort laeuft kein Backend-Job).
+    Run-Root schreibt (dort läuft kein Backend-Job).
     """
     host = urllib.parse.urlparse(api_url or "").netloc.lower()
     if not host:
@@ -89,40 +89,40 @@ def _backend_for_url(api_url: str):
     return None
 
 ALL_STRATEGIES = ["onthefly", "local_preprocessing", "full_preprocessing"]
-# local_reference ist die unabhaengige lokale Ground-Truth-Pipeline ohne
+# local_reference ist die unabhängige lokale Ground-Truth-Pipeline ohne
 # CDSE-Workflow-Job - separat opt-in, weil sie nicht direkt mit CDSE-Strategien
 # vergleichbar ist (wird per --reference-check als REFERENZ benutzt).
 EXTRA_STRATEGIES = ["local_reference"]
 
 # Extents bei denen full_preprocessing per Default ausgesetzt wird, weil
 # die hohe Anzahl Range-Requests (siehe nginx_access_log -> xlarge ~1170
-# Requests) regelmaessig zu CDSE-Timeouts fuehrt. Mit --include-full-pp=yes
-# kann das uebersteuert werden.
+# Requests) regelmäßig zu CDSE-Timeouts führt. Mit --include-full-pp=yes
+# kann das übersteuert werden.
 LARGE_EXTENTS_FOR_FULL_PP = ("xlarge", "xxlarge")
 
-# AOI-Groessen (Kantenlaenge in km) um den Region-Mittelpunkt.
-# 'medium' bleibt Backward-Compat = unveraenderter REGIONS-Extent.
+# AOI-Größen (Kantenlänge in km) um den Region-Mittelpunkt.
+# 'medium' bleibt Backward-Compat = unveränderter REGIONS-Extent.
 SIZE_KM = {"small": 5.0, "medium": 10.0, "large": 50.0, "xlarge": 100.0, "xxlarge": 200.0}
 
-# Workflows fuer KONTINUIERLICHE Zweitraster (DEM). 'merge_add' = bisheriges
+# Workflows für KONTINUIERLICHE Zweitraster (DEM). 'merge_add' = bisheriges
 # Verhalten. Rechnen alle arithmetisch auf beiden Cubes.
 CONTINUOUS_WORKFLOWS = ("merge_add", "subtract", "mask", "aggregation", "focal",
                         "resample", "filter_bbox")
 
-# Workflows fuer KATEGORIALE Zweitraster (Landbedeckung). Arithmetik ueber
+# Workflows für KATEGORIALE Zweitraster (Landbedeckung). Arithmetik über
 # Klassen-IDs ist bedeutungslos (Klasse 10 + Reflektanz 2742 ist keine
-# Groesse), deshalb ein eigener Satz:
+# Größe), deshalb ein eigener Satz:
 #   lc_overlay - merge_cubes bleibt erhalten, damit dieselbe Gitter-
 #                Aushandlung zwischen S2- und Zweitcube stattfindet wie im
 #                bisherigen Benchmark; der overlap_resolver reicht aber den
 #                Zweitcube durch statt zu addieren. Ergebnis ist die
 #                KLASSENKARTE auf dem S2-Gitter - jedes abweichende Pixel
-#                ist ein Transformationsartefakt, unvermischt. Primaerbeleg.
+#                ist ein Transformationsartefakt, unvermischt. Primärbeleg.
 #   lc_mask    - B04 auf eine Zielklasse maskiert (realistischer
-#                Anwendungsfall). Gemessen wird die VALIDITAET (Maske
-#                getroffen ja/nein), nicht der B04-Wert: wo beide Laeufe
-#                gueltig sind, sind die Werte ohnehin identisch, und ein
-#                MAE ueber die gueltigen Pixel wuerde die Maskenkante -
+#                Anwendungsfall). Gemessen wird die VALIDITÄT (Maske
+#                getroffen ja/nein), nicht der B04-Wert: wo beide Läufe
+#                gültig sind, sind die Werte ohnehin identisch, und ein
+#                MAE über die gültigen Pixel würde die Maskenkante -
 #                also genau das Signal - strukturell ausblenden.
 CATEGORICAL_WORKFLOWS = ("lc_overlay", "lc_mask")
 
@@ -134,15 +134,15 @@ WORKFLOWS = CONTINUOUS_WORKFLOWS + CATEGORICAL_WORKFLOWS
 #
 # 'dem' ist der historische, fest verdrahtete Fall - die Werte hier
 # entsprechen exakt dem, was in scenarios/bench_onthefly_{region}.json
-# steht. Deshalb wird bei dataset='dem' KEINE Substitution ausgefuehrt
+# steht. Deshalb wird bei dataset='dem' KEINE Substitution ausgeführt
 # (_apply_dataset_to_pg steigt sofort aus) und der Graph bleibt
 # byte-identisch.
 #
-# Namens-Hinweis: viele Funktionen und DB-Spalten heissen historisch
+# Namens-Hinweis: viele Funktionen und DB-Spalten heißen historisch
 # "dem_*" (dem_layout, dem_format, dem_tiles, _get_or_download_dem, ...).
 # Sie meinen seit --dataset generisch DAS ZWEITE RASTER. Bewusst nicht
-# umbenannt: das erzeugte einen riesigen Diff und braeche die
-# DB-Kompatibilitaet zu allen bisherigen Laeufen, ohne Evidenz zu liefern.
+# umbenannt: das erzeugte einen riesigen Diff und bräche die
+# DB-Kompatibilität zu allen bisherigen Läufen, ohne Evidenz zu liefern.
 # ---------------------------------------------------------------------------
 DATASETS = {
     "dem": {
@@ -155,8 +155,8 @@ DATASETS = {
         "workflows": CONTINUOUS_WORKFLOWS,
         "default_workflow": "merge_add",
         "label": "COPERNICUS_30 (Hoehe, kontinuierlich)",
-        # Unveraendert die bisherige Auswahl. 'mode' ist hier NICHT sinnvoll:
-        # eine Mehrheitsentscheidung ueber Hoehenwerte verwirft Information,
+        # Unverändert die bisherige Auswahl. 'mode' ist hier NICHT sinnvoll:
+        # eine Mehrheitsentscheidung über Höhenwerte verwirft Information,
         # statt zu mitteln.
         "resampling": ("nearest", "bilinear", "cubic"),
     },
@@ -169,10 +169,10 @@ DATASETS = {
         "workflows": CATEGORICAL_WORKFLOWS,
         "default_workflow": "lc_overlay",
         "label": "ESA_WORLDCOVER_10M_2021_V2 (Landbedeckung, kategorial)",
-        # nearest (jedes Zielpixel uebernimmt genau eine Quellklasse) und
-        # mode (haeufigste Klasse im Quellfenster). mode ist beim
-        # VERGROEBERN das fachlich richtige Verfahren - nearest greift dort
-        # willkuerlich einen einzelnen Quellpixel heraus. bilinear/cubic
+        # nearest (jedes Zielpixel übernimmt genau eine Quellklasse) und
+        # mode (häufigste Klasse im Quellfenster). mode ist beim
+        # VERGRÖBERN das fachlich richtige Verfahren - nearest greift dort
+        # willkürlich einen einzelnen Quellpixel heraus. bilinear/cubic
         # bleiben ausgeschlossen: sie mitteln Klassen-IDs.
         "resampling": ("nearest", "mode"),
         # uint8, nodata 0, 1 Band, nativ EPSG:4326 @ 8.333e-05 Grad (~10 m).
@@ -180,7 +180,7 @@ DATASETS = {
         # 10 Baum, 30 Gras, 40 Acker, 50 bebaut, 60 vegetationsarm, 80 Wasser.
         "dtype": "uint8",
         "nodata": 0,
-        # Gueltige ESA-WorldCover-Klassen. Dient der INHALTLICHEN Pruefung
+        # Gültige ESA-WorldCover-Klassen. Dient der INHALTLICHEN Prüfung
         # des CDSE-Ergebnisses: der erste Serverlauf meldete success und
         # lieferte trotzdem S2-Reflexionswerte. Ein Ergebnis, dessen Werte
         # nicht in dieser Menge liegen, ist keine Klassenkarte.
@@ -190,14 +190,14 @@ DATASETS = {
 
 DEFAULT_DATASET = "dem"
 
-# Zielklasse fuer lc_mask: 10 = Tree cover (ESA WorldCover). Bewusst eine
-# haeufige Klasse - eine seltene liefert zu wenig Maskenkante, um den
+# Zielklasse für lc_mask: 10 = Tree cover (ESA WorldCover). Bewusst eine
+# häufige Klasse - eine seltene liefert zu wenig Maskenkante, um den
 # Transformationsfehler sichtbar zu machen.
 LC_MASK_CLASS = 10
 
 
 def _dataset_of(args) -> str:
-    """Datensatz-Paar aus den CLI-Args, mit Default und Pruefung."""
+    """Datensatz-Paar aus den CLI-Args, mit Default und Prüfung."""
     ds = getattr(args, "dataset", None) or DEFAULT_DATASET
     if ds not in DATASETS:
         raise ValueError(
@@ -206,15 +206,15 @@ def _dataset_of(args) -> str:
 
 
 def _is_categorical(dataset: str) -> bool:
-    """True, wenn das zweite Raster Klassen statt Messwerte traegt."""
+    """True, wenn das zweite Raster Klassen statt Messwerte trägt."""
     return bool(DATASETS[dataset]["categorical"])
 
 
 def _categorical_output(dataset: str, workflow: str) -> bool:
     """True, wenn der ERGEBNIS-Raster des Workflows kategorial zu vergleichen
-    ist (Uebereinstimmungsquote statt MAE/RMSE).
+    ist (Übereinstimmungsquote statt MAE/RMSE).
 
-    Gilt fuer beide Landcover-Workflows: lc_overlay liefert Klassen-IDs,
+    Gilt für beide Landcover-Workflows: lc_overlay liefert Klassen-IDs,
     lc_mask liefert zwar B04-Werte, aber die Aussage steckt in der
     Maskenkante - s. Kommentar bei CATEGORICAL_WORKFLOWS.
     """
@@ -225,7 +225,7 @@ def _validate_dataset_workflow(dataset: str, workflow: str) -> None:
     """Bricht ab, wenn Datensatz und Workflow nicht zusammenpassen.
 
     Harte Ablehnung statt stiller Korrektur: ein arithmetischer Workflow auf
-    Klassen-IDs (oder umgekehrt) wuerde durchlaufen und plausibel aussehende,
+    Klassen-IDs (oder umgekehrt) würde durchlaufen und plausibel aussehende,
     aber bedeutungslose Zahlen liefern.
     """
     allowed = DATASETS[dataset]["workflows"]
@@ -238,16 +238,16 @@ def _validate_dataset_workflow(dataset: str, workflow: str) -> None:
 
 
 def _validate_dataset_resampling(dataset: str, resampling: str) -> None:
-    """Prueft, ob die Resampling-Methode zum Datensatz passt.
+    """Prüft, ob die Resampling-Methode zum Datensatz passt.
 
     Kategorial: nur 'nearest' und 'mode'. bilinear/cubic mitteln Klassen-IDs
     und erfinden dabei Klassen, die es nicht gibt (zwischen 10 Baum und
-    50 bebaut laege 30 Gras). 'mode' waehlt dagegen die haeufigste Klasse im
-    Quellfenster und ist beim Vergroebern das fachlich richtige Verfahren.
+    50 bebaut läge 30 Gras). 'mode' wählt dagegen die häufigste Klasse im
+    Quellfenster und ist beim Vergröbern das fachlich richtige Verfahren.
 
-    Kontinuierlich: unveraendert nearest/bilinear/cubic.
+    Kontinuierlich: unverändert nearest/bilinear/cubic.
 
-    Harte Ablehnung, nicht stille Korrektur - sonst stuende in der DB eine
+    Harte Ablehnung, nicht stille Korrektur - sonst stünde in der DB eine
     Laufkonfiguration, die nicht gefahren wurde.
     """
     allowed = DATASETS[dataset]["resampling"]
@@ -283,22 +283,22 @@ def _apply_dataset_to_pg(pg: dict, dataset: str) -> None:
 
 
 def verify_lc_overlay_graph(pg: dict, dataset: str = "landcover") -> list:
-    """Strukturpruefung fuer lc_overlay: liefert der Graph nachweisbar den
+    """Strukturprüfung für lc_overlay: liefert der Graph nachweisbar den
     KLASSEN-Cube als Ergebnis?
 
-    Gibt eine Liste von Beanstandungen zurueck (leer = in Ordnung).
+    Gibt eine Liste von Beanstandungen zurück (leer = in Ordnung).
 
     Hintergrund: der erste Serverlauf meldete success und lieferte trotzdem
-    S2-Reflexionswerte. So ein Fehler faellt weder dem Backend noch dem
-    Benchmark auf - deshalb hier eine Pruefung, die den Ergebnispfad
-    RUECKWAERTS von save_result verfolgt und belegt, dass er auf dem
+    S2-Reflexionswerte. So ein Fehler fällt weder dem Backend noch dem
+    Benchmark auf - deshalb hier eine Prüfung, die den Ergebnispfad
+    RÜCKWÄRTS von save_result verfolgt und belegt, dass er auf dem
     Klassenband endet.
 
-    Geprueft wird:
-      1. save_result haengt an filter_bands auf dem Klassenband.
+    Geprüft wird:
+      1. save_result hängt an filter_bands auf dem Klassenband.
       2. dessen Datenquelle ist merge_cubes.
-      3. merge1 hat KEINEN overlap_resolver (sonst waere die Band-Auswahl
-         wieder von der x/y-Bindung des Resolvers abhaengig).
+      3. merge1 hat KEINEN overlap_resolver (sonst wäre die Band-Auswahl
+         wieder von der x/y-Bindung des Resolvers abhängig).
       4. die Band-Labels der beiden Cubes sind DISJUNKT - der Zweitcube
          wird auf den Klassen-Bandnamen umbenannt, nicht auf B04.
       5. zwischen Klassen-Cube und save_result liegt KEIN rechnender
@@ -377,17 +377,17 @@ def verify_lc_overlay_graph(pg: dict, dataset: str = "landcover") -> list:
     return problems
 
 
-# Uebliche Nodata-Sentinels. CDSE schreibt das Ergebnis nicht zwingend im
+# Übliche Nodata-Sentinels. CDSE schreibt das Ergebnis nicht zwingend im
 # dtype der Quelle: ein uint8-Klassenraster kommt als int16 mit -32768
-# zurueck. Diese Werte sind daher KEINE Fremdwerte, sondern "kein Pixel".
+# zurück. Diese Werte sind daher KEINE Fremdwerte, sondern "kein Pixel".
 NODATA_SENTINELS = (-32768, -32767, -9999, -999, 0, 255, 65535)
 
 
 def _ignorable_nodata(values, file_nodata=None) -> set:
-    """Menge der Werte, die als Nodata gelten und nicht als Klasse zaehlen.
+    """Menge der Werte, die als Nodata gelten und nicht als Klasse zählen.
 
-    Enthaelt den in der Datei deklarierten Nodata-Wert plus die ueblichen
-    Sentinels, aber nur soweit sie tatsaechlich im Raster vorkommen - es
+    Enthält den in der Datei deklarierten Nodata-Wert plus die üblichen
+    Sentinels, aber nur soweit sie tatsächlich im Raster vorkommen - es
     wird nichts pauschal weggeworfen.
     """
     ignorable = set()
@@ -403,26 +403,26 @@ def _ignorable_nodata(values, file_nodata=None) -> set:
 
 def verify_categorical_result(result_dir, dataset: str,
                               label: str = "") -> bool:
-    """Prueft NACH dem CDSE-Job, ob das Ergebnis wirklich Klassen enthaelt.
+    """Prüft NACH dem CDSE-Job, ob das Ergebnis wirklich Klassen enthält.
 
     Der erste Landcover-Serverlauf meldete status=success und lieferte
     trotzdem S2-Reflexionswerte (int16, Werte 66..85 und negative statt
     uint8 mit 10/30/40/...). Weder das Backend noch der Benchmark haben das
-    bemerkt - erst der Accuracy-Check mit 0,0000 % Uebereinstimmung. Diese
-    Pruefung faengt genau das ab, direkt nach dem Job und mit klarer
-    Meldung, statt es in eine unerklaerliche Metrik laufen zu lassen.
+    bemerkt - erst der Accuracy-Check mit 0,0000 % Übereinstimmung. Diese
+    Prüfung fängt genau das ab, direkt nach dem Job und mit klarer
+    Meldung, statt es in eine unerklärliche Metrik laufen zu lassen.
 
     UNTERSCHEIDUNGSMERKMAL ist nicht der Wertebereich, sondern (a) ob die
     NICHT-Nodata-Werte alle in der Klassenmenge liegen und (b) wie viele
-    verschiedene Werte es ueberhaupt gibt. Ein korrektes Ergebnis darf
+    verschiedene Werte es überhaupt gibt. Ein korrektes Ergebnis darf
     negativ aussehen: CDSE liefert die Klassenkarte als int16 mit -32768
     als Nodata, also z.B. 8 Werte im Bereich -32768..90. Das echte
     Fehlerbild sah dagegen so aus: 106 verschiedene Werte im Bereich
     -20..85, davon fast keiner eine Klasse. Ein Nodata-Sentinel allein
-    darf also nie eine Diagnose ausloesen.
+    darf also nie eine Diagnose auslösen.
 
-    Gibt True zurueck wenn plausibel, sonst False (und meldet laut). Wirft
-    NICHT, und der Rueckgabewert wird von den Strategien bewusst NICHT
+    Gibt True zurück wenn plausibel, sonst False (und meldet laut). Wirft
+    NICHT, und der Rückgabewert wird von den Strategien bewusst NICHT
     ausgewertet: die Diagnose meldet, blockiert aber weder den Lauf noch
     den nachfolgenden Accuracy-Check.
     """
@@ -473,30 +473,30 @@ def verify_categorical_result(result_dir, dataset: str,
     return ok
 
 
-# Ziel-Zellgroesse in Metern. 10 m = Sentinel-2 B04 nativ und damit das
-# bisherige, fest verdrahtete Verhalten. Ueber --resolution steuerbar
-# (Experimentdimension Zellgroesse -> Laufzeit/Datenvolumen/Genauigkeit).
+# Ziel-Zellgröße in Metern. 10 m = Sentinel-2 B04 nativ und damit das
+# bisherige, fest verdrahtete Verhalten. Über --resolution steuerbar
+# (Experimentdimension Zellgröße -> Laufzeit/Datenvolumen/Genauigkeit).
 DEFAULT_RESOLUTION_M = 10.0
 
-# Faktor fuer den Zwischenschritt von workflow=resample: das PG resampelt
-# nach EPSG:3035 @ (Faktor x Zielaufloesung) und wieder zurueck. Bei der
-# Default-Aufloesung ergibt das exakt die bisherigen 30 m.
+# Faktor für den Zwischenschritt von workflow=resample: das PG resampelt
+# nach EPSG:3035 @ (Faktor x Zielauflösung) und wieder zurück. Bei der
+# Default-Auflösung ergibt das exakt die bisherigen 30 m.
 RESAMPLE_DETOUR_FACTOR = 3
 
 
 def _pg_resolution(res: float):
-    """Aufloesungswert wie er in einen openEO-Process-Graph geschrieben wird.
+    """Auflösungswert wie er in einen openEO-Process-Graph geschrieben wird.
 
     Ganzzahlige Werte werden als int serialisiert - so bleibt der Graph bei
-    der Default-Aufloesung BYTE-identisch zu den bisherigen Szenarien
+    der Default-Auflösung BYTE-identisch zu den bisherigen Szenarien
     ("resolution": 10, nicht 10.0).
     """
     return int(res) if float(res).is_integer() else float(res)
 
 
 def _resolution_of(args) -> float:
-    """Ziel-Zellgroesse aus den CLI-Args, mit Default und Plausibilitaets-
-    pruefung. Zentral, damit jeder Strategie-Pfad denselben Wert sieht."""
+    """Ziel-Zellgröße aus den CLI-Args, mit Default und Plausibilitäts-
+    prüfung. Zentral, damit jeder Strategie-Pfad denselben Wert sieht."""
     res = float(getattr(args, "resolution", DEFAULT_RESOLUTION_M)
                 or DEFAULT_RESOLUTION_M)
     if res <= 0:
@@ -505,14 +505,14 @@ def _resolution_of(args) -> float:
 
 
 def _is_default_resolution(res: float) -> bool:
-    """True, wenn die Aufloesung der historischen 10 m entspricht. Nur dann
-    bleiben Prozessgraphen unveraendert (kein zusaetzlicher Resample-Knoten).
+    """True, wenn die Auflösung der historischen 10 m entspricht. Nur dann
+    bleiben Prozessgraphen unverändert (kein zusätzlicher Resample-Knoten).
     """
     return abs(float(res) - DEFAULT_RESOLUTION_M) < 1e-9
 
-# Lokale Resampling-Methoden fuer die Reprojektion des zweiten Rasters.
-# 'mode' (Mehrheitsentscheidung) ist das fachlich richtige Verfahren fuer
-# KATEGORIALE Daten: es waehlt die haeufigste Klasse im Quellfenster, statt
+# Lokale Resampling-Methoden für die Reprojektion des zweiten Rasters.
+# 'mode' (Mehrheitsentscheidung) ist das fachlich richtige Verfahren für
+# KATEGORIALE Daten: es wählt die häufigste Klasse im Quellfenster, statt
 # wie bilinear/cubic/average Klassen-IDs zu mitteln und dabei nicht
 # existierende Klassen zu erfinden. Lokal per GDAL-Warp verifiziert.
 LOCAL_RESAMPLING = {
@@ -523,15 +523,15 @@ LOCAL_RESAMPLING = {
 }
 
 # Abbildung lokaler Methodennamen (rasterio) auf die openEO-Namen, die CDSE
-# fuer resample_spatial / resample_cube_spatial akzeptiert (laut
+# für resample_spatial / resample_cube_spatial akzeptiert (laut
 # describe_process: average, bilinear, cubic, cubicspline, lanczos, max, med,
 # min, mode, near, q1, q3, rms, sum).
 #
-# WARUM ueberhaupt: --local-resampling steuerte bisher NUR die lokale
-# Reprojektion, waehrend die serverseitigen Resample-Knoten fest auf "near"
-# standen. Bei --resolution != 10 vergroebern damit beide Seiten
+# WARUM überhaupt: --local-resampling steuerte bisher NUR die lokale
+# Reprojektion, während die serverseitigen Resample-Knoten fest auf "near"
+# standen. Bei --resolution != 10 vergröbern damit beide Seiten
 # UNTERSCHIEDLICH - gemessen berlin/medium/60 m: MAE 402 (nearest) bzw. 322
-# (bilinear) gegenueber 0,0014 bei nativer Aufloesung. Der Graph leitet die
+# (bilinear) gegenüber 0,0014 bei nativer Auflösung. Der Graph leitet die
 # Methode jetzt aus derselben Quelle ab.
 #
 # 'nearest' -> 'near' ist der einzige Namensunterschied und zugleich der
@@ -546,11 +546,11 @@ OPENEO_RESAMPLE_METHOD = {
 
 
 def _pg_resample_method(resampling: str) -> str:
-    """openEO-Methodenname fuer einen lokalen Resampling-Namen.
+    """openEO-Methodenname für einen lokalen Resampling-Namen.
 
-    Unbekannte Werte fallen auf 'near' zurueck, damit ein Graph niemals mit
+    Unbekannte Werte fallen auf 'near' zurück, damit ein Graph niemals mit
     einer vom Backend abgelehnten Methode gebaut wird (die CLI validiert die
-    Auswahl ohnehin vorher ueber die choices von --local-resampling).
+    Auswahl ohnehin vorher über die choices von --local-resampling).
     """
     return OPENEO_RESAMPLE_METHOD.get(resampling, "near")
 
@@ -558,16 +558,16 @@ def _pg_resample_method(resampling: str) -> str:
 # DEM-Layout Experiment (Nebenkapitel): interne Struktur des extern
 # bereitgestellten DEM bei local_preprocessing. Die drei Varianten
 # unterscheiden sich AUSSCHLIESSLICH im Schreibprofil des GeoTIFF - die
-# reprojizierten Pixelwerte, CRS, Transform und Aufloesung sind identisch.
+# reprojizierten Pixelwerte, CRS, Transform und Auflösung sind identisch.
 #   striped              - gestreiftes GeoTIFF, keine Kachelung, keine
 #                          Kompression, keine Overviews. Aktuelles Verhalten
-#                          (Default -> rueckwaertskompatibel).
+#                          (Default -> rückwärtskompatibel).
 #   tiled_uncompressed   - gekachelt 128x128, keine Kompression, keine
 #                          Overviews. Isoliert den Effekt der Kachelung.
 #   cog                  - gekachelt 128x128, deflate, interne Overviews.
-#                          Fuegt gegenueber tiled_uncompressed Kompression
+#                          Fügt gegenüber tiled_uncompressed Kompression
 #                          und Overviews hinzu.
-# 128x128 = CDSE-Output-Blockgroesse -> fairer Vergleich.
+# 128x128 = CDSE-Output-Blockgröße -> fairer Vergleich.
 DEM_LAYOUTS = ("striped", "tiled_uncompressed", "cog")
 _COG_BLOCK_SIZE = 128
 
@@ -575,7 +575,7 @@ _COG_BLOCK_SIZE = 128
 # DEM-Format Experiment (Machbarkeit): kann CDSE ein extern per load_stac
 # bereitgestelltes DEM auch in Zarr / NetCDF verstehen, nicht nur GeoTIFF?
 # Nur local_preprocessing ist betroffen. Der Default 'gtiff' bleibt
-# rueckwaertskompatibel - die GeoTIFF-Achse mit --dem-layout ist orthogonal.
+# rückwärtskompatibel - die GeoTIFF-Achse mit --dem-layout ist orthogonal.
 #   gtiff  - Standard, siehe --dem-layout
 #   zarr   - xarray-Zarr-Verzeichnis-Store (CF-Attribute + spatial_ref)
 #   netcdf - xarray-NetCDF-4 Datei (CF-Attribute + spatial_ref)
@@ -594,55 +594,55 @@ _DEM_FORMAT_EXT = {
 }
 
 # --zarr-href-form: welche Adressform der data-Asset bei dem_format=zarr
-# traegt. Reine Dokumentationsachse - jede Form entspricht einem bereits
+# trägt. Reine Dokumentationsachse - jede Form entspricht einem bereits
 # gelaufenen oder noch offenen CDSE-Versuch, und alle bleiben abrufbar,
-# damit ein Ergebnis nachtraeglich reproduzierbar ist.
+# damit ein Ergebnis nachträglich reproduzierbar ist.
 #
 #   store           Verzeichnis-Store direkt (aktueller Default, HEAD-Form):
 #                   https://HOST/x.zarr
-#   store-vsicurl   derselbe Store mit GDAL-Pfad-Praefix, sonst nichts:
+#   store-vsicurl   derselbe Store mit GDAL-Pfad-Präfix, sonst nichts:
 #                   /vsicurl/https://HOST/x.zarr
 #   chunk           erster Array-Chunk unter bekannter Bild-Endung:
 #                   https://HOST/x.zarr/DEM/0.0.tif
-#   driver-fragment GDAL-Treiberausdruck, Endung als URL-Fragment angehaengt:
+#   driver-fragment GDAL-Treiberausdruck, Endung als URL-Fragment angehängt:
 #                   ZARR:"/vsicurl/https://HOST/x.zarr":/DEM#x.tif
 #   driver-plain    derselbe Ausdruck ohne Fragment:
 #                   ZARR:"/vsicurl/https://HOST/x.zarr":/DEM
-#   driver-novsi    derselbe Ausdruck ohne /vsicurl/-Praefix:
+#   driver-novsi    derselbe Ausdruck ohne /vsicurl/-Präfix:
 #                   ZARR:"https://HOST/x.zarr":/DEM
-#   driver-noquote  Treiberausdruck OHNE Anfuehrungszeichen:
+#   driver-noquote  Treiberausdruck OHNE Anführungszeichen:
 #                   ZARR:/vsicurl/https://HOST/x.zarr:/DEM
-#   driver-minimal  nur Praefix + URL, ohne Array-Pfad, ohne Quotes:
+#   driver-minimal  nur Präfix + URL, ohne Array-Pfad, ohne Quotes:
 #                   ZARR:https://HOST/x.zarr
 #
 # Die letzten beiden zielen auf den Befund, dass CDSE bei den gequoteten
 # Formen in addLink abbricht (Py4JJavaError o.addLink) - vermutlich weil
-# Anfuehrungszeichen und mehrfache Doppelpunkte keine gueltige URI ergeben
+# Anführungszeichen und mehrfache Doppelpunkte keine gültige URI ergeben
 # (Link.href ist java.net.URI, OpenSearchResponses.scala:139). Der
-# funktionierende netcdf-href traegt nur ein Pfad-Praefix und bleibt
-# URL-aehnlich; diese beiden Formen ahmen das nach.
+# funktionierende netcdf-href trägt nur ein Pfad-Präfix und bleibt
+# URL-ähnlich; diese beiden Formen ahmen das nach.
 #
-# store-vsicurl zieht die Konsequenz daraus und laesst die Treibersyntax
+# store-vsicurl zieht die Konsequenz daraus und lässt die Treibersyntax
 # ganz weg - der href ist dann exakt so gebaut wie der funktionierende
-# netcdf-href (nur Pfad-Praefix, keine Quotes, keine zusaetzlichen
-# Doppelpunkte) und bleibt damit ein gueltiger, absoluter Pfad. Zwei
-# Gruende, warum das die bisher belegten Huerden trifft:
+# netcdf-href (nur Pfad-Präfix, keine Quotes, keine zusätzlichen
+# Doppelpunkte) und bleibt damit ein gültiger, absoluter Pfad. Zwei
+# Gründe, warum das die bisher belegten Hürden trifft:
 #   - Ein Treiberausdruck als href wurde von CDSE als RELATIVER Pfad
-#     behandelt und hinter die Basis-URL gehaengt (404 auf
+#     behandelt und hinter die Basis-URL gehängt (404 auf
 #     "http:/HOST/ZARR:/vsicurl/http:/HOST/...").  Ein mit "/vsi"
 #     beginnender Pfad gilt dagegen als absolut (pystac/utils.py,
 #     _make_absolute_href_url) und ist ein legaler java.net.URI
 #     (OpenSearchResponses.scala:139).
 #   - Der Ausdruck endet weiter auf ".zarr" und trifft damit
-#     ZarrRasterSourceProvider.canProcess; das Praefix muss aus dem href
+#     ZarrRasterSourceProvider.canProcess; das Präfix muss aus dem href
 #     kommen, weil dieser Provider als einziger der Kette kein
 #     .replace("https", "/vsicurl/https") macht.
 # Lokal gemessen (GDAL 3.10.3, Server mit 301 auf Verzeichnisse wie echter
-# nginx, unter GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR): oeffnet den
-# UNVERAENDERTEN Store direkt als 2D-Raster mit EPSG:32633 und korrektem
+# nginx, unter GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR): öffnet den
+# UNVERÄNDERTEN Store direkt als 2D-Raster mit EPSG:32633 und korrektem
 # Transform, Pixel SHA-256-identisch. Ein Store mit nur einem Array (ohne
-# x/y-Koordinaten) waere hier NICHT besser - er liefert eine
-# Identitaets-Transformation, weil GDALs Zarr-Treiber die Geotransformation
+# x/y-Koordinaten) wäre hier NICHT besser - er liefert eine
+# Identitäts-Transformation, weil GDALs Zarr-Treiber die Geotransformation
 # aus den Koordinatenarrays zieht und das GeoTransform-Attribut ignoriert.
 ZARR_HREF_FORMS = ("store", "store-vsicurl", "chunk", "driver-fragment",
                    "driver-plain", "driver-novsi", "driver-noquote",
@@ -651,35 +651,35 @@ DEFAULT_ZARR_HREF_FORM = "store"
 
 # --zarr-asset-media-type: welchen Medientyp der zarr-data-Asset deklariert.
 #   none        gar kein 'type'-Feld (Default, bisheriges Verhalten). Der
-#               Medientyp-Check in load_stac.py::_is_band_asset haengt an
-#               `if asset.media_type:` und entfaellt damit; entschieden wird
-#               ueber roles=['data']. In einem CDSE-Lauf belegt: das Asset
+#               Medientyp-Check in load_stac.py::_is_band_asset hängt an
+#               `if asset.media_type:` und entfällt damit; entschieden wird
+#               über roles=['data']. In einem CDSE-Lauf belegt: das Asset
 #               wurde ohne type-Feld akzeptiert
 #               (opensearch_stats={'assets': 1, 'items with
 #               len(band_assets)=1': 1}).
 #   image/tiff  deklariert einen Typ aus der Whitelist
-#               (_is_supported_raster_mime_type). Sachlich falsch fuer einen
+#               (_is_supported_raster_mime_type). Sachlich falsch für einen
 #               Zarr-Store, aber die von der CDSE-Doku ("Minimal STAC
-#               requirement summary") verlangte Form - und fuer die
-#               Reader-Wahl folgenlos, die haengt allein an der Pfadendung
+#               requirement summary") verlangte Form - und für die
+#               Reader-Wahl folgenlos, die hängt allein an der Pfadendung
 #               (ZarrRasterSourceProvider.canProcess).
 ZARR_ASSET_MEDIA_TYPES = ("none", "image/tiff")
 DEFAULT_ZARR_ASSET_MEDIA_TYPE = "none"
 
 
 def _zarr_asset_href(store_url: str, form: str, band: str) -> str:
-    """href des zarr-data-Assets in der gewuenschten Adressform.
+    """href des zarr-data-Assets in der gewünschten Adressform.
 
     store_url: URL des Verzeichnis-Stores OHNE Schluss-Slash.
     band:      Array-Name im Store (DATASETS[dataset]['band']), also der
                Pfad hinter dem Doppelpunkt im GDAL-Treiberausdruck.
 
-    Der Chunk-Name '0.0' ist die zarr-v2-Konvention fuer den ersten Chunk
+    Der Chunk-Name '0.0' ist die zarr-v2-Konvention für den ersten Chunk
     eines 2D-Arrays (Zeile.Spalte) und entspricht dem, was
-    _write_dem_as_zarr tatsaechlich schreibt. ACHTUNG: der Store enthaelt
+    _write_dem_as_zarr tatsächlich schreibt. ACHTUNG: der Store enthält
     die Datei als '0.0' OHNE Endung - die Form 'chunk' zeigt auf
-    '0.0.tif' und setzt voraus, dass eine so benannte Kopie zusaetzlich
-    auf dem Server liegt. Das Upload-Verhalten wird hier NICHT geaendert.
+    '0.0.tif' und setzt voraus, dass eine so benannte Kopie zusätzlich
+    auf dem Server liegt. Das Upload-Verhalten wird hier NICHT geändert.
     """
     if form not in ZARR_HREF_FORMS:
         raise ValueError(f"Unbekannte --zarr-href-form: {form!r}. "
@@ -687,8 +687,8 @@ def _zarr_asset_href(store_url: str, form: str, band: str) -> str:
     if form == "store":
         return store_url
     if form == "store-vsicurl":
-        # Nur das Pfad-Praefix, exakt wie beim netcdf-Asset. Idempotent,
-        # damit ein bereits praefixierter store_url nicht doppelt wird.
+        # Nur das Pfad-Präfix, exakt wie beim netcdf-Asset. Idempotent,
+        # damit ein bereits präfixierter store_url nicht doppelt wird.
         if store_url.startswith("/vsicurl/"):
             return store_url
         return f"/vsicurl/{store_url}"
@@ -697,12 +697,12 @@ def _zarr_asset_href(store_url: str, form: str, band: str) -> str:
     if form == "driver-noquote":
         return f"ZARR:/vsicurl/{store_url}:/{band}"
     if form == "driver-minimal":
-        # Ohne Array-Pfad: der Store enthaelt genau ein Datenarray
-        # (plus x/y/spatial_ref als Koordinaten), GDAL waehlt es beim
-        # Oeffnen des Stores selbst aus.
+        # Ohne Array-Pfad: der Store enthält genau ein Datenarray
+        # (plus x/y/spatial_ref als Koordinaten), GDAL wählt es beim
+        # Öffnen des Stores selbst aus.
         return f"ZARR:{store_url}"
-    # GDAL-Treiberausdruck. Anfuehrungszeichen sind GDALs Standardsyntax
-    # fuer Pfade mit Doppelpunkten (gdal.org, Zarr-Treiber: 'ZARR:"path":
+    # GDAL-Treiberausdruck. Anführungszeichen sind GDALs Standardsyntax
+    # für Pfade mit Doppelpunkten (gdal.org, Zarr-Treiber: 'ZARR:"path":
     # /array'). Ob CDSE sie transportiert, ist genau die offene Frage.
     if form == "driver-novsi":
         inner = store_url
@@ -710,8 +710,8 @@ def _zarr_asset_href(store_url: str, form: str, band: str) -> str:
         inner = f"/vsicurl/{store_url}"
     expr = f'ZARR:"{inner}":/{band}'
     if form == "driver-fragment":
-        # Bekannte Bild-Endung als URL-Fragment anhaengen, damit ein
-        # endungsbasierter Filter sie sieht, ohne den Pfad zu veraendern.
+        # Bekannte Bild-Endung als URL-Fragment anhängen, damit ein
+        # endungsbasierter Filter sie sieht, ohne den Pfad zu verändern.
         # Name = Store-Basename mit .tif statt .zarr.
         base = store_url.rsplit("/", 1)[-1]
         if base.endswith(".zarr"):
@@ -739,15 +739,15 @@ def _is_utm_epsg(epsg: int) -> bool:
 
 
 def _crs_is_geographic(crs_str: str) -> bool:
-    """True wenn das CRS in Grad rechnet (WGS84 & Co). Nur fuer die Warnung,
+    """True wenn das CRS in Grad rechnet (WGS84 & Co). Nur für die Warnung,
     dass eine in Metern gemeinte --resolution dort keine Meter sind."""
     from rasterio.crs import CRS as _RIOCRS
     return bool(_RIOCRS.from_user_input(crs_str).is_geographic)
 
 # ---------------------------------------------------------------------------
-# Hetzner-Konfiguration (per ENV ueberschreibbar; CLI-Flags --host / --web-path
-# / --url-base ueberschreiben die ENV). Trailing slash am Pfad ist erwartet
-# fuer die String-Konkatenation in scp_upload / asset URLs.
+# Hetzner-Konfiguration (per ENV überschreibbar; CLI-Flags --host / --web-path
+# / --url-base überschreiben die ENV). Trailing slash am Pfad ist erwartet
+# für die String-Konkatenation in scp_upload / asset URLs.
 # ---------------------------------------------------------------------------
 HETZNER_HOST = os.environ.get("BENCHMARK_HOST", "root@46.224.62.97")
 HETZNER_WEB_PATH = os.environ.get("BENCHMARK_WEB_PATH", "/var/www/benchmark-data/")
@@ -760,7 +760,7 @@ def _ensure_trailing_slash(s: str) -> str:
 # ---------------------------------------------------------------------------
 # Regionen: extent + Ziel-UTM-CRS
 # ---------------------------------------------------------------------------
-# Extents stimmen 1:1 mit den scenarios/bench_onthefly_{region}.json ueberein.
+# Extents stimmen 1:1 mit den scenarios/bench_onthefly_{region}.json überein.
 REGIONS = {
     "amsterdam": {
         "extent": {"west": 4.8,    "south": 52.33, "east": 4.95,  "north": 52.43},
@@ -821,16 +821,16 @@ RUN_META_FILENAME = "run_meta.json"
 
 def _write_run_meta(run_dir: Path, resolution: float,
                     dataset: str = DEFAULT_DATASET, **extra) -> Path:
-    """Schreibt run_meta.json in einen Run-Ordner (Zielaufloesung,
+    """Schreibt run_meta.json in einen Run-Ordner (Zielauflösung,
     Datensatz-Paar + optionale Zusatzfelder).
 
     Bewusst eine EIGENE Datei und kein Feld im Szenario-JSON: der
-    Process-Graph muss bei Default-Aufloesung byte-identisch zu den
+    Process-Graph muss bei Default-Auflösung byte-identisch zu den
     bisherigen Szenarien bleiben. Gelesen wird sie von
     _detect_folder_resolution und _detect_folder_dataset, damit der
-    Accuracy-Check Referenz und Test nach Aufloesung UND Datensatz-Paar
-    paart, statt Gitter unterschiedlicher Zellgroesse oder gar
-    Hoehendaten gegen Landbedeckung zu vergleichen.
+    Accuracy-Check Referenz und Test nach Auflösung UND Datensatz-Paar
+    paart, statt Gitter unterschiedlicher Zellgröße oder gar
+    Höhendaten gegen Landbedeckung zu vergleichen.
     """
     meta = {"resolution_m": float(resolution), "dataset": str(dataset)}
     meta.update(extra)
@@ -844,7 +844,7 @@ def _write_run_meta(run_dir: Path, resolution: float,
 def _compute_overview_factors(width: int, height: int, min_size: int = 256) -> list:
     """Overview-Faktoren [2, 4, 8, ...] bis kleinste Seite < min_size.
 
-    Fuer die COG-Variante: Overviews sollen genug Ebenen haben, damit CDSE
+    Für die COG-Variante: Overviews sollen genug Ebenen haben, damit CDSE
     bei einer typischen Anfrage nicht sofort den Vollpyramidenpixel liest.
     min_size=256 -> letzte Overview >= 128 px pro Seite, keine winzigen
     Ebenen die nur Overhead sind.
@@ -864,14 +864,14 @@ def _write_dem_with_layout(data, dst_meta: dict, output_tif: str,
     """Schreibt ein reprojiziertes DEM-Array mit einem der 3 Layout-Profile.
 
     data: 3D numpy Array (bands, height, width) - die Pixelwerte sind
-    zwischen allen Layouts identisch, nur die on-disk Repraesentation
+    zwischen allen Layouts identisch, nur die on-disk Repräsentation
     unterscheidet sich.
 
     dst_meta: rasterio meta-Dict mit driver, dtype, crs, transform, width,
     height, count, nodata. Wird pro Layout mit den layout-spezifischen
     Feldern (tiled, blockxsize, blockysize, compress, interleave)
-    ueberschrieben, damit z.B. ein aus dem Input geerbtes tiled=True
-    fuer die striped-Variante zurueckgesetzt wird.
+    überschrieben, damit z.B. ein aus dem Input geerbtes tiled=True
+    für die striped-Variante zurückgesetzt wird.
 
     layout:
       striped              - tiled=False, keine Kompression, keine Overviews
@@ -881,9 +881,9 @@ def _write_dem_with_layout(data, dst_meta: dict, output_tif: str,
                              Overviews via rasterio.build_overviews
 
     categorical: bei kategorialen Rastern (Landbedeckungsklassen) werden die
-    COG-Overviews per MODUS statt per Mittelwert gebaut. Der Mittelwert ueber
+    COG-Overviews per MODUS statt per Mittelwert gebaut. Der Mittelwert über
     Klassen-IDs erfindet Klassen, die es nicht gibt (zwischen 10 Baum und
-    50 bebaut laege 30 Gras) - und zwar unbemerkt, weil Overviews erst
+    50 bebaut läge 30 Gras) - und zwar unbemerkt, weil Overviews erst
     backend-seitig gelesen werden. Betrifft nur layout='cog'.
     """
     if layout not in DEM_LAYOUTS:
@@ -936,10 +936,10 @@ def _write_dem_with_layout(data, dst_meta: dict, output_tif: str,
 
 
 def _inspect_tif_layout(path: str) -> dict:
-    """Liest die tatsaechliche interne Struktur zurueck.
+    """Liest die tatsächliche interne Struktur zurück.
 
     Wird nach dem Schreiben aufgerufen, damit belegbar ist, dass die
-    gewuenschte Variante wirklich erzeugt wurde (und nicht z.B. tiled=True
+    gewünschte Variante wirklich erzeugt wurde (und nicht z.B. tiled=True
     weil rasterio vom Input geerbt hat).
     """
     with rasterio.open(path) as src:
@@ -962,7 +962,7 @@ def _inspect_tif_layout(path: str) -> dict:
 
 
 def _log_tif_layout(info: dict, prefix: str = "  ") -> None:
-    """Formatierter Log der Layout-Info fuer die Konsole."""
+    """Formatierter Log der Layout-Info für die Konsole."""
     size_mb = info["size_bytes"] / (1024 * 1024)
     print(f"{prefix}Layout-Verifikation: {Path(info['path']).name}")
     print(f"{prefix}  size            = {size_mb:.2f} MB "
@@ -1014,7 +1014,7 @@ def _build_xarray_dataset(data, dst_meta):
     - x/y werden aus dst_meta['transform'] als Pixel-Zentren berechnet.
     - CRS wird als WKT2 in spatial_ref.crs_wkt + als PROJ.4-String in
       spatial_ref.spatial_ref abgelegt (CF + GDAL Konvention).
-    - Bei mehreren Baendern kommt eine 'band'-Dimension dazu.
+    - Bei mehreren Bändern kommt eine 'band'-Dimension dazu.
 
     Damit erkennt jeder CF-konforme Reader (xarray + optional rioxarray,
     QGIS, gdal, netCDF-Tools) die Georeferenz.
@@ -1062,9 +1062,9 @@ def _build_xarray_dataset(data, dst_meta):
         "x": ("x", xs),
         "spatial_ref": ((), np.array(0, dtype="int8"), spatial_ref_attrs),
     }
-    # WICHTIG: _FillValue gehoert in .encoding, NICHT in .attrs. Steht sie
-    # in attrs, wandelt xarray beim Zurueckladen automatisch nach float und
-    # maskiert mit NaN - das wuerde die Pixel-Identitaet zerstoeren. Ueber
+    # WICHTIG: _FillValue gehört in .encoding, NICHT in .attrs. Steht sie
+    # in attrs, wandelt xarray beim Zurückladen automatisch nach float und
+    # maskiert mit NaN - das würde die Pixel-Identität zerstören. Über
     # encoding schreiben die zarr/netcdf-Backends den Fill-Wert korrekt in
     # die Datei, der Datentyp bleibt beim Lesen aber int16 (sofern der
     # Reader mask_and_scale=False setzt - CDSE macht das idR selbst).
@@ -1075,7 +1075,7 @@ def _build_xarray_dataset(data, dst_meta):
         var_encoding["_FillValue"] = nodata
 
     if count == 1:
-        # 2D-Variable ohne band-Achse - typisch fuer DEM.
+        # 2D-Variable ohne band-Achse - typisch für DEM.
         da = xr.DataArray(
             data[0], dims=("y", "x"),
             coords={"y": ys, "x": xs},
@@ -1105,15 +1105,15 @@ def _build_xarray_dataset(data, dst_meta):
 
 
 def _apply_geozarr_metadata(ds, dst_meta) -> None:
-    """Ergaenzt das Dataset in-place um GeoZarr-/GDAL-konforme Georeferenz-
+    """Ergänzt das Dataset in-place um GeoZarr-/GDAL-konforme Georeferenz-
     Attribute, damit ein reiner Zarr-Open (GDAL, CF-Reader) CRS UND Transform
-    OHNE begleitendes STAC-Item liefert. Nur fuer den zarr-Writer gedacht -
-    netcdf/gtiff bleiben unveraendert. Reine Metadaten: Pixelwerte und
+    OHNE begleitendes STAC-Item liefert. Nur für den zarr-Writer gedacht -
+    netcdf/gtiff bleiben unverändert. Reine Metadaten: Pixelwerte und
     .encoding (insb. _FillValue) werden nicht angefasst.
 
     Drei Konventionen redundant nebeneinander, weil unbekannt ist, welchen
-    Lesepfad CDSE fuer zarr nutzt:
-      1. CF/GeoZarr: vollstaendige grid_mapping-Attribute via
+    Lesepfad CDSE für zarr nutzt:
+      1. CF/GeoZarr: vollständige grid_mapping-Attribute via
          pyproj.CRS.to_cf() (echter grid_mapping_name + Projektions-
          parameter statt des Platzhalters "unknown") auf spatial_ref,
          plus axis="X"/"Y" auf den Koordinatenvariablen.
@@ -1167,48 +1167,48 @@ def _apply_geozarr_metadata(ds, dst_meta) -> None:
 
 
 def _inject_shape_into_consolidated_zarr_metadata(store_path) -> dict:
-    """Ergaenzt in der .zmetadata eines Zarr-v2-Stores jeden Eintrag, der kein
-    'shape' hat (die auf ".zgroup"/".zattrs" endenden Schluessel), um genau
-    dieses Feld - mit dem Shape des DEM-Arrays. Die Eintraege selbst bleiben
-    vollstaendig erhalten, es kommt nur ein Schluessel hinzu.
+    """Ergänzt in der .zmetadata eines Zarr-v2-Stores jeden Eintrag, der kein
+    'shape' hat (die auf ".zgroup"/".zattrs" endenden Schlüssel), um genau
+    dieses Feld - mit dem Shape des DEM-Arrays. Die Einträge selbst bleiben
+    vollständig erhalten, es kommt nur ein Schlüssel hinzu.
 
-    WARUM (Versuch 6, hergeleitet aus zwei gemessenen CDSE-Laeufen mit
+    WARUM (Versuch 6, hergeleitet aus zwei gemessenen CDSE-Läufen mit
     identischem Store-Inhalt und nur unterschiedlicher Konsolidierung):
       MIT .zmetadata  (Versuch 4): CDSE sammelt 1 projection metadata entry,
-        leitet das target_grid ab und scheitert erst DANACH beim Oeffnen mit
+        leitet das target_grid ab und scheitert erst DANACH beim Öffnen mit
         "Can't parse the zarr array metadata, missing key: 'shape'".
       OHNE .zmetadata (Versuch 5): CDSE sammelt 0 projection metadata entries,
         target_grid=None, Abbruch mit "Unable to derive a spatial extent".
     Daraus folgt: CDSE liest die .zmetadata zwingend - ohne sie sieht es den
     Store gar nicht. Mit ihr sieht es ihn, iteriert dann aber die
     metadata-Map und greift auf jedem Eintrag auf 'shape' zu; ".zgroup" und
-    ".zattrs" haben das nicht. Die Meldung traegt die Python-KeyError-
+    ".zattrs" haben das nicht. Die Meldung trägt die Python-KeyError-
     Signatur ('shape' mit Quotes) und stammt damit aus CDSE-eigenem Code,
     nicht aus GDALs C++-Zarr-Treiber (der meldet "shape missing or not an
     array", zarr_v2_array.cpp).
 
     Hypothese: hat JEDER Eintrag der Map ein 'shape', findet CDSEs Parser den
-    Schluessel ueberall und laeuft nicht mehr in den KeyError. Injizieren
-    statt Entfernen, weil die Map dabei ein gueltiges, vollstaendiges
+    Schlüssel überall und läuft nicht mehr in den KeyError. Injizieren
+    statt Entfernen, weil die Map dabei ein gültiges, vollständiges
     konsolidiertes Dokument bleibt - ein Reader, der die Georeferenz aus den
     .zattrs zieht, findet sie weiterhin. Der Shape des DEM-Arrays (statt
-    eines Dummy-Werts) sorgt dafuer, dass ein daraus abgeleitetes Grid
-    konsistent zum Datenarray waere.
+    eines Dummy-Werts) sorgt dafür, dass ein daraus abgeleitetes Grid
+    konsistent zum Datenarray wäre.
 
     Angefasst wird NUR die konsolidierte Kopie: die einzelnen .zarray-,
-    .zattrs- und .zgroup-Dateien im Store bleiben unveraendert. Das Feld
-    zarr_consolidated_format bleibt wie geschrieben. Rueckbau = diesen
+    .zattrs- und .zgroup-Dateien im Store bleiben unverändert. Das Feld
+    zarr_consolidated_format bleibt wie geschrieben. Rückbau = diesen
     Aufruf entfernen, dann steht wieder Versuch 4.
 
-    LOKAL GEMESSEN (GDAL 3.12 ueber /vsicurl gegen einen Range-HTTP-Server):
-    Store-Root wie Array-Subpfad ZARR:"...":/DEM oeffnen, liefern
+    LOKAL GEMESSEN (GDAL 3.12 über /vsicurl gegen einen Range-HTTP-Server):
+    Store-Root wie Array-Subpfad ZARR:"...":/DEM öffnen, liefern
     EPSG:32633 und den korrekten Transform, die Pixel sind bitgenau, und der
-    Open laeuft ohne Verzoegerung durch. xarray liest den Store normal -
+    Open läuft ohne Verzögerung durch. xarray liest den Store normal -
     konsolidiert wie unkonsolidiert. Die Georeferenz bleibt also lokal voll
-    ueberpruefbar; ob CDSE den Store akzeptiert, entscheidet erst der
+    überprüfbar; ob CDSE den Store akzeptiert, entscheidet erst der
     Serverlauf.
 
-    Gibt {"injected": [...], "shape": [...]} zurueck (fuer Test/Log).
+    Gibt {"injected": [...], "shape": [...]} zurück (für Test/Log).
     """
     zmeta_path = Path(store_path) / ".zmetadata"
     if not zmeta_path.exists():
@@ -1241,7 +1241,7 @@ def _inject_shape_into_consolidated_zarr_metadata(store_path) -> dict:
 
 def _write_dem_as_zarr(data, dst_meta, target_path) -> None:
     """Schreibt data als Zarr-Verzeichnis-Store nach target_path.
-    Ueberschreibt einen existierenden Store idempotent.
+    Überschreibt einen existierenden Store idempotent.
     """
     _check_dem_format_deps("zarr")
     target = Path(target_path)
@@ -1250,7 +1250,7 @@ def _write_dem_as_zarr(data, dst_meta, target_path) -> None:
         import shutil as _sh
         _sh.rmtree(target, ignore_errors=True)
     ds = _build_xarray_dataset(data, dst_meta)
-    # Georeferenz zusaetzlich IN den Store schreiben (GeoZarr/CF + GDAL
+    # Georeferenz zusätzlich IN den Store schreiben (GeoZarr/CF + GDAL
     # _CRS), damit ein Reader sie auch OHNE das STAC-Item findet. CDSE
     # ignoriert die proj:-Felder des STAC-Items bei application/vnd+zarr
     # ("Collected 0 projection metadata entries"); ob sein Zarr-Lesepfad
@@ -1258,16 +1258,16 @@ def _write_dem_as_zarr(data, dst_meta, target_path) -> None:
     _apply_geozarr_metadata(ds, dst_meta)
     # Kompression MUSS aus: xarray schreibt per Default blosc-komprimierte
     # Chunks, und GDALs Zarr-Treiber scheitert daran hart ("Decompressor
-    # blosc not handled") - lokal belegt, gleicher Fehler ueber /vsicurl/.
-    # Ohne blosc oeffnet GDAL den Store als 2D-Raster inkl. CRS aus dem
+    # blosc not handled") - lokal belegt, gleicher Fehler über /vsicurl/.
+    # Ohne blosc öffnet GDAL den Store als 2D-Raster inkl. CRS aus dem
     # CF-grid_mapping (spatial_ref) und Transform aus den x/y-Koordinaten.
-    # Compressor ueber .encoding der Variablen setzen, NICHT ueber
+    # Compressor über .encoding der Variablen setzen, NICHT über
     # to_zarr(encoding=...): das Kwarg ersetzt die Encoding komplett und
-    # wuerde die in _build_xarray_dataset gesetzte _FillValue verwerfen.
+    # würde die in _build_xarray_dataset gesetzte _FillValue verwerfen.
     for name in ds.variables:
         ds[name].encoding["compressor"] = None
     # Versuch 6: wieder MIT konsolidierten Metadaten schreiben (Versuch 5,
-    # consolidated=False, ist damit zurueckgenommen - CDSE sah den Store
+    # consolidated=False, ist damit zurückgenommen - CDSE sah den Store
     # dann gar nicht mehr: "Collected 0 projection metadata entries" ->
     # "Unable to derive a spatial extent"). Direkt danach in der .zmetadata
     # jedem Eintrag ohne 'shape' eines verpassen; die Herleitung steht in
@@ -1288,7 +1288,7 @@ def _write_dem_as_netcdf(data, dst_meta, target_path) -> None:
 
 
 def _inspect_asset_size(path) -> dict:
-    """Groesse eines Assets (Datei oder Zarr-Verzeichnis) rekursiv."""
+    """Größe eines Assets (Datei oder Zarr-Verzeichnis) rekursiv."""
     p = Path(path)
     if p.is_dir():
         total = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
@@ -1301,22 +1301,22 @@ def _inspect_asset_size(path) -> dict:
 
 
 def _uploaded_raster_bytes(paths) -> int | None:
-    """Summe der Groessen der hochgeladenen RASTER-Assets in Bytes.
+    """Summe der Größen der hochgeladenen RASTER-Assets in Bytes.
 
-    Zweck: zusammen mit dem uebertragenen Volumen aus nginx_access_log
+    Zweck: zusammen mit dem übertragenen Volumen aus nginx_access_log
     ergibt sich der Lese-Anteil (bytes_sent / asset_bytes) - liest CDSE
     die Daten einmal ganz, nur teilweise (Range-Requests auf ein COG)
     oder mehrfach?
 
-    Deshalb zaehlen NUR die Rasterdaten. STAC-Item- und Collection-JSONs
-    bleiben aussen vor: sie sind wenige KB, werden anders gelesen (immer
-    vollstaendig, meist mehrfach) und wuerden den Quotienten verzerren.
+    Deshalb zählen NUR die Rasterdaten. STAC-Item- und Collection-JSONs
+    bleiben außen vor: sie sind wenige KB, werden anders gelesen (immer
+    vollständig, meist mehrfach) und würden den Quotienten verzerren.
 
-    Deckt alle drei Sonderfaelle ueber _inspect_asset_size ab:
+    Deckt alle drei Sonderfälle über _inspect_asset_size ab:
       - dem_format=zarr -> Verzeichnis-Store, rekursive Summe aller Chunks
-      - --dem-tiles N   -> eine Datei je Kachel, Summe ueber alle
+      - --dem-tiles N   -> eine Datei je Kachel, Summe über alle
       - gtiff/netcdf    -> Einzeldatei
-    Gibt None zurueck, wenn nichts angegeben wurde oder keine der Pfade
+    Gibt None zurück, wenn nichts angegeben wurde oder keine der Pfade
     existiert (Strategien ohne Upload -> Spalte bleibt NULL).
     """
     total = 0
@@ -1337,14 +1337,13 @@ def _reproject_dem_to_array(input_tif: str, dst_crs: str,
                             target_resolution: float = DEFAULT_RESOLUTION_M):
     """Reprojiziert ein Quell-GeoTIFF in einen In-Memory Numpy-Puffer.
 
-    Gibt (data, dst_meta) zurueck. data ist shape (count, height, width)
+    Gibt (data, dst_meta) zurück. data ist shape (count, height, width)
     im ziel-CRS und ziel-Grid. dst_meta ist ein rasterio-meta-Dict mit
     driver='GTiff', dtype, count, crs, transform, width, height, nodata.
 
-    Dies ist der GEMEINSAME Reprojektions-Pfad fuer alle DEM-Formate
-    (gtiff/zarr/netcdf) und alle Layouts. Wer danach schreibt, sieht
-    dieselben Pixelwerte - garantiert pixel-Identitaet ueber alle
-    Formate/Varianten.
+    Dies ist der GEMEINSAME Reprojektions-Pfad für alle DEM-Formate
+    (gtiff/zarr/netcdf) und alle Layouts - wer danach schreibt, sieht
+    dieselben Pixelwerte.
     """
     if resampling not in LOCAL_RESAMPLING:
         raise ValueError(f"Unbekannte Resampling-Methode: {resampling}")
@@ -1366,7 +1365,7 @@ def _reproject_dem_to_array(input_tif: str, dst_crs: str,
                 resolution=target_resolution,
             )
             # Origin auf target_resolution-Grid snappen (S2-aligned).
-            # Outward auf allen Seiten -> Original-Extent bleibt vollstaendig abgedeckt.
+            # Outward auf allen Seiten -> Original-Extent bleibt vollständig abgedeckt.
             res = target_resolution
             left, top = transform.c, transform.f
             right = left + width * res
@@ -1380,18 +1379,18 @@ def _reproject_dem_to_array(input_tif: str, dst_crs: str,
             transform = Affine(res, 0, snapped_left, 0, -res, snapped_top)
         elif _is_default_resolution(target_resolution):
             # Nicht-UTM (LAEA, WGS84, Web Mercator, ...): native Reprojektions-
-            # Aufloesung, kein S2-Snap. CDSE bekommt damit ein "echtes"
-            # cross-CRS Resampling-Problem zu loesen.
+            # Auflösung, kein S2-Snap. CDSE bekommt damit ein "echtes"
+            # cross-CRS Resampling-Problem zu lösen.
             transform, width, height = calculate_default_transform(
                 src.crs, dst_crs, src.width, src.height, *src.bounds,
             )
         else:
-            # Nicht-UTM MIT explizit gesetzter --resolution: die Zellgroesse
+            # Nicht-UTM MIT explizit gesetzter --resolution: die Zellgröße
             # wird vorgegeben, aber NICHT gesnappt - der Snap auf Vielfache
             # ist S2-Gitter-Semantik und in LAEA/WGS84 bedeutungslos. Ohne
-            # diesen Zweig wuerde --resolution bei Nicht-UTM-Zielen still
+            # diesen Zweig würde --resolution bei Nicht-UTM-Zielen still
             # wirkungslos bleiben. In WGS84 ist die Einheit Grad, nicht
-            # Meter - dort ist ein Meterwert als Zellgroesse sinnlos, daher
+            # Meter - dort ist ein Meterwert als Zellgröße sinnlos, daher
             # die Warnung.
             try:
                 if _crs_is_geographic(dst_crs):
@@ -1428,9 +1427,9 @@ def _grid_from_dst_meta(dst_meta: dict) -> dict:
     """Grid-Dict (read_s2_grid-Stil) aus dem In-Memory-Ziel-Grid der
     Reprojektion.
 
-    Fuer STAC-proj-Metadaten OHNE Re-Open des geschriebenen Outputs:
+    Für STAC-proj-Metadaten OHNE Re-Open des geschriebenen Outputs:
     Zarr-Stores und NetCDF lassen sich nicht wie ein GeoTIFF mit rasterio
-    oeffnen, das Ziel-Grid ist aber fuer alle Formate identisch, weil alle
+    öffnen, das Ziel-Grid ist aber für alle Formate identisch, weil alle
     Writer denselben In-Memory-Puffer aus _reproject_dem_to_array schreiben.
     """
     transform = dst_meta["transform"]
@@ -1455,12 +1454,12 @@ def _load_stac_extent_from_grid(grid: dict, epsg: int) -> dict:
     CRS-Wahl bewusst das Raster-CRS (i.d.R. UTM) statt EPSG:4326:
       - Die Zahlen sind BITGLEICH die des proj:bbox im Item
         (beide aus _grid_from_dst_meta(dst_meta)["bounds"]). Ein nach
-        WGS84 transformierter Extent waere ein anderer, gerundeter Wert -
+        WGS84 transformierter Extent wäre ein anderer, gerundeter Wert -
         und weil eine achsparallele UTM-Box in Grad ein leicht schiefes
-        Viereck ist, koennte dessen Rueck-Transformation den Rand
+        Viereck ist, könnte dessen Rück-Transformation den Rand
         abschneiden oder erweitern.
       - Der funktionierende gtiff-Lauf leitet den Extent genau aus diesen
-        proj-Feldern ab. Mit dieser Box aendert sich also nur, WER die
+        proj-Feldern ab. Mit dieser Box ändert sich also nur, WER die
         Zahl liefert (Graph statt Ableitung), nicht WELCHE.
     """
     left, bottom, right, top = grid["bounds"]
@@ -1475,13 +1474,13 @@ def _s2_grid_from_extent(extent: dict, epsg: int,
     (--snap-dem-to-s2), OHNE S2-Datei und OHNE CDSE-Aufruf.
 
     Herleitung: Extent (EPSG:4326) ins UTM-Ziel-CRS projizieren, dann alle
-    vier Kanten OUTWARD auf Vielfache von `resolution` snappen (floor fuer
-    left/bottom, ceil fuer right/top). Gegen einen realen CDSE-Job
+    vier Kanten OUTWARD auf Vielfache von `resolution` snappen (floor für
+    left/bottom, ceil für right/top). Gegen einen realen CDSE-Job
     validiert (berlin/medium, EPSG:32633): Ergebnis-Grid des Jobs war
     exakt left=384470 bottom=5812220 right=394910 top=5823580,
     1044x1136 - identisch mit dieser Rekonstruktion auf allen 4 Kanten.
 
-    Rueckgabe im read_s2_grid-Stil: transform/width/height/bounds/shape.
+    Rückgabe im read_s2_grid-Stil: transform/width/height/bounds/shape.
     """
     left, bottom, right, top = transform_bounds(
         "EPSG:4326", f"EPSG:{epsg}",
@@ -1503,19 +1502,19 @@ def _s2_grid_from_extent(extent: dict, epsg: int,
 
 def _crop_to_grid(data, dst_meta: dict, target_grid: dict):
     """Croppt einen reprojizierten Puffer per reinem Array-Slicing auf
-    target_grid. Gibt (cropped_data, cropped_meta) zurueck.
+    target_grid. Gibt (cropped_data, cropped_meta) zurück.
 
     BEWUSST Crop statt zweitem Warp direkt aufs Ziel-Grid: GDALs Warp ist
     nicht frame-invariant - der approximierende Koordinaten-Transformer
-    (Default-Toleranz 0.125 px) und die Resample-Kernel-Arithmetik haengen
+    (Default-Toleranz 0.125 px) und die Resample-Kernel-Arithmetik hängen
     vom Grid-Ausschnitt ab. Lokal gemessen (synthetisches DEM, Grids auf
     demselben 10-m-Raster): direkter Warp aufs Snap-Grid weicht vom
     Ausschnitt des Quell-Bounds-Warps ab (bilinear 24.5% der Pixel um +-1,
-    nearest 3.6% bis +-10). Der Crop dagegen aendert Werte per Konstruktion
-    NICHT - genau die gewuenschte Semantik "Snapping betrifft nur die
-    Gittergeometrie". Voraussetzungen (werden geprueft, sonst ValueError):
-    gleiche Pixelgroesse, Gitter-Ausrichtung (Origin-Differenz = ganze
-    Pixel), target_grid vollstaendig im Puffer enthalten.
+    nearest 3.6% bis +-10). Der Crop dagegen ändert Werte per Konstruktion
+    NICHT - genau die gewünschte Semantik "Snapping betrifft nur die
+    Gittergeometrie". Voraussetzungen (werden geprüft, sonst ValueError):
+    gleiche Pixelgröße, Gitter-Ausrichtung (Origin-Differenz = ganze
+    Pixel), target_grid vollständig im Puffer enthalten.
     """
     import numpy as np
     t_src = dst_meta["transform"]
@@ -1554,9 +1553,9 @@ def _crop_to_grid(data, dst_meta: dict, target_grid: dict):
 
 
 def _tile_grid_layout(n: int) -> tuple:
-    """Zerlegt n in (rows, cols) moeglichst quadratisch mit rows*cols == n
+    """Zerlegt n in (rows, cols) möglichst quadratisch mit rows*cols == n
     exakt (4 -> 2x2, 6 -> 2x3, Primzahl p -> 1xp). Keine leeren Kacheln,
-    keine Reste - jede Kachel existiert und traegt Daten.
+    keine Reste.
     """
     rows = max(1, int(math.isqrt(n)))
     while n % rows != 0:
@@ -1565,17 +1564,17 @@ def _tile_grid_layout(n: int) -> tuple:
 
 
 def _split_dem_into_tiles(data, dst_meta: dict, n: int) -> list:
-    """Zerlegt den reprojizierten Puffer in n raeumliche Kacheln
+    """Zerlegt den reprojizierten Puffer in n räumliche Kacheln
     (row-major, rows x cols aus _tile_grid_layout). Gibt eine Liste von
-    (tile_data, tile_meta) zurueck - tile_meta ist ein vollstaendiges
+    (tile_data, tile_meta) zurück - tile_meta ist ein vollständiges
     rasterio-meta-Dict mit der Geotransform des Ausschnitts.
 
-    Reines Array-Slicing ueber _crop_to_grid, KEIN zweiter Warp - dieselbe
-    Begruendung wie bei --snap-dem-to-s2: GDALs Warp ist nicht
+    Reines Array-Slicing über _crop_to_grid, KEIN zweiter Warp - dieselbe
+    Begründung wie bei --snap-dem-to-s2: GDALs Warp ist nicht
     frame-invariant, nur der Crop garantiert, dass die Vereinigung der
     Kacheln bitgenau dem Einzel-DEM entspricht. Die Kachelgrenzen sind
-    ganzzahlige Pixel-Offsets (i*H//rows bzw. i*W//cols) - luecken- und
-    ueberlappungsfrei per Konstruktion, Randkacheln tragen den Rest.
+    ganzzahlige Pixel-Offsets (i*H//rows bzw. i*W//cols) - lücken- und
+    überlappungsfrei per Konstruktion, Randkacheln tragen den Rest.
     """
     rows, cols = _tile_grid_layout(n)
     height, width = int(dst_meta["height"]), int(dst_meta["width"])
@@ -1601,8 +1600,8 @@ def _split_dem_into_tiles(data, dst_meta: dict, n: int) -> list:
 
 def _wgs84_extent_from_meta(meta: dict) -> dict:
     """WGS84-Extent (west/south/east/north) eines Puffers/Kachel-meta -
-    fuer geometry/bbox des per-Kachel-STAC-Items (das Region-Extent waere
-    fuer eine Einzelkachel falsch)."""
+    für geometry/bbox des per-Kachel-STAC-Items (das Region-Extent wäre
+    für eine Einzelkachel falsch)."""
     left, bottom, right, top = array_bounds(
         meta["height"], meta["width"], meta["transform"])
     w, s, e, n = transform_bounds(meta["crs"], "EPSG:4326",
@@ -1611,16 +1610,16 @@ def _wgs84_extent_from_meta(meta: dict) -> dict:
 
 
 def _verify_tile_union_identity(tiles: list, data, dst_meta: dict) -> bool:
-    """Pflichttest fuer --dem-tiles: die Vereinigung der Kacheln muss dem
+    """Pflichttest für --dem-tiles: die Vereinigung der Kacheln muss dem
     Einzel-DEM bitgenau entsprechen.
 
-    Prueft (1) lueckenlose, ueberlappungsfreie Abdeckung (Coverage-Zaehler
-    pro Pixel == 1), (2) Byte-Identitaet des zusammengesetzten Arrays
-    (SHA-unabhaengig via tobytes - NaN-sicher, vgl. crop_identity-
-    Fehlalarm: NaN != NaN laesst np.array_equal bei float-Nodata
+    Prüft (1) lückenlose, überlappungsfreie Abdeckung (Coverage-Zähler
+    pro Pixel == 1), (2) Byte-Identität des zusammengesetzten Arrays
+    (SHA-unabhängig via tobytes - NaN-sicher, vgl. crop_identity-
+    Fehlalarm: NaN != NaN lässt np.array_equal bei float-Nodata
     fehlschlagen), (3) np.array_equal (equal_nan bei float) und (4) dass
     die Vereinigung der Kachel-Extents exakt den Gesamt-Extent ergibt.
-    Die Fenster-Offsets werden unabhaengig aus den Geotransforms
+    Die Fenster-Offsets werden unabhängig aus den Geotransforms
     hergeleitet, nicht aus der Konstruktionsreihenfolge.
     """
     import numpy as np
@@ -1663,9 +1662,9 @@ def _verify_tile_union_identity(tiles: list, data, dst_meta: dict) -> bool:
 
 
 def _verify_snap_grid(dst_meta: dict, expected_grid: dict) -> bool:
-    """Log-Block: tatsaechliches Grid des reprojizierten Puffers gegen das
+    """Log-Block: tatsächliches Grid des reprojizierten Puffers gegen das
     erwartete CDSE-Zielgitter (projizierter Extent, outward auf 10 m).
-    Prueft Ursprung, Pixelgroesse, Shape und Extent Feld fuer Feld.
+    Prüft Ursprung, Pixelgröße, Shape und Extent Feld für Feld.
     """
     actual = _grid_from_dst_meta(dst_meta)
     ta, te = actual["transform"], expected_grid["transform"]
@@ -1689,17 +1688,17 @@ def _verify_snap_grid(dst_meta: dict, expected_grid: dict) -> bool:
 
 def _verify_snap_crop_identity(data_snapped, meta_snapped,
                                data_unsnapped, meta_unsnapped) -> bool:
-    """Pflichttest fuer --snap-dem-to-s2: gesnapptes und ungesnapptes DEM
-    liegen auf demselben 10-m-Gitter (beide Urspruenge Vielfache der
-    Aufloesung), also MUESSEN die Pixelwerte im ueberlappenden Bereich
+    """Pflichttest für --snap-dem-to-s2: gesnapptes und ungesnapptes DEM
+    liegen auf demselben 10-m-Gitter (beide Ursprünge Vielfache der
+    Auflösung), also MÜSSEN die Pixelwerte im überlappenden Bereich
     bitgenau identisch sein - das Snapping darf nur zuschneiden, nie
-    Werte veraendern. Vergleich NaN-bewusst auf der Schnittmenge der
+    Werte verändern. Vergleich NaN-bewusst auf der Schnittmenge der
     beiden Extents (beidseitig NaN = Nodata = identisch, NaN-vs-Wert =
     Mismatch).
 
-    Die Fenster werden hier UNABHAENGIG von _crop_to_grid aus den
+    Die Fenster werden hier UNABHÄNGIG von _crop_to_grid aus den
     Geo-Koordinaten beider Metas hergeleitet - der Test validiert damit
-    die Crop-Indexierung end-to-end (Off-by-one in Offset/Window wuerde
+    die Crop-Indexierung end-to-end (Off-by-one in Offset/Window würde
     als MISMATCH auffallen), nicht nur eine Tautologie.
     """
     import numpy as np
@@ -1709,7 +1708,7 @@ def _verify_snap_crop_identity(data_snapped, meta_snapped,
         print(f"  [Crop-Identitaet] FEHLER: unterschiedliche Pixelgroesse "
               f"({ts.a},{ts.e}) vs ({tu.a},{tu.e}) - kein Vergleich moeglich.")
         return False
-    # Gitter-Ausrichtung: Origin-Differenzen muessen ganze Pixel sein.
+    # Gitter-Ausrichtung: Origin-Differenzen müssen ganze Pixel sein.
     dx, dy = ts.c - tu.c, ts.f - tu.f
     if abs(dx / res - round(dx / res)) > 1e-9 or \
        abs(dy / res - round(dy / res)) > 1e-9:
@@ -1745,11 +1744,11 @@ def _verify_snap_crop_identity(data_snapped, meta_snapped,
               f"Puffer heraus.")
         return False
 
-    # NaN-bewusster Identitaetsvergleich: die DEM-Puffer tragen NaN als
-    # Nodata (Warp-Slivers an den Raendern liegen auch IN der
+    # NaN-bewusster Identitätsvergleich: die DEM-Puffer tragen NaN als
+    # Nodata (Warp-Slivers an den Rändern liegen auch IN der
     # Schnittmenge). np.array_equal allein meldet dort MISMATCH, obwohl
     # die Arrays bitgenau identisch sind (NaN != NaN, IEEE 754) - genau
-    # dieser Fehlalarm brach reale Snap-Laeufe ab. Beide-NaN zaehlt als
+    # dieser Fehlalarm brach reale Snap-Läufe ab. Beide-NaN zählt als
     # identisch; NaN-vs-Wert bleibt ein echter Mismatch.
     diff = a != b
     n_both_nan = 0
@@ -1784,22 +1783,22 @@ def reproject_dem_local(input_tif: str, output_tif: str,
 
     resampling: 'nearest' (Default, pixelidentisch zu CDSE), 'bilinear' oder
     'cubic'. Letztere weichen vom CDSE-Output ab und machen den
-    Accuracy-Check aussagekraeftig.
+    Accuracy-Check aussagekräftig.
 
-    target_resolution: Pixelgroesse im Ziel-CRS (Default 10 m, gleich wie
+    target_resolution: Pixelgröße im Ziel-CRS (Default 10 m, gleich wie
     Sentinel-2 B04). Wird nur bei UTM-Ziel-CRS erzwungen + S2-Grid-Snap.
-    Bei Nicht-UTM-Zielen (LAEA, WGS84, ...) wird die native Aufloesung der
-    Reprojektion uebernommen, ohne Grid-Snap - dort hat 10 m / S2-Snap
+    Bei Nicht-UTM-Zielen (LAEA, WGS84, ...) wird die native Auflösung der
+    Reprojektion übernommen, ohne Grid-Snap - dort hat 10 m / S2-Snap
     keine sinnvolle Semantik.
 
     layout: DEM-Layout Experiment. Steuert NUR das Schreibprofil des
     Ausgabe-GeoTIFF (striped / tiled_uncompressed / cog). Die reprojizierten
-    Pixelwerte sind ueber alle Layouts pixelidentisch - garantiert dadurch
-    dass die Reprojektion in einen In-Memory-Puffer laeuft und ausschliesslich
-    der finale Write vom Layout abhaengt. Default 'striped' = Verhalten vor
-    dem Layout-Experiment (rueckwaertskompatibel fuer full_pp).
+    Pixelwerte sind über alle Layouts pixelidentisch - garantiert dadurch
+    dass die Reprojektion in einen In-Memory-Puffer läuft und ausschließlich
+    der finale Write vom Layout abhängt. Default 'striped' = Verhalten vor
+    dem Layout-Experiment (rückwärtskompatibel für full_pp).
 
-    Gibt Laufzeit in Sekunden zurueck (inklusive Overview-Berechnung).
+    Gibt Laufzeit in Sekunden zurück (inklusive Overview-Berechnung).
     """
     if layout not in DEM_LAYOUTS:
         raise ValueError(
@@ -1817,7 +1816,7 @@ def reproject_dem_local(input_tif: str, output_tif: str,
 def run_openeo(api_url: str, scenario: str, output_dir: str,
                job_timeout: int = 3600, oidc_provider: str = None) -> dict:
     """
-    Fuehrt openeotest.py run aus. Gibt den Inhalt von results.json zurueck.
+    Führt openeotest.py run aus. Gibt den Inhalt von results.json zurück.
     Wirft RuntimeError wenn results.json nicht geschrieben wurde oder der
     Subprozess mit Returncode != 0 endet ohne erkennbares Result.
 
@@ -1831,9 +1830,9 @@ def run_openeo(api_url: str, scenario: str, output_dir: str,
         "--output-directory", output_dir,
         "--job-timeout", str(job_timeout),
     ]
-    # OIDC-Anbieter nur anhaengen wenn es einen gibt: ohne das Argument
+    # OIDC-Anbieter nur anhängen wenn es einen gibt: ohne das Argument
     # ruft openeotest.py authenticate_oidc() wie bisher ohne provider_id
-    # auf, der cdse-Aufruf bleibt also Zeichen fuer Zeichen derselbe.
+    # auf, der cdse-Aufruf bleibt also Zeichen für Zeichen derselbe.
     provider = oidc_provider or _oidc_provider_for(api_url)
     if provider:
         cmd += ["--oidc-provider", provider]
@@ -1876,7 +1875,7 @@ def run_openeo(api_url: str, scenario: str, output_dir: str,
             print(f"  WARNUNG: results.json konnte nicht zurueckgeschrieben werden: {exc}")
 
     # environment-Block (git_commit, openeo/rasterio/numpy/proj Versionen)
-    # idempotent ergaenzen - egal ob Erfolg oder Fehler.
+    # idempotent ergänzen - egal ob Erfolg oder Fehler.
     _augment_results_json(results_path)
     if "environment" not in results:
         results["environment"] = _collect_environment()
@@ -1895,10 +1894,10 @@ def _run_type_for(repeat_idx: int, run_type_arg: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _compute_extent(region: str, extent_size: str) -> dict:
-    """AOI um den REGIONS[region]-Mittelpunkt fuer die gewuenschte Groesse.
+    """AOI um den REGIONS[region]-Mittelpunkt für die gewünschte Größe.
 
-    'medium' liefert den unveraenderten REGIONS-Extent (Backward-Compat).
-    Sonst: Kantenlaenge = SIZE_KM[extent_size]; 1 deg lat ~= 111 km,
+    'medium' liefert den unveränderten REGIONS-Extent (Backward-Compat).
+    Sonst: Kantenlänge = SIZE_KM[extent_size]; 1 deg lat ~= 111 km,
     1 deg lon ~= 111 km * cos(lat).
     """
     base = REGIONS[region]["extent"]
@@ -1920,14 +1919,14 @@ def _compute_extent(region: str, extent_size: str) -> dict:
 
 
 def _utm_zone_for_lon(lon: float) -> int:
-    """UTM-Zonennummer (1-60) fuer einen Laengengrad."""
+    """UTM-Zonennummer (1-60) für einen Längengrad."""
     return int((float(lon) + 180.0) // 6.0) % 60 + 1
 
 
 def _extent_spans_multiple_utm_zones(extent: dict) -> bool:
-    """True wenn der Laengenbereich [west, east] mehr als eine 6-Grad-UTM-Zone
-    beruehrt. Die MGRS-Sonderzonen (Norwegen/Svalbard, lat 56-84) liegen
-    ausserhalb aller Benchmark-Regionen und werden ignoriert.
+    """True wenn der Längenbereich [west, east] mehr als eine 6-Grad-UTM-Zone
+    berührt. Die MGRS-Sonderzonen (Norwegen/Svalbard, lat 56-84) liegen
+    außerhalb aller Benchmark-Regionen und werden ignoriert.
     """
     return (_utm_zone_for_lon(extent["west"])
             != _utm_zone_for_lon(extent["east"]))
@@ -1963,21 +1962,21 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
                        resolution: float = DEFAULT_RESOLUTION_M,
                        dataset: str = DEFAULT_DATASET,
                        resampling: str = "nearest") -> dict:
-    """Baut den process_graph fuer den gewuenschten Workflow.
+    """Baut den process_graph für den gewünschten Workflow.
 
     Alle Workflows starten von der merge_add-Baseline (bench_onthefly_{region}.json)
     und mutieren sie:
-      merge_add   -> Baseline (unveraendert)
+      merge_add   -> Baseline (unverändert)
       subtract    -> overlap_resolver wird 'subtract' statt 'add'
       mask        -> SCL Band laden, Cloud-Mask (SCL not in {4,5}) auf B04 anwenden,
                      dann merge_add mit DEM
       aggregation -> merge_add gefolgt von temporalem reduce_dimension(mean)
       focal       -> nach merge_add ein 3x3 Mittelwert-apply_kernel
-      resample    -> DEM wird CDSE-seitig nach EPSG:3035@30m und zurueck nach
+      resample    -> DEM wird CDSE-seitig nach EPSG:3035@30m und zurück nach
                      Region-UTM@10m resamplet, bevor es in merge1.cube2 geht.
                      Testet CDSEs eigene Resampling-Genauigkeit.
       filter_bbox -> nach merge_add ein filter_bbox auf die mittleren 50%
-                     des Original-Extents (raeumliche Filteroperation aus
+                     des Original-Extents (räumliche Filteroperation aus
                      dem Proposal).
 
     BANDNAMEN-FIX: COPERNICUS_30 liefert ein Band "DEM", S2 ein Band "B04".
@@ -1986,13 +1985,13 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
 
     TEMPORAL-FIX: COPERNICUS_30 hat einen Zeitstempel in 2010-2015, S2 in
     2024. merge_cubes addiert nur wo sich BEIDE Cubes in ALLEN Dimensionen
-    (Bands + t + spatial) ueberlappen. Wenn die Zeitdimensionen disjunkt sind,
+    (Bands + t + spatial) überlappen. Wenn die Zeitdimensionen disjunkt sind,
     konkateniert merge_cubes entlang t und das DEM verschwindet beim
     Speichern der S2-Dates (verifiziert: Output median=2742 = reines S2,
-    erwartet 2788 = S2+DEM). Loesung: reduce_dimension(t, first) entfernt die
+    erwartet 2788 = S2+DEM). Lösung: reduce_dimension(t, first) entfernt die
     Zeitdimension komplett. Ein 2D-DEM-Cube wird beim merge_cubes per
     openEO-Spec auf jeden S2-Zeitschritt gebroadcastet -> der overlap_resolver
-    (add/subtract) greift fuer jeden S2-Zeitschritt einzeln.
+    (add/subtract) greift für jeden S2-Zeitschritt einzeln.
 
     Reihenfolge: loadcollection2 -> renamelabels1 (DEM->B04)
                  -> reducedimension_dem (t entfernen)
@@ -2003,14 +2002,14 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
     # Zweitraster-Kollektion setzen (No-Op bei dataset='dem').
     _apply_dataset_to_pg(pg, dataset)
 
-    # rename_labels: cube2 Bandname auf "B04" -> ueberlappt mit cube1.
-    # source ist der Bandname des Zweitrasters ("DEM" fuer COPERNICUS_30,
-    # "MAP" fuer ESA_WORLDCOVER); bei load_stac (local_pp / full_pp)
-    # ueberschreiben die Builder source=[], weil der vom Backend vergebene
+    # rename_labels: cube2 Bandname auf "B04" -> überlappt mit cube1.
+    # source ist der Bandname des Zweitrasters ("DEM" für COPERNICUS_30,
+    # "MAP" für ESA_WORLDCOVER); bei load_stac (local_pp / full_pp)
+    # überschreiben die Builder source=[], weil der vom Backend vergebene
     # Bandname nicht garantiert derselbe ist.
-    # ACHTUNG: die Ueberlappung will NUR die arithmetische Verrechnung
+    # ACHTUNG: die Überlappung will NUR die arithmetische Verrechnung
     # (merge_add/subtract/...). Die beiden KATEGORIALEN Workflows setzen
-    # target unten auf den eigenen Klassen-Bandnamen zurueck - dort waere
+    # target unten auf den eigenen Klassen-Bandnamen zurück - dort wäre
     # ein gemeinsames Label eine Verwechslungsquelle statt einer
     # Voraussetzung (s. lc_overlay und lc_mask).
     pg["renamelabels1"] = {
@@ -2052,38 +2051,38 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         # merge_cubes BLEIBT - genau dieselbe Gitter-Aushandlung zwischen
         # S2-Cube und Zweitcube wie bei merge_add (cube1 = S2 ist laut Spec
         # das Resampling-Ziel, die Klassenkarte landet also auf dem
-        # S2-Gitter). Die Auswahl des Ergebnis-Cubes laeuft aber NICHT mehr
-        # ueber den overlap_resolver.
+        # S2-Gitter). Die Auswahl des Ergebnis-Cubes läuft aber NICHT mehr
+        # über den overlap_resolver.
         #
-        # WARUM NICHT (erster Serverlauf, belegt): der frueherer Ansatz war
+        # WARUM NICHT (erster Serverlauf, belegt): der früherer Ansatz war
         # ein Durchreich-Resolver add(x={from_parameter:"y"}, y=0). Laut
         # openEO-Spec ist das korrekt - overlap_resolver.x ist "the
         # overlapping value from the base data cube cube1", y "from the
-        # other data cube cube2" -, also haette y+0 die Klassenkarte
+        # other data cube cube2" -, also hätte y+0 die Klassenkarte
         # geliefert. Der Job lief mit status=success durch und lieferte
         # trotzdem S2-Reflexionswerte (int16 statt uint8). Die Log-Zeile
         # "Starting stage: 29 - merge_cubes, B04,B04,add" zeigt, warum:
-        # CDSE erkennt den Resolver als bekannten Binaeroperator 'add' und
+        # CDSE erkennt den Resolver als bekannten Binäroperator 'add' und
         # wendet seine native cube1<op>cube2-Implementierung an - die
-        # Argumentverdrahtung (from_parameter + Konstante 0) faellt dabei
-        # weg. Der Ansatz haengt damit an einer Backend-Interna, nicht an
+        # Argumentverdrahtung (from_parameter + Konstante 0) fällt dabei
+        # weg. Der Ansatz hängt damit an einer Backend-Interna, nicht an
         # der Spec.
         #
-        # STATTDESSEN: die Baender werden gar nicht erst zur Ueberlappung
-        # gebracht. Der Zweitcube behaelt seinen eigenen Bandnamen (MAP),
-        # S2 heisst B04 -> DISJUNKTE Labels. Laut Spec braucht merge_cubes
+        # STATTDESSEN: die Bänder werden gar nicht erst zur Überlappung
+        # gebracht. Der Zweitcube behält seinen eigenen Bandnamen (MAP),
+        # S2 heißt B04 -> DISJUNKTE Labels. Laut Spec braucht merge_cubes
         # dann keinen overlap_resolver ("If there is any overlap between
         # the dimension labels, the parameter overlap_resolver must be
         # specified"), sondern konkateniert entlang der Band-Dimension.
         # Danach holt filter_bands genau das Klassenband heraus.
         #
-        # Damit haengt das Ergebnis an einem BANDNAMEN statt an der
+        # Damit hängt das Ergebnis an einem BANDNAMEN statt an der
         # x/y-Bindung eines Resolvers: es kann strukturell nicht mehr
         # versehentlich S2 sein.
         band = DATASETS[dataset]["band"]
         pg["renamelabels1"]["arguments"]["target"] = [band]
-        # Kein Overlap -> Resolver entfernen (er waere unbenutzt, und
-        # manche Backends beanstanden einen Resolver ohne Ueberlappung).
+        # Kein Overlap -> Resolver entfernen (er wäre unbenutzt, und
+        # manche Backends beanstanden einen Resolver ohne Überlappung).
         pg["merge1"]["arguments"].pop("overlap_resolver", None)
         pg["filterbands_lc"] = {
             "arguments": {"data": {"from_node": "merge1"}, "bands": [band]},
@@ -2093,32 +2092,32 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         return pg
 
     if workflow == "lc_mask":
-        # B04 auf eine Landbedeckungsklasse maskieren. merge_cubes entfaellt;
+        # B04 auf eine Landbedeckungsklasse maskieren. merge_cubes entfällt;
         # der Gitterabgleich zwischen beiden Cubes passiert stattdessen im
         # mask-Prozess, der ebenfalls ein gemeinsames Gitter erzwingt.
         #
         # mask() maskiert dort, wo der Mask-Cube WAHR ist -> die Bedingung
         # ist "Klasse != Zielklasse".
         #
-        # BANDNAME (Fix): der Zweitcube behaelt seinen eigenen Namen (MAP),
+        # BANDNAME (Fix): der Zweitcube behält seinen eigenen Namen (MAP),
         # er wird NICHT auf B04 umbenannt. Vorher trugen S2-Cube und
         # Masken-Cube beide das Label "B04" - dieselbe Kollision, die
         # lc_overlay schon einmal ein S2-Ergebnis beschert hat (s. dort).
-        # Belegt am Serverlauf: die lokale Referenz liefert 31,7 % gueltige
-        # Zellen (exakt der Flaechenanteil der Klasse 10), CDSE dagegen
+        # Belegt am Serverlauf: die lokale Referenz liefert 31,7 % gültige
+        # Zellen (exakt der Flächenanteil der Klasse 10), CDSE dagegen
         # 99,6 % - die Maske greift dort praktisch nicht. Mit disjunkten
-        # Labels kann kein Backend die beiden Cubes ueber den Bandnamen
+        # Labels kann kein Backend die beiden Cubes über den Bandnamen
         # verwechseln.
         band = DATASETS[dataset]["band"]
         pg["renamelabels1"]["arguments"]["target"] = [band]
         # filter_bands auf das Klassenband, bevor die Bedingung gebaut wird:
-        # damit haengt eq(x, LC_MASK_CLASS) nachweisbar am Klassenband und
+        # damit hängt eq(x, LC_MASK_CLASS) nachweisbar am Klassenband und
         # nicht an "irgendeinem Band des Cubes". Zweiter Zweck: rename_labels
-        # laeuft bei load_stac mit source=[] und benennt dann nur das ERSTE
-        # Label um - traegt das STAC-Item wider Erwarten mehr als ein Band,
+        # läuft bei load_stac mit source=[] und benennt dann nur das ERSTE
+        # Label um - trägt das STAC-Item wider Erwarten mehr als ein Band,
         # bliebe der Rest unbenannt im Cube und der apply-Ausdruck liefe
-        # auch darueber. Gleiche Konstruktion wie filterbands_lc in
-        # lc_overlay, nur eine Stufe frueher.
+        # auch darüber. Gleiche Konstruktion wie filterbands_lc in
+        # lc_overlay, nur eine Stufe früher.
         pg["filterbands_lcmask"] = {
             "arguments": {"data": {"from_node": "reducedimension_dem"},
                           "bands": [band]},
@@ -2126,19 +2125,19 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         }
         # ZEITACHSE (Fix): der Masken-Cube darf keine t-Dimension mehr
         # tragen. reduce_dimension(t, first) zieht die Achse auf EINEN
-        # Eintrag zusammen, entfernt sie aber nicht - der Cube behaelt
+        # Eintrag zusammen, entfernt sie aber nicht - der Cube behält
         # SpaceTimeKeys.
         #
         # Belegt am Serverlauf run_id 1141: der Masken-Cube kam mit dem
         # Partitioner SpaceTimeKey(0,0,1609459200000), also genau einem
-        # Zeitschluessel zum 01.01.2021 (Aufnahmedatum der WorldCover-
+        # Zeitschlüssel zum 01.01.2021 (Aufnahmedatum der WorldCover-
         # Karte). Der S2-Cube wird mit ByDay geladen und hat 16
         # Zeitschritte im Juli/August 2024. Zu keinem davon existiert eine
         # Maskenkachel -> "Stage 27: load_collection: filter mask keys"
-        # liest 0.00 MB, und mask() entfernt nichts (99,6 % Uebereinstimmung
+        # liest 0.00 MB, und mask() entfernt nichts (99,6 % Übereinstimmung
         # mit dem UNMASKIERTEN S2 statt der erwarteten 31,7 %).
         #
-        # Bei lc_overlay faellt das nicht auf: dort folgt merge_cubes, das
+        # Bei lc_overlay fällt das nicht auf: dort folgt merge_cubes, das
         # die Zeitachsen aneinander ausrichtet. mask() macht das nicht.
         #
         # reduce_dimension BLEIBT davor stehen: drop_dimension verlangt
@@ -2197,7 +2196,7 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         return pg
 
     if workflow == "mask":
-        # S2 zusaetzlich mit SCL laden
+        # S2 zusätzlich mit SCL laden
         pg["loadcollection1"]["arguments"]["bands"] = ["B04", "SCL"]
         # SCL extrahieren
         pg["filterbands_scl"] = {
@@ -2241,7 +2240,7 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         return pg
 
     if workflow == "aggregation":
-        # Nach merge_cubes ein temporales reduce_dimension(mean) einhaengen
+        # Nach merge_cubes ein temporales reduce_dimension(mean) einhängen
         pg["reducedimension1"] = {
             "arguments": {
                 "data": {"from_node": "merge1"},
@@ -2263,7 +2262,7 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
 
     if workflow == "focal":
         # 3x3 Mittelwert-Kernel auf den merge1-Output anwenden.
-        # Nachbarschaftsoperation -> reagiert auf jede Pixel-Aenderung.
+        # Nachbarschaftsoperation -> reagiert auf jede Pixel-Änderung.
         kernel = [[1.0 / 9.0] * 3 for _ in range(3)]
         pg["applykernel1"] = {
             "arguments": {
@@ -2280,10 +2279,10 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
             raise ValueError("workflow=resample benoetigt 'region' fuer das Ziel-UTM.")
         target_epsg = REGIONS[region]["epsg"]
         # DEM (bereits umbenannt auf B04 + t-Dimension entfernt) nach EPSG:3035
-        # @ (3x Zielaufloesung) und zurueck nach UTM @ Zielaufloesung
+        # @ (3x Zielauflösung) und zurück nach UTM @ Zielauflösung
         # resamplen. Reine CDSE-Operation - testet das interne Resampling.
-        # Der Umweg skaliert MIT der Zielaufloesung (RESAMPLE_DETOUR_FACTOR),
-        # damit er auch bei grober Zellgroesse ein echter Groebungsschritt
+        # Der Umweg skaliert MIT der Zielauflösung (RESAMPLE_DETOUR_FACTOR),
+        # damit er auch bei grober Zellgröße ein echter Gröbungsschritt
         # bleibt und nicht zum Hochsampeln wird; bei 10 m ergibt das exakt
         # die bisherigen 30 m.
         pg["resamplespatial1"] = {
@@ -2309,9 +2308,9 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
         return pg
 
     if workflow == "filter_bbox":
-        # raeumliche Filteroperation: nach dem merge_add die mittleren 50%
+        # räumliche Filteroperation: nach dem merge_add die mittleren 50%
         # der spatial_extent ausschneiden. Damit testen wir CDSEs filter_bbox
-        # / filter_spatial-Operation als eigenstaendigen Workflow.
+        # / filter_spatial-Operation als eigenständigen Workflow.
         src_extent = template["process_graph"]["loadcollection1"]["arguments"].get(
             "spatial_extent"
         )
@@ -2351,19 +2350,19 @@ def _build_workflow_pg(template: dict, workflow: str, region: str = None,
 def _force_onthefly_target_crs(pg: dict, target_epsg: int,
                                resolution: float = DEFAULT_RESOLUTION_M,
                                resampling: str = "nearest") -> None:
-    """In-place: haengt resample_spatial(target_epsg, resolution, method)
+    """In-place: hängt resample_spatial(target_epsg, resolution, method)
     hinter loadcollection1 (S2) und biegt alle Verbraucher darauf um.
 
-    Zweck: Ueberspannt der Extent eine UTM-Zonengrenze, liegen die S2-Daten
+    Zweck: Überspannt der Extent eine UTM-Zonengrenze, liegen die S2-Daten
     in zwei Zonen (z.B. 32632+32633) und CDSE bricht ohne Ziel-CRS-Vorgabe
     beim Bounding-Box-Merge ab ("no target CRS specified, but multiple
     CRSes across input"). Das explizite Ziel-CRS zwingt alle S2-Eingaben in
-    die primaere Zone der Region; das DEM (EPSG:4326) folgt danach wie
+    die primäre Zone der Region; das DEM (EPSG:4326) folgt danach wie
     bisher implizit dem cube1-Grid im merge_cubes.
 
     Zweiter Verwendungszweck (--resolution != 10): derselbe Knoten gibt CDSE
-    die Zellgroesse explizit vor, sonst liefert das Backend sein natives
-    10-m-S2-Gitter und der Aufloesungs-Vergleich waere wirkungslos. Deshalb
+    die Zellgröße explizit vor, sonst liefert das Backend sein natives
+    10-m-S2-Gitter und der Auflösungs-Vergleich wäre wirkungslos. Deshalb
     'resolution' als Parameter statt fest verdrahtet.
 
     Knotenname bewusst NICHT resamplespatial1/2 - diese Namen sind die
@@ -2403,21 +2402,21 @@ def _apply_save_format(pg: dict, save_format: str) -> dict:
     """Format des save_result-Knotens setzen (--save-format).
 
     Bei 'GTiff' passiert NICHTS: die Templates tragen GTiff bereits, und der
-    Graph muss byte-identisch zum bisherigen bleiben - sonst waeren alle
-    frueheren Laeufe nicht mehr vergleichbar. Nur eine Abweichung wird
-    geschrieben, zusammen mit leeren options (moeglichst standardkonformes
+    Graph muss byte-identisch zum bisherigen bleiben - sonst wären alle
+    früheren Läufe nicht mehr vergleichbar. Nur eine Abweichung wird
+    geschrieben, zusammen mit leeren options (möglichst standardkonformes
     Ausgabeprofil).
 
     Anlass: --strategy onthefly --region berlin --extent-size xlarge
-    --workflow merge_add scheiterte 5 von 5 Laeufen auf CDSE mit
+    --workflow merge_add scheiterte 5 von 5 Läufen auf CDSE mit
     "/tmp/openEO_2024-07-24Z_<id>.tif is corrupt / ZIPDecode: Decoding error
     at scanline 5248" - gleicher Termin, gleiche Scanline, verschiedene
-    Executoren, waehrend local_preprocessing denselben Ausschnitt fehlerfrei
+    Executoren, während local_preprocessing denselben Ausschnitt fehlerfrei
     verarbeitet. Der Verdacht ist der GTiff-Writer des Backends; mit netCDF
-    laesst er sich umgehen bzw. der Verdacht bestaetigen.
+    lässt er sich umgehen bzw. der Verdacht bestätigen.
 
-    Bewusst getrennt von der Ueberschreibung in build_full_pp_scenario:
-    full_preprocessing behaelt seinen eigenen Schalter
+    Bewusst getrennt von der Überschreibung in build_full_pp_scenario:
+    full_preprocessing behält seinen eigenen Schalter
     --fullpp-save-format und bleibt hier unangetastet.
     """
     if save_format == DEFAULT_SAVE_FORMAT:
@@ -2441,17 +2440,17 @@ def build_onthefly_scenario(region: str, target_path: Path,
                             save_format: str = DEFAULT_SAVE_FORMAT) -> Path:
     """Onthefly = Workflow-PG aus bench_onthefly_{region}.json gebaut.
 
-    Ueberspannt der Extent mehrere UTM-Zonen (oder ist force_target_crs
-    gesetzt), bekommt der Graph ein explizites Ziel-CRS (primaere UTM-Zone
+    Überspannt der Extent mehrere UTM-Zonen (oder ist force_target_crs
+    gesetzt), bekommt der Graph ein explizites Ziel-CRS (primäre UTM-Zone
     der Region, s. _force_onthefly_target_crs). Ein-Zonen-Extents bleiben
     byte-identisch zum bisherigen Graphen.
 
     Bei --resolution != 10 wird derselbe Knoten gesetzt, dann aber wegen der
-    Zellgroesse: ohne ihn liefert CDSE sein natives 10-m-S2-Gitter und die
-    Aufloesung waere im Ergebnis nicht wirksam.
+    Zellgröße: ohne ihn liefert CDSE sein natives 10-m-S2-Gitter und die
+    Auflösung wäre im Ergebnis nicht wirksam.
 
     save_format (--save-format): Ausgabeformat des save_result-Knotens.
-    Default GTiff = unveraendert; s. _apply_save_format.
+    Default GTiff = unverändert; s. _apply_save_format.
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
@@ -2484,8 +2483,8 @@ def build_onthefly_scenario(region: str, target_path: Path,
 def build_dem_download_scenario(region: str, target_path: Path,
                                 extent_size: str = "medium",
                                 dataset: str = DEFAULT_DATASET) -> Path:
-    """Baut ein Szenario das nur das ZWEITE Raster fuer die Region
-    herunterlaedt (COPERNICUS_30 bzw. die Kollektion aus --dataset)."""
+    """Baut ein Szenario das nur das ZWEITE Raster für die Region
+    herunterlädt (COPERNICUS_30 bzw. die Kollektion aus --dataset)."""
     template = _load_bench_template(region, extent_size)
     _apply_dataset_to_pg(template["process_graph"], dataset)
     dem_args = template["process_graph"]["loadcollection2"]["arguments"]
@@ -2522,7 +2521,7 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
                             load_stac_spatial_extent: dict = None,
                             save_format: str = DEFAULT_SAVE_FORMAT) -> Path:
     """
-    Erzeugt das load_stac Szenario fuer den gewuenschten Workflow:
+    Erzeugt das load_stac Szenario für den gewünschten Workflow:
     Workflow-PG (s. _build_workflow_pg) wird gebaut, dann wird
     loadcollection2 (DEM) durch loadstac1 ersetzt, das auf die
     Hetzner-STAC-Item-URL zeigt.
@@ -2532,42 +2531,42 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
     sein S2-abgeleitetes Zielgitter zwingt (zweites, serverseitiges
     Resampling), wird S2 VOR dem merge per
     resample_cube_spatial(data=S2, target=DEM) auf das DEM-Gitter
-    ausgerichtet. Per openEO-Spec uebernimmt data dabei Aufloesung/CRS/
+    ausgerichtet. Per openEO-Spec übernimmt data dabei Auflösung/CRS/
     Alignment des target-Cubes; NUR S2 wird resampled, das DEM (der
-    zeitlose reducedimension_dem-Cube) laeuft durch KEIN Resample.
+    zeitlose reducedimension_dem-Cube) läuft durch KEIN Resample.
     method: wird aus --local-resampling abgeleitet (nearest -> near), damit
-    die serverseitige Vergroeberung dieselbe ist wie die lokale. Vorher
-    stand hier fest 'near', waehrend lokal z.B. bilinear lief - bei
-    --resolution != 10 vergroebern beide Seiten dann unterschiedlich, was
-    sich als grosser MAE niederschlaegt (berlin/medium/60 m: 402 bzw. 322
-    gegenueber 0,0014 bei nativer Aufloesung).
-    Ob CDSE das DEM-Gitter dann wirklich uebernimmt, zeigt erst der
+    die serverseitige Vergröberung dieselbe ist wie die lokale. Vorher
+    stand hier fest 'near', während lokal z.B. bilinear lief - bei
+    --resolution != 10 vergröbern beide Seiten dann unterschiedlich, was
+    sich als großer MAE niederschlägt (berlin/medium/60 m: 402 bzw. 322
+    gegenüber 0,0014 bei nativer Auflösung).
+    Ob CDSE das DEM-Gitter dann wirklich übernimmt, zeigt erst der
     Serverlauf (Ursprung des Ergebnis-Grids).
 
-    resolution != 10: das lokal reprojizierte DEM traegt die Zellgroesse
+    resolution != 10: das lokal reprojizierte DEM trägt die Zellgröße
     bereits, S2 kommt aber weiterhin nativ mit 10 m - und beim merge_cubes
-    gibt cube1 (S2) das Gitter vor, wuerde das DEM also wieder auf 10 m
+    gibt cube1 (S2) das Gitter vor, würde das DEM also wieder auf 10 m
     ziehen. Deshalb bekommt S2 denselben resample_spatial-Knoten wie in
     build_onthefly_scenario (resampletargetcrs1). Mit --resample-s2-to-dem
-    ist das unnoetig: dort wird S2 ohnehin per resample_cube_spatial auf das
-    DEM-Gitter gezogen, das die Aufloesung schon traegt.
+    ist das unnötig: dort wird S2 ohnehin per resample_cube_spatial auf das
+    DEM-Gitter gezogen, das die Auflösung schon trägt.
 
     load_stac_spatial_extent (None = Default = bisheriges Verhalten): wenn
     gesetzt, bekommt loadstac1 den Parameter `spatial_extent` EXPLIZIT
     mitgegeben, statt CDSE ihn aus den STAC-Metadaten ableiten zu lassen.
     Erwartet wird eine openEO-Bounding-Box (west/south/east/north, optional
-    crs; s. _load_stac_extent_from_grid). Gedacht fuer --dem-format=zarr:
+    crs; s. _load_stac_extent_from_grid). Gedacht für --dem-format=zarr:
     dort endet der Lauf reproduzierbar mit
       "Unable to derive a spatial extent from provided STAC metadata:
        <item-url>, please provide a spatial extent"
-    obwohl dasselbe Item als gtiff durchlaeuft - der Unterschied ist der
+    obwohl dasselbe Item als gtiff durchläuft - der Unterschied ist der
     Medientyp application/vnd+zarr. Bei None bleibt der Knoten exakt wie
     bisher ({"url": ...}), damit gtiff/netcdf-Graphen byte-identisch sind.
 
     save_format (--save-format): Ausgabeformat des save_result-Knotens.
-    Default GTiff = unveraendert; s. _apply_save_format. Nicht zu
+    Default GTiff = unverändert; s. _apply_save_format. Nicht zu
     verwechseln mit --dem-format, das das FORMAT DES HOCHGELADENEN DEM
-    steuert - hier geht es um das, was das Backend zurueckschreibt.
+    steuert - hier geht es um das, was das Backend zurückschreibt.
     """
     template = _load_bench_template(region, extent_size)
     pg = _build_workflow_pg(template, workflow, region=region,
@@ -2598,10 +2597,10 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
             _retarget_dem(node["arguments"])
 
     # Beim Wechsel von load_collection(COPERNICUS_30) auf load_stac ist der
-    # Quellen-Bandname nicht garantiert "DEM" (haengt von der STAC-Item-
-    # Metadata und vom Backend ab). source=[] (Default) heisst "rename alle
+    # Quellen-Bandname nicht garantiert "DEM" (hängt von der STAC-Item-
+    # Metadata und vom Backend ab). source=[] (Default) heißt "rename alle
     # vorhandenen Labels in Reihenfolge" - bei einem Single-Band-DEM also
-    # genau das was wir wollen: das eine Band heisst danach "B04".
+    # genau das was wir wollen: das eine Band heißt danach "B04".
     if "renamelabels1" in pg:
         pg["renamelabels1"]["arguments"]["source"] = []
 
@@ -2630,8 +2629,8 @@ def build_local_pp_scenario(region: str, stac_item_url: str,
             "process_id": "resample_cube_spatial",
         }
     elif not _is_default_resolution(resolution):
-        # S2 explizit auf die Zielaufloesung bringen, sonst zwingt das
-        # native 10-m-S2-Gitter beim merge_cubes das DEM zurueck auf 10 m.
+        # S2 explizit auf die Zielauflösung bringen, sonst zwingt das
+        # native 10-m-S2-Gitter beim merge_cubes das DEM zurück auf 10 m.
         target_epsg = REGIONS[region]["epsg"]
         print(f"  local_pp: S2 explizit auf EPSG:{target_epsg} "
               f"@ {resolution:g} m resamplen (--resolution)")
@@ -2664,10 +2663,10 @@ def build_s2_download_scenario(region: str, target_path: Path,
                                extent_size: str = "medium",
                                workflow: str = "merge_add") -> Path:
     """
-    Baut ein Szenario das NUR die S2-Daten herunterlaedt (kein DEM, kein merge).
+    Baut ein Szenario das NUR die S2-Daten herunterlädt (kein DEM, kein merge).
     Verwendet die loadcollection1-Args (inkl. Cloud-Cover-Filter, bands,
     spatial_extent, temporal_extent) aus dem Region-Template; bei workflow=mask
-    werden zusaetzlich SCL-Bands geladen.
+    werden zusätzlich SCL-Bands geladen.
     """
     template = _load_bench_template(region, extent_size)
     s2_args = copy.deepcopy(template["process_graph"]["loadcollection1"]["arguments"])
@@ -2716,7 +2715,7 @@ def reproject_dem_to_grid(input_tif: str, output_tif: str, grid: dict,
                           resampling: str = "nearest") -> float:
     """
     Reprojiziert ein DEM-GeoTIFF auf EXAKT das gegebene Grid (Transform, CRS,
-    Width, Height). Gibt Laufzeit in Sekunden zurueck.
+    Width, Height). Gibt Laufzeit in Sekunden zurück.
     """
     if resampling not in LOCAL_RESAMPLING:
         raise ValueError(f"Unbekannte Resampling-Methode: {resampling}")
@@ -2749,10 +2748,10 @@ def reproject_s2_local(input_tif: str, output_tif: str,
                        dst_crs: str, resampling: str = "nearest",
                        target_resolution: float = None) -> float:
     """Reprojiziert ein S2-TIF lokal nach dst_crs (Szenario 3: BEIDE Raster
-    in Nicht-UTM-CRS). Ohne target_resolution die Default-Aufloesung aus
+    in Nicht-UTM-CRS). Ohne target_resolution die Default-Auflösung aus
     calculate_default_transform (bisheriges Verhalten); mit gesetztem Wert
-    die vorgegebene Zellgroesse, damit S2 und DEM bei --resolution auf
-    derselben Aufloesung landen.
+    die vorgegebene Zellgröße, damit S2 und DEM bei --resolution auf
+    derselben Auflösung landen.
     """
     method = LOCAL_RESAMPLING.get(resampling, Resampling.nearest)
     t0 = time.time()
@@ -2823,7 +2822,7 @@ def build_s2_stac_collection(collection_id: str,
                              item_links: list,
                              item_dates: list,
                              bbox_geo: list) -> dict:
-    """STAC Collection fuer N S2-Items.
+    """STAC Collection für N S2-Items.
 
     item_links: Liste von (item_id, item_url, item_path_on_remote).
     item_dates: Liste der ISO-Datetime-Strings (zur Berechnung des temporal
@@ -2862,8 +2861,8 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
                            dataset: str = DEFAULT_DATASET,
                            resampling: str = "nearest") -> Path:
     """
-    Process Graph fuer full_preprocessing: ZWEI load_stac Aufrufe
-    (loadstac1=S2, loadstac2=DEM) + Workflow-Verknuepfung.
+    Process Graph für full_preprocessing: ZWEI load_stac Aufrufe
+    (loadstac1=S2, loadstac2=DEM) + Workflow-Verknüpfung.
 
     Wir starten von der Workflow-PG und ersetzen
     - loadcollection1 (S2)  -> loadstac1
@@ -2872,12 +2871,12 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     auf den S2 STAC um.
 
     save_format: Ausgabeformat des Backend save_result. Default 'GTiff' -
-    wie bisher. Alternative 'netCDF' fuer die Diagnose ob die beobachtete
+    wie bisher. Alternative 'netCDF' für die Diagnose ob die beobachtete
     Output-Korruption GTiff-spezifisch beim CDSE-Writer ist (Schritt 4 der
     Ursachensuche).
 
-    resolution: wirkt hier NICHT ueber einen Resample-Knoten - bei full_pp
-    kommen BEIDE Cubes per load_stac von Hetzner und tragen die Zellgroesse
+    resolution: wirkt hier NICHT über einen Resample-Knoten - bei full_pp
+    kommen BEIDE Cubes per load_stac von Hetzner und tragen die Zellgröße
     schon aus der lokalen Reprojektion (s. run_strategy_full_preprocessing).
     Der Parameter geht nur an _build_workflow_pg weiter, damit
     workflow=resample seinen Umweg passend skaliert.
@@ -2914,12 +2913,12 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
 
     # Sicherstellen, dass merge1 die richtigen Cubes bekommt (cube1=S2, cube2=DEM).
     # cube2 muss durch renamelabels1 laufen, damit S2.B04 + DEM.B04 in merge_cubes
-    # ueberlappen und der overlap_resolver (add/subtract) greift. _retarget hat
+    # überlappen und der overlap_resolver (add/subtract) greift. _retarget hat
     # renamelabels1.data bereits von loadcollection2 auf loadstac2 umgebogen.
     if "merge1" in pg:
         merge_args = pg["merge1"]["arguments"]
         # cube2 zeigt auf renamelabels1 (oder bei resample auf resamplespatial2,
-        # was wiederum auf renamelabels1 zeigt) - in beiden Faellen liefert
+        # was wiederum auf renamelabels1 zeigt) - in beiden Fällen liefert
         # _build_workflow_pg merge1.cube2 schon korrekt.
         # cube1: bei workflow=mask kommt es aus mask1; sonst direkt loadstac1.
         if workflow != "mask":
@@ -2931,9 +2930,9 @@ def build_full_pp_scenario(region: str, s2_stac_url: str, dem_stac_url: str,
     if "renamelabels1" in pg:
         pg["renamelabels1"]["arguments"]["source"] = []
 
-    # save_result Format ueberschreiben, wenn abweichend vom Template-Default
-    # (GTiff). Nur die Format-Angabe wird geaendert - options bleiben leer,
-    # damit CDSE ein moeglichst standardkonformes Output-Profil schreibt.
+    # save_result Format überschreiben, wenn abweichend vom Template-Default
+    # (GTiff). Nur die Format-Angabe wird geändert - options bleiben leer,
+    # damit CDSE ein möglichst standardkonformes Output-Profil schreibt.
     if save_format != "GTiff" and "saveresult1" in pg:
         pg["saveresult1"]["arguments"]["format"] = save_format
         pg["saveresult1"]["arguments"]["options"] = {}
@@ -2955,37 +2954,37 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
                     ) -> dict:
     """STAC Item passend zum reprojizierten DEM-Asset.
 
-    `extent` ueberschreibt REGIONS[region]['extent'] (z.B. fuer small/large
+    `extent` überschreibt REGIONS[region]['extent'] (z.B. für small/large
     Modi). Default = REGIONS-Extent (medium).
 
     dem_format:
       gtiff  - Standard, media_type=image/tiff; application=geotiff
-      zarr   - Verzeichnis-Store. Der data-Asset traegt bewusst KEIN
+      zarr   - Verzeichnis-Store. Der data-Asset trägt bewusst KEIN
                'type'-Feld und der href endet auf '.zarr' OHNE Slash
                (Details + Quellen unter zarr_legacy_asset).
       netcdf - Einzeldatei .nc, media_type=application/x-netcdf. Der href
-               bekommt ein /vsicurl/-Praefix: CDSE baut daraus den GDAL-Pfad
+               bekommt ein /vsicurl/-Präfix: CDSE baut daraus den GDAL-Pfad
                NETCDF:<href>:DEM ohne Quoting, und mit nacktem http-URL
                deutet GDAL "http" als lokalen Pfad ("File does not exist:
                http", Exception Code 4). Lokal verifiziert:
                  NETCDF:http://HOST/f.nc:DEM           -> FAIL
                  NETCDF:/vsicurl/http://HOST/f.nc:DEM  -> OK
-               Die Datei selbst + Upload bleiben unveraendert, nur der
-               href-String im Item traegt das Praefix.
+               Die Datei selbst + Upload bleiben unverändert, nur der
+               href-String im Item trägt das Präfix.
 
     grid (read_s2_grid-Stil: transform/width/height/bounds): liefert
-    proj:shape / proj:bbox / proj:transform fuer Item-Properties UND
-    data-Asset. Fuer zarr/netcdf ist das de facto Pflicht: proj:epsg
-    allein reicht CDSE nicht, um einen raeumlichen Extent abzuleiten
+    proj:shape / proj:bbox / proj:transform für Item-Properties UND
+    data-Asset. Für zarr/netcdf ist das de facto Pflicht: proj:epsg
+    allein reicht CDSE nicht, um einen räumlichen Extent abzuleiten
     ("Unable to derive a spatial extent from provided STAC metadata" /
     "Collected 0 projection metadata entries"). GeoTIFF funktionierte nur,
-    weil das Backend das File selbst oeffnen kann - zarr/netcdf kann es
-    nicht. Die Werte muessen deshalb aus dem In-Memory-Ziel-Grid der
+    weil das Backend das File selbst öffnen kann - zarr/netcdf kann es
+    nicht. Die Werte müssen deshalb aus dem In-Memory-Ziel-Grid der
     Reprojektion kommen (_grid_from_dst_meta), nicht aus dem Output-File.
 
     zarr_legacy_asset (nur dem_format=zarr, Default False): stellt die alte
     Asset-Form wieder her (type=application/vnd+zarr + href mit
-    Schluss-Slash). Zwei belegte Gruende, warum die alte Form nicht
+    Schluss-Slash). Zwei belegte Gründe, warum die alte Form nicht
     funktionieren KANN - beide im Backend-Quelltext nachlesbar:
 
     1. type weglassen (Python-Treiber, openeo-geopyspark-driver):
@@ -3000,26 +2999,26 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
        application/x-hdf, application/x-netcdf, application/netcdf -
        KEINE zarr-Variante. Folge: iter_items_with_band_assets liefert
        das Item gar nicht erst aus (`if band_assets:`), der Treiber
-       uebergibt 0 Features und FileLayerProvider.scala:721 wirft
+       übergibt 0 Features und FileLayerProvider.scala:721 wirft
        "No features found for collection ..., cannot determine band
-       indices for link titles". Dieselbe Filterung erklaert
+       indices for link titles". Dieselbe Filterung erklärt
        "Collected 0 projection metadata entries from 1 items"
-       (_backend/post_dry_run.py iteriert ebenfalls ueber
-       iter_items_with_band_assets). Der Media-Type-Check haengt aber an
-       `if asset.media_type:` - OHNE type-Feld faellt er komplett aus und
-       _is_band_asset entscheidet ueber roles=['data'] (in
+       (_backend/post_dry_run.py iteriert ebenfalls über
+       iter_items_with_band_assets). Der Media-Type-Check hängt aber an
+       `if asset.media_type:` - OHNE type-Feld fällt er komplett aus und
+       _is_band_asset entscheidet über roles=['data'] (in
        roles_with_bands) => True. 'type' ist in STAC optional.
     2. href OHNE Schluss-Slash (Scala, openeo-geotrellis-extensions):
        FileLayerProvider.scala:98 fragt die RasterSource-Provider in der
        Reihenfolge Zarr, HDF, NetCDF, JPEG, Default. Der zarr-Provider
-       greift ausschliesslich ueber die Pfad-Endung:
+       greift ausschließlich über die Pfad-Endung:
            ZarrRasterSourceProvider.canProcess:
                definition.dataPath.endsWith(".zarr")
        Mit Slash ist das False, und DefaultRasterSourceProvider
-       (canProcess = true) wuerde den Store als GeoTIFF oeffnen. Der
+       (canProcess = true) würde den Store als GeoTIFF öffnen. Der
        Slash war eine reine Lesbarkeitskonvention von uns und kostet
        genau den einzigen Codepfad, der zarr lesen kann. Ein
-       /vsicurl/-Praefix wird bei der Form 'store' NICHT ergaenzt - siehe
+       /vsicurl/-Präfix wird bei der Form 'store' NICHT ergänzt - siehe
        zarr_href_form, dort steht auch die Korrektur zu geotrellis'
        GDALPath.
 
@@ -3027,19 +3026,19 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     Adressform des data-Assets, s. ZARR_HREF_FORMS. Jede Form entspricht
     einem CDSE-Versuch; die Achse existiert, damit alle bisher gebauten
     Formen abrufbar bleiben und die Doku reproduzierbar ist. Nur der href
-    aendert sich, sonst nichts - insbesondere traegt der Asset in ALLEN
-    Formen kein 'type'-Feld (auch nicht bei 'chunk', wo der urspruengliche
-    Versuch zusaetzlich image/tiff deklariert hatte). So variiert pro Lauf
-    genau eine Groesse.
+    ändert sich, sonst nichts - insbesondere trägt der Asset in ALLEN
+    Formen kein 'type'-Feld (auch nicht bei 'chunk', wo der ursprüngliche
+    Versuch zusätzlich image/tiff deklariert hatte). So variiert pro Lauf
+    genau eine Größe.
 
-    Korrektur zu einer frueheren Annahme in diesem Docstring: geotrellis
-    ergaenzt /vsicurl/ NICHT selbst. GDALPath.parse wuerde das tun
+    Korrektur zu einer früheren Annahme in diesem Docstring: geotrellis
+    ergänzt /vsicurl/ NICHT selbst. GDALPath.parse würde das tun
     (GDALPath.scala, toVSIScheme), aufgerufen wird aber der
     Case-Class-Konstruktor GDALPath(dataPath) (GDALPath.scala:42), der den
-    String unveraendert laesst - und ZarrRasterSourceProvider.scala:19 ist
+    String unverändert lässt - und ZarrRasterSourceProvider.scala:19 ist
     als einziger Provider der Kette ohne das
     .replace("https", "/vsicurl/https"), das NetCDF-, JPEG-, HDF- und
-    Default-Provider alle haben. Das Praefix muss also aus dem href
+    Default-Provider alle haben. Das Präfix muss also aus dem href
     kommen (Formen driver-fragment/driver-plain).
     """
     ext = extent if extent is not None else REGIONS[region]["extent"]
@@ -3049,8 +3048,8 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     href = asset_href
     if dem_format == "zarr":
         if zarr_legacy_asset:
-            # Legacy schlaegt die Adressform: es ist bewusst die
-            # unveraenderte Ur-Form (type + Schluss-Slash).
+            # Legacy schlägt die Adressform: es ist bewusst die
+            # unveränderte Ur-Form (type + Schluss-Slash).
             if not href.endswith("/"):
                 href = href + "/"
         else:
@@ -3059,10 +3058,10 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     if dem_format == "netcdf" and href.startswith("http"):
         href = "/vsicurl/" + href
 
-    # Ohne Band-Metadaten laedt CDSE den Cube ohne Band-Label
+    # Ohne Band-Metadaten lädt CDSE den Cube ohne Band-Label
     # ("bands_from_stac_item: no band name source found"), renamelabels1
-    # hat dann nichts zum Umbenennen und das DEM faellt still aus
-    # merge_cubes raus. eo:bands (STAC 1.0 ueblich) + bands (STAC 1.1)
+    # hat dann nichts zum Umbenennen und das DEM fällt still aus
+    # merge_cubes raus. eo:bands (STAC 1.0 üblich) + bands (STAC 1.1)
     # parallel, damit jeder Reader-Pfad eine Bandnamen-Quelle findet.
     band_meta = [{"name": DATASETS[dataset]["band"]}]
     asset = {
@@ -3075,8 +3074,8 @@ def build_stac_item(region: str, asset_href: str, epsg: int,
     }
     if dem_format == "zarr" and not zarr_legacy_asset:
         # s. Docstring Punkt 1: ein DEKLARIERTER, nicht gelisteter Medientyp
-        # laesst _is_band_asset das Asset sofort verwerfen; ohne type-Feld
-        # faellt der Check aus und roles=['data'] entscheidet.
+        # lässt _is_band_asset das Asset sofort verwerfen; ohne type-Feld
+        # fällt der Check aus und roles=['data'] entscheidet.
         # --zarr-asset-media-type kann stattdessen einen GELISTETEN Typ
         # deklarieren (s. ZARR_ASSET_MEDIA_TYPES).
         if zarr_asset_media_type not in ZARR_ASSET_MEDIA_TYPES:
@@ -3126,8 +3125,8 @@ def _link_item_into_collection(item: dict, item_url: str,
 
     Setzt item['collection'] und ersetzt die (bisher leeren) links durch
     self/root/parent/collection mit ABSOLUTEN URLs - relative hrefs sind
-    auf dem statischen Hetzner-Hosting nicht zuverlaessig aufloesbar.
-    Inhalt (properties, assets, proj-Felder, eo:bands) bleibt unberuehrt.
+    auf dem statischen Hetzner-Hosting nicht zuverlässig auflösbar.
+    Inhalt (properties, assets, proj-Felder, eo:bands) bleibt unberührt.
     """
     item["collection"] = collection_id
     item["links"] = [
@@ -3143,17 +3142,17 @@ def build_dem_stac_collection(collection_id: str, collection_url: str,
                               item: dict, item_url: str) -> dict:
     """Minimale valide STAC Collection (1.0.0) um genau EIN DEM-Item.
 
-    Zweck (dem_format=zarr): CDSEs load_stac hat fuer Collection vs.
-    einzelnes Item verschiedene Code-Pfade. Ueber ein Item ignoriert das
-    Backend beim Medientyp application/vnd+zarr saemtliche proj-Metadaten
+    Zweck (dem_format=zarr): CDSEs load_stac hat für Collection vs.
+    einzelnes Item verschiedene Code-Pfade. Über ein Item ignoriert das
+    Backend beim Medientyp application/vnd+zarr sämtliche proj-Metadaten
     ("Collected 0 projection metadata entries"); ob der Collection-Pfad
     den zarr-Asset anders behandelt, ist unbekannt und wird hiermit
-    getestet. Deshalb tragen zusaetzlich zur Item-Verlinkung (rel=item)
+    getestet. Deshalb tragen zusätzlich zur Item-Verlinkung (rel=item)
     auch item_assets und summaries die proj-/Band-Metadaten - manche
     Backends lesen Asset-Metadaten von der Collection statt vom Item.
 
     Alle Angaben werden aus dem fertigen Item abgeleitet, damit Item und
-    Collection nie divergieren koennen.
+    Collection nie divergieren können.
     """
     props = item.get("properties", {})
     asset = item.get("assets", {}).get("data", {})
@@ -3162,11 +3161,11 @@ def build_dem_stac_collection(collection_id: str, collection_url: str,
     item_assets_data = {
         "roles": asset.get("roles", ["data"]),
     }
-    # 'type' nur wenn das Item eines hat: der zarr-Asset traegt bewusst
+    # 'type' nur wenn das Item eines hat: der zarr-Asset trägt bewusst
     # keinen Medientyp (s. build_stac_item), und ein "type": null in
-    # item_assets waere weder valide noch harmlos - Reader, die
-    # Asset-Metadaten von der Collection ziehen, wuerden denselben
-    # Medientyp-Filter erneut ausloesen.
+    # item_assets wäre weder valide noch harmlos - Reader, die
+    # Asset-Metadaten von der Collection ziehen, würden denselben
+    # Medientyp-Filter erneut auslösen.
     if asset.get("type") is not None:
         item_assets_data["type"] = asset["type"]
     for key in ("proj:epsg", "proj:shape", "proj:bbox", "proj:transform",
@@ -3213,25 +3212,25 @@ def build_dem_stac_collection(collection_id: str, collection_url: str,
 
 def build_dem_tiles_collection(collection_id: str, collection_url: str,
                                items_with_urls: list) -> dict:
-    """STAC Collection (1.0.0) ueber N raeumliche DEM-Kachel-Items
+    """STAC Collection (1.0.0) über N räumliche DEM-Kachel-Items
     (--dem-tiles).
 
     items_with_urls: Liste von (item, item_url) - ein Item pro Kachel,
-    jedes mit genau einem data-Asset und EIGENEN proj-Feldern fuer seinen
+    jedes mit genau einem data-Asset und EIGENEN proj-Feldern für seinen
     Ausschnitt.
 
-    Struktur-Begruendung (Schritt-0-Recherche): CDSEs geopyspark-Treiber
+    Struktur-Begründung (Schritt-0-Recherche): CDSEs geopyspark-Treiber
     dedupliziert mehrere Assets gleichen Bandnamens INNERHALB eines Items
     (NoveltyTracker in load_stac.py - nur das erste Asset wird geladen,
-    der Rest stumm verworfen); raeumlich mosaikiert wird ausschliesslich
-    UEBER Items (per-SpatialKey merge in FileLayerProvider.scala - der
-    Sentinel-2-Normalfall: Item = Kachel, Assets = Baender). Deshalb
+    der Rest stumm verworfen); räumlich mosaikiert wird ausschließlich
+    ÜBER Items (per-SpatialKey merge in FileLayerProvider.scala - der
+    Sentinel-2-Normalfall: Item = Kachel, Assets = Bänder). Deshalb
     Collection mit N Items statt ein Item mit N Assets.
 
     item_assets/summaries tragen nur die kachel-INVARIANTEN Metadaten
     (media type, Rollen, Band, EPSG). Die per-Kachel-Geometrie
     (proj:shape/bbox/transform) steht NUR in den Items - ein
-    Collection-weiter Wert waere fuer jede Kachel falsch.
+    Collection-weiter Wert wäre für jede Kachel falsch.
     """
     first_item = items_with_urls[0][0]
     first_asset = first_item["assets"]["data"]
@@ -3287,20 +3286,20 @@ def build_dem_tiles_collection(collection_id: str, collection_url: str,
     }
 
 
-SCP_SSH_TIMEOUT = 120  # Sekunden - haengende Uploads/Logs hart abbrechen
+SCP_SSH_TIMEOUT = 120  # Sekunden - hängende Uploads/Logs hart abbrechen
 
 
 _ENVIRONMENT_CACHE = None
 
 
 def _collect_environment() -> dict:
-    """Sammelt Versionen + git-State fuer Reproduzierbarkeit.
+    """Sammelt Versionen + git-State für Reproduzierbarkeit.
 
     Wird einmal pro Prozess gecacht weil nichts davon zur Laufzeit kippt.
-    Felder die nicht ermittelt werden koennen sind None - der Benchmark
+    Felder die nicht ermittelt werden können sind None - der Benchmark
     bricht nie wegen Environment-Capture ab.
 
-    Plattform-Hinweis: ueberall subprocess+importlib statt platformspezifischer
+    Plattform-Hinweis: überall subprocess+importlib statt platformspezifischer
     Pfade, damit das auf Linux + Windows + macOS funktioniert.
     """
     global _ENVIRONMENT_CACHE
@@ -3345,7 +3344,7 @@ def _collect_environment() -> dict:
     try:
         env["rasterio_version"] = getattr(rasterio, "__version__", None)
         # rasterio __gdal_version__ / __proj_version__ sind die einfachsten
-        # Quellen (vermeiden zusaetzliche pyproj-Abhaengigkeit).
+        # Quellen (vermeiden zusätzliche pyproj-Abhängigkeit).
         env["gdal_version"] = getattr(rasterio, "__gdal_version__", None)
         env["proj_version"] = getattr(rasterio, "__proj_version__", None)
     except Exception:
@@ -3370,7 +3369,7 @@ def _collect_environment() -> dict:
 
 def _augment_results_json(results_path: Path) -> None:
     """Schreibt den `environment` Block in eine existierende results.json.
-    Idempotent - vorhandene Felder werden nicht ueberschrieben.
+    Idempotent - vorhandene Felder werden nicht überschrieben.
     """
     if not results_path.exists():
         return
@@ -3391,9 +3390,9 @@ def _augment_results_json(results_path: Path) -> None:
 
 
 def scp_upload(local_path: str, remote_filename: str) -> float:
-    """scp eine Datei auf Hetzner. Gibt die Upload-Dauer in Sekunden zurueck.
+    """scp eine Datei auf Hetzner. Gibt die Upload-Dauer in Sekunden zurück.
 
-    Bricht nach SCP_SSH_TIMEOUT s ab statt unbegrenzt zu haengen (Default 120 s).
+    Bricht nach SCP_SSH_TIMEOUT s ab statt unbegrenzt zu hängen (Default 120 s).
     """
     remote = f"{HETZNER_HOST}:{HETZNER_WEB_PATH}{remote_filename}"
     cmd = ["scp", "-o", "StrictHostKeyChecking=no",
@@ -3419,11 +3418,11 @@ def scp_upload(local_path: str, remote_filename: str) -> float:
 
 
 def scp_upload_dir(local_dir: str, remote_dirname: str) -> float:
-    """scp -r fuer ein Verzeichnis (Zarr-Store) auf Hetzner.
+    """scp -r für ein Verzeichnis (Zarr-Store) auf Hetzner.
 
-    Zarr-Stores sind Verzeichnisbaeume, kein Einzelfile. Der Rekursiv-Upload
-    ist die minimalste Loesung; alternative Ansaetze (rsync, tar+scp+untar)
-    waeren robuster gegen Teil-Uebertragungen, aber scp -r reicht fuer den
+    Zarr-Stores sind Verzeichnisbäume, kein Einzelfile. Der Rekursiv-Upload
+    ist die minimalste Lösung; alternative Ansätze (rsync, tar+scp+untar)
+    wären robuster gegen Teil-Übertragungen, aber scp -r reicht für den
     Machbarkeitstest.
     """
     remote = f"{HETZNER_HOST}:{HETZNER_WEB_PATH}{remote_dirname}"
@@ -3461,24 +3460,24 @@ def _rewrite_tif_clean(input_tif: str, output_tif: str,
     """Schreibt ein GeoTIFF neu mit einem einfachen, breit dekodierbaren Profil.
 
     NEUE ERKENNTNIS (Runde 2, gesichert): Der Streaming-Download liefert die
-    CDSE-Ergebnisse Byte-fuer-Byte korrekt aus, aber die Ergebnisse bei
+    CDSE-Ergebnisse Byte-für-Byte korrekt aus, aber die Ergebnisse bei
     full_preprocessing sind trotzdem defekt (TIFFReadEncodedTile failed,
     MAE ~12000). Die Ursache liegt nicht im Transfer, sondern in der Art,
-    wie CDSE die hochgeladenen S2-Eingaben ueber load_stac interpretiert
+    wie CDSE die hochgeladenen S2-Eingaben über load_stac interpretiert
     oder das Ergebnis schreibt. local_preprocessing liefert korrekte
-    Ergebnisse und laed sein DEM als striped, unkomprimiertes GeoTIFF hoch.
+    Ergebnisse und lädt sein DEM als striped, unkomprimiertes GeoTIFF hoch.
 
     Neuer Default profile='simple_striped': gestreiftes, unkomprimiertes
-    GeoTIFF - identisch zu dem, was local_preprocessing fuer das DEM
+    GeoTIFF - identisch zu dem, was local_preprocessing für das DEM
     verwendet und was CDSE nachweislich sauber liest.
 
     Alter Default (bis zum Bugfix): profile='tiled_deflate' - tiled 256x256
     mit deflate. War die Reaktion auf einen davor vermuteten Transfer-Bug,
-    ist aber der wahrscheinlichere Ausloeser der beobachteten CDSE-Output-
+    ist aber der wahrscheinlichere Auslöser der beobachteten CDSE-Output-
     Korruption bei full_pp und deshalb NICHT mehr der Default.
 
     CRS, Transform, Dtype, Nodata und Band-Beschreibungen werden 1:1
-    uebernommen, sodass STAC-Geometrie und Pixel-Werte unveraendert bleiben.
+    übernommen, sodass STAC-Geometrie und Pixel-Werte unverändert bleiben.
     Idempotent.
     """
     if profile not in _REWRITE_PROFILES:
@@ -3494,14 +3493,14 @@ def _rewrite_tif_clean(input_tif: str, output_tif: str,
         prof["interleave"] = "band"
         if profile == "simple_striped":
             # Explizit tiled=False + kein compress. Vom Input geerbte Werte
-            # (falls das Source-TIF selbst tiled war) muessen unbedingt
-            # entfernt werden, sonst greift rasterio auf die Source-Bloecke
-            # zurueck.
+            # (falls das Source-TIF selbst tiled war) müssen unbedingt
+            # entfernt werden, sonst greift rasterio auf die Source-Blöcke
+            # zurück.
             prof["tiled"] = False
             prof.pop("blockxsize", None)
             prof.pop("blockysize", None)
             prof.pop("compress", None)
-        else:  # tiled_deflate (Fallback fuer den alten Pfad)
+        else:  # tiled_deflate (Fallback für den alten Pfad)
             prof.update({
                 "tiled":      True,
                 "blockxsize": blocksize,
@@ -3519,11 +3518,11 @@ def _rewrite_tif_clean(input_tif: str, output_tif: str,
 
 
 def _verify_tif_readable(path: str, label: str = "") -> dict:
-    """Oeffnet die Datei mit rasterio, liest ALLE Baender vollstaendig.
+    """Öffnet die Datei mit rasterio, liest ALLE Bänder vollständig.
     Wirft RuntimeError bei kaputten Kacheln / abgeschnittener Datei.
 
-    Gibt Statistiken zurueck: shape, count, dtype, size_bytes, block_size,
-    compression, tiled - damit im Log dokumentiert ist, was tatsaechlich
+    Gibt Statistiken zurück: shape, count, dtype, size_bytes, block_size,
+    compression, tiled - damit im Log dokumentiert ist, was tatsächlich
     hochgeladen wird.
     """
     p = Path(path)
@@ -3532,7 +3531,7 @@ def _verify_tif_readable(path: str, label: str = "") -> dict:
     try:
         with rasterio.open(str(p)) as src:
             prof = src.profile
-            # Alle Baender komplett dekodieren -> zwingt jeden Block-Read
+            # Alle Bänder komplett dekodieren -> zwingt jeden Block-Read
             arr = src.read()
             info = {
                 "path": str(p),
@@ -3562,11 +3561,11 @@ def _verify_tif_readable(path: str, label: str = "") -> dict:
 def _inspect_tif_header_bytes(path: str, nbytes: int = 32) -> dict:
     """Direktes Byte-Level Inspection eines TIFF-Kopfs OHNE rasterio.
 
-    Wird nach einem gescheiterten rasterio-Read aufgerufen um zu klaeren:
-      - Ist die Datei ueberhaupt ein TIFF (magic bytes)?
+    Wird nach einem gescheiterten rasterio-Read aufgerufen um zu klären:
+      - Ist die Datei überhaupt ein TIFF (magic bytes)?
       - Byte-Order (II little-endian oder MM big-endian, BigTIFF)?
-      - Wo sitzt das erste IFD, und liegt der Offset im tatsaechlich
-        vorhandenen Byte-Bereich (== Datei ist strukturell vollstaendig)?
+      - Wo sitzt das erste IFD, und liegt der Offset im tatsächlich
+        vorhandenen Byte-Bereich (== Datei ist strukturell vollständig)?
 
     Damit wird belegbar, ob die Datei serverseitig defekt ANKAM (strukturell
     truncated: IFD zeigt hinter das Datei-Ende) oder ob sie strukturell in
@@ -3631,10 +3630,10 @@ def _inspect_tif_header_bytes(path: str, nbytes: int = 32) -> dict:
 
 def _remote_file_size(host: str, remote_path: str,
                       timeout: int = SCP_SSH_TIMEOUT) -> int:
-    """Liest die Dateigroesse per ssh+stat. Wirft RuntimeError bei Fehler.
+    """Liest die Dateigröße per ssh+stat. Wirft RuntimeError bei Fehler.
 
-    stat -c '%s' ist GNU coreutils (Linux/Hetzner). Auf BSD/macOS waere
-    'stat -f %z' noetig; das ssh-Target ist hier aber immer der Linux-
+    stat -c '%s' ist GNU coreutils (Linux/Hetzner). Auf BSD/macOS wäre
+    'stat -f %z' nötig; das ssh-Target ist hier aber immer der Linux-
     Webserver, daher reicht die GNU-Variante.
     """
     connect_timeout = min(int(timeout), 30)
@@ -3662,10 +3661,10 @@ def _remote_file_size(host: str, remote_path: str,
 
 
 def scp_upload_verified(local_path: str, remote_filename: str) -> float:
-    """scp_upload + anschliessende Groessen-Verifikation per ssh stat.
+    """scp_upload + anschließende Größen-Verifikation per ssh stat.
 
-    Faengt stille Abbrueche der scp-Verbindung ab, die sonst zu einem
-    truncated TIFF auf dem Server fuehren. Bei Groessen-Mismatch wird
+    Fängt stille Abbrüche der scp-Verbindung ab, die sonst zu einem
+    truncated TIFF auf dem Server führen. Bei Größen-Mismatch wird
     geworfen statt mit korrupten Daten weiterzulaufen.
     """
     elapsed = scp_upload(local_path, remote_filename)
@@ -3713,8 +3712,8 @@ def run_strategy_onthefly(args, repeat_idx: int) -> dict:
                         backend=_backend_for_url(args.api_url))
         results = run_openeo(args.api_url, str(scenario_path), str(outdir),
                              job_timeout=args.job_timeout)
-        # Nur Diagnose: der Rueckgabewert wird bewusst NICHT ausgewertet.
-        # Die Meldung darf weder den Lauf abbrechen noch den spaeteren
+        # Nur Diagnose: der Rückgabewert wird bewusst NICHT ausgewertet.
+        # Die Meldung darf weder den Lauf abbrechen noch den späteren
         # Accuracy-Check verhindern - sonst fehlt bei einem Fehlalarm auch
         # noch die Metrik.
         if _is_categorical(dataset) and results.get("status") == "success":
@@ -3744,8 +3743,8 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
                          use_cache: bool,
                          dataset: str = DEFAULT_DATASET) -> tuple:
     """
-    Liefert (dem_tif_path, t_download). Die Download-Zeit zaehlt bewusst NICHT
-    zur preprocessing_time und wird hier nur zu Info-Zwecken zurueckgegeben.
+    Liefert (dem_tif_path, t_download). Die Download-Zeit zählt bewusst NICHT
+    zur preprocessing_time und wird hier nur zu Info-Zwecken zurückgegeben.
 
     use_cache=True : DEM einmal pro (Region, extent_size) herunterladen +
                      in cache_dir ablegen, bei weiteren Runs wiederverwenden
@@ -3755,8 +3754,8 @@ def _get_or_download_dem(args, region: str, base: Path, cache_dir: Path,
     """
     extent_size = getattr(args, "extent_size", "medium")
     # Cache-Key MUSS das Datensatz-Paar enthalten: sonst liefert ein
-    # vorhandener DEM-Cache-Eintrag stumm ein Hoehenraster fuer einen
-    # Landcover-Lauf. Der Default behaelt den historischen Dateinamen,
+    # vorhandener DEM-Cache-Eintrag stumm ein Höhenraster für einen
+    # Landcover-Lauf. Der Default behält den historischen Dateinamen,
     # damit bestehende Caches weiter greifen.
     ds_suffix = "" if dataset == DEFAULT_DATASET else f"_{dataset}"
     if use_cache:
@@ -3825,14 +3824,14 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         raise ValueError(f"Unbekanntes --dem-format: {dem_format!r}. "
                          f"Erlaubt: {DEM_FORMATS}")
     # dem_layout ist GeoTIFF-spezifisch. Bei anderen Formaten hat es keinen
-    # Effekt; Warnung fuer den Fall dass jemand versehentlich beides setzt.
+    # Effekt; Warnung für den Fall dass jemand versehentlich beides setzt.
     if dem_format != "gtiff" and dem_layout != "striped":
         print(f"  [warn] --dem-layout={dem_layout} wird bei "
               f"--dem-format={dem_format} ignoriert (nur fuer gtiff relevant).")
 
     # --zarr-href-form: Adressform des zarr-Assets (s. ZARR_HREF_FORMS).
-    # Frueh validieren, damit ein Tippfehler nicht erst nach DEM-Download,
-    # Reprojektion und Upload auffaellt.
+    # Früh validieren, damit ein Tippfehler nicht erst nach DEM-Download,
+    # Reprojektion und Upload auffällt.
     zarr_href_form = getattr(args, "zarr_href_form", DEFAULT_ZARR_HREF_FORM)
     if zarr_href_form not in ZARR_HREF_FORMS:
         raise ValueError(f"Unbekannte --zarr-href-form: {zarr_href_form!r}. "
@@ -3859,7 +3858,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
               f"bei --dem-format={dem_format} ignoriert (nur fuer zarr "
               f"relevant).")
 
-    # --dem-tiles: DEM in N raeumliche Kacheln zerlegen, je Kachel ein
+    # --dem-tiles: DEM in N räumliche Kacheln zerlegen, je Kachel ein
     # eigenes STAC-Item (ein Asset) in einer Collection. Nur gtiff - die
     # zarr/netcdf-Experimente bleiben unangetastet.
     dem_tiles = int(getattr(args, "dem_tiles", 1) or 1)
@@ -3870,12 +3869,12 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             f"--dem-tiles {dem_tiles} ist nur mit --dem-format=gtiff "
             f"kombinierbar (ist {dem_format!r}).")
 
-    # Optionale Pakete FRUEH pruefen - klare Fehlermeldung bevor der DEM-
-    # Download laeuft.
+    # Optionale Pakete FRÜH prüfen - klare Fehlermeldung bevor der DEM-
+    # Download läuft.
     _check_dem_format_deps(dem_format)
 
     # --snap-dem-to-s2: erwartetes CDSE-Zielgitter aus dem angefragten
-    # Extent ableiten; nach der (unveraenderten) Reprojektion wird der
+    # Extent ableiten; nach der (unveränderten) Reprojektion wird der
     # Puffer auf dieses Grid gecroppt. Nur bei UTM-Ziel sinnvoll - die
     # S2-10-m-Grid-Semantik existiert nur dort (gleiche Regel wie der
     # bestehende 10-m-Snap in _reproject_dem_to_array).
@@ -3901,11 +3900,11 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
     remote_stac_name = f"stac_item_{region}_{run_ts}.json"
     asset_url = f"{HETZNER_URL_BASE}{remote_asset_name}"
     stac_url = f"{HETZNER_URL_BASE}{remote_stac_name}"
-    # zarr: Item wird zusaetzlich in eine minimale STAC COLLECTION
+    # zarr: Item wird zusätzlich in eine minimale STAC COLLECTION
     # eingebettet und load_stac zeigt auf die Collection statt aufs Item
     # (CDSE-Codepfad Collection vs. Item ist verschieden; Versuch 4 gegen
     # "Collected 0 projection metadata entries", s. build_dem_stac_collection).
-    # --dem-tiles>1: Collection ueber N Kachel-Items (nur gtiff, daher
+    # --dem-tiles>1: Collection über N Kachel-Items (nur gtiff, daher
     # kein Namenskonflikt mit dem zarr-Fall).
     remote_coll_name = f"stac_collection_{region}_{run_ts}.json"
     collection_url = f"{HETZNER_URL_BASE}{remote_coll_name}"
@@ -3960,7 +3959,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         # --snap-dem-to-s2 wird danach nur aufs Snap-Grid GECROPPT (reines
         # Slicing, beide Grids liegen auf demselben 10-m-Raster). Kein
         # zweiter Warp: GDALs Warp ist nicht frame-invariant, ein direkter
-        # Warp aufs Snap-Grid haette andere Pixelwerte als der Ausschnitt
+        # Warp aufs Snap-Grid hätte andere Pixelwerte als der Ausschnitt
         # (Details in _crop_to_grid). So ist garantiert, dass MIT und OHNE
         # Flag exakt dieselben Werte hochgeladen werden - nur der Extent
         # unterscheidet sich.
@@ -4012,18 +4011,18 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
               f"({t_reproject:.2f} s)")
 
         # --snap-dem-to-s2 Pflicht-Verifikation (NICHT in preprocessing_time:
-        # laeuft nach dem gemessenen Reprojektions-/Write-Block und dient nur
+        # läuft nach dem gemessenen Reprojektions-/Write-Block und dient nur
         # dem lokalen Beweis, nicht der Pipeline):
         #   1. Grid-Check: sitzt der gesnappte Puffer exakt auf dem
         #      erwarteten CDSE-Zielgitter (projizierter Extent, outward
         #      auf 10 m)?
-        #   2. Crop-Identitaet: gesnappter Puffer == bitgenauer Ausschnitt
+        #   2. Crop-Identität: gesnappter Puffer == bitgenauer Ausschnitt
         #      des ungesnappten Puffers auf der Extent-Schnittmenge
-        #      (np.array_equal, Fenster unabhaengig aus den Geo-Koordinaten
+        #      (np.array_equal, Fenster unabhängig aus den Geo-Koordinaten
         #      hergeleitet). Beweist lokal, dass das Snapping nur
-        #      zugeschnitten und keine Werte veraendert hat.
+        #      zugeschnitten und keine Werte verändert hat.
         # Bei Verletzung wird abgebrochen: ein Lauf, dessen lokaler Beweis
-        # scheitert, ist fuer den MIT/OHNE-Vergleich wertlos und wuerde nur
+        # scheitert, ist für den MIT/OHNE-Vergleich wertlos und würde nur
         # CDSE-Zeit verbrennen.
         if snap_to_s2:
             grid_ok = _verify_snap_grid(dst_meta, snap_grid)
@@ -4038,9 +4037,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
 
         # --dem-tiles Pflicht-Verifikation (NICHT in preprocessing_time):
         # die Vereinigung der Kacheln muss bitgenau dem Einzel-DEM
-        # entsprechen (Abdeckung, Byte-Identitaet, Extent-/Shape-Summe).
+        # entsprechen (Abdeckung, Byte-Identität, Extent-/Shape-Summe).
         # Bei Verletzung Abbruch vor Upload - ein Lauf mit fehlerhafter
-        # Zerlegung wuerde nur CDSE-Zeit verbrennen.
+        # Zerlegung würde nur CDSE-Zeit verbrennen.
         if tiles is not None:
             if not _verify_tile_union_identity(tiles, data, dst_meta):
                 raise RuntimeError(
@@ -4067,10 +4066,10 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                 t_scp_asset = scp_upload(str(local_asset_path), remote_asset_name)
             print(f"  Asset Upload fertig: {asset_url}  ({t_scp_asset:.2f} s)")
 
-        # Groesse der hochgeladenen Rasterdaten festhalten (-> Spalte
+        # Größe der hochgeladenen Rasterdaten festhalten (-> Spalte
         # asset_bytes). Gemessen wird an den LOKALEN Dateien, die soeben
         # hochgeladen wurden - identisch mit dem, was auf dem Server
-        # liegt, und ohne zusaetzlichen ssh-Aufruf. Bei --dem-tiles>1 die
+        # liegt, und ohne zusätzlichen ssh-Aufruf. Bei --dem-tiles>1 die
         # Summe der Kacheln, bei zarr die rekursive Summe des Stores.
         asset_bytes = _uploaded_raster_bytes(
             tile_local_paths if tiles is not None else [local_asset_path])
@@ -4081,11 +4080,11 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                   f"({asset_bytes / (1024**2):.2f} MB, {_n_files} Datei(en), "
                   f"dem_format={dem_format})")
 
-        # Schritt 4: STAC Item(s) generieren + hochladen (media_type haengt
+        # Schritt 4: STAC Item(s) generieren + hochladen (media_type hängt
         # am dem_format). Bei --dem-tiles>1: ein Item PRO KACHEL (eigene
         # proj-Felder + eigener WGS84-Extent je Ausschnitt) in einer
-        # Collection - der Treiber mosaikiert nur ueber Items, mehrere
-        # Assets gleichen Bandnamens in EINEM Item wuerden bis auf das
+        # Collection - der Treiber mosaikiert nur über Items, mehrere
+        # Assets gleichen Bandnamens in EINEM Item würden bis auf das
         # erste stumm verworfen (s. build_dem_tiles_collection).
         if tiles is not None:
             print(f"\n  [Schritt 4/5] {dem_tiles} STAC Kachel-Items + "
@@ -4130,9 +4129,9 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
             print(f"  STAC Upload fertig: {dem_tiles} Items + Collection "
                   f"{collection_url}  ({t_stac:.2f} s)")
         else:
-            # Bei zarr traegt der Asset per Default KEIN type-Feld mehr
+            # Bei zarr trägt der Asset per Default KEIN type-Feld mehr
             # (s. build_stac_item), deshalb hier nicht stur den Eintrag aus
-            # _DEM_FORMAT_MEDIA_TYPE melden - das waere gelogen.
+            # _DEM_FORMAT_MEDIA_TYPE melden - das wäre gelogen.
             if dem_format == "zarr" and not getattr(args, "zarr_legacy_asset",
                                                     False):
                 _mt_label = "ohne type-Feld"
@@ -4201,26 +4200,26 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         if t_download is not None and t_download > 0.0:
             print(f"  (DEM Download {t_download:.1f} s separat, nicht in preprocessing_time)")
 
-        # Schritt 5: load_stac Szenario ausfuehren. Bei zarr und bei
+        # Schritt 5: load_stac Szenario ausführen. Bei zarr und bei
         # --dem-tiles>1 zeigt load_stac auf die Collection-URL,
-        # gtiff-Einzeldatei/netcdf unveraendert direkt auf die Item-URL.
+        # gtiff-Einzeldatei/netcdf unverändert direkt auf die Item-URL.
         #
-        # --zarr-via-item kehrt das NUR fuer zarr um (Versuch 7). Grund:
+        # --zarr-via-item kehrt das NUR für zarr um (Versuch 7). Grund:
         # seit der shape-Injektion in die .zmetadata scheitert der Lauf
         # nicht mehr am Zarr-Parser ("missing key: 'shape'" ist weg),
-        # sondern frueher im COLLECTION-Lesepfad:
+        # sondern früher im COLLECTION-Lesepfad:
         #   construct_item_collection: static Catalog ..., band_names=['DEM']
         #   ItemCollection.from_stac_catalog ... elapsed 0:00:00.046
         #   post_dry_run failed: 'NoneType' object has no attribute 'crs'
         #   Collected 0 projection metadata entries from 1 items
-        # Das Item wird also gezaehlt, seine Assets aber nicht ausgewertet.
-        # Der S2-Cube laeuft im selben Job ueber from_stac_api und sammelt
-        # 1184 Eintraege - der statische Katalogpfad ist damit der
-        # Verdaechtige, nicht das Format. netcdf funktioniert ueber die
-        # ITEM-URL, deshalb hier dieselbe Einbindung fuer zarr.
+        # Das Item wird also gezählt, seine Assets aber nicht ausgewertet.
+        # Der S2-Cube läuft im selben Job über from_stac_api und sammelt
+        # 1184 Einträge - der statische Katalogpfad ist damit der
+        # Verdächtige, nicht das Format. netcdf funktioniert über die
+        # ITEM-URL, deshalb hier dieselbe Einbindung für zarr.
         # Item + Injektion ist die einzige noch nie getestete Kombination.
         # --dem-tiles>1 bleibt IMMER Collection: dort ist die Collection
-        # die Mosaik-Struktur selbst, nicht bloss ein Wrapper.
+        # die Mosaik-Struktur selbst, nicht bloß ein Wrapper.
         zarr_via_item = bool(getattr(args, "zarr_via_item", False))
         use_collection = tiles is not None or (
             dem_format == "zarr" and not zarr_via_item)
@@ -4240,14 +4239,14 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         # liest das Item (band_names=['DEM'], collected 1 item(s)), leitet
         # aber die Ausdehnung nicht ab - bei einem inhaltlich identischen
         # gtiff-Item mit denselben proj-Feldern schon. Die Fehlermeldung
-        # sagt woertlich "please provide a spatial extent", also wird sie
+        # sagt wörtlich "please provide a spatial extent", also wird sie
         # hier geliefert statt ableiten zu lassen.
         # Quelle der Zahlen: _grid_from_dst_meta(dst_meta) - DIESELBE
         # Funktion auf DEMSELBEN dst_meta, aus der oben proj:bbox/
         # proj:shape/proj:transform des Items gebaut wurden. Graph und
-        # Item-Metadaten koennen dadurch nicht auseinanderlaufen (unten
-        # zusaetzlich gegen proj:bbox geprueft). CRS = Raster-CRS als
-        # int-EPSG, Begruendung in _load_stac_extent_from_grid.
+        # Item-Metadaten können dadurch nicht auseinanderlaufen (unten
+        # zusätzlich gegen proj:bbox geprüft). CRS = Raster-CRS als
+        # int-EPSG, Begründung in _load_stac_extent_from_grid.
         # Abschaltbar mit --zarr-no-explicit-extent (= bisheriger Weg).
         load_stac_extent = None
         if dem_format == "zarr" and not getattr(
@@ -4296,8 +4295,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
                         backend=_backend_for_url(args.api_url))
         results_step5 = run_openeo(args.api_url, str(local_pp_scenario), str(step3_dir),
                                    job_timeout=args.job_timeout)
-        # Nur Diagnose: der Rueckgabewert wird bewusst NICHT ausgewertet.
-        # Die Meldung darf weder den Lauf abbrechen noch den spaeteren
+        # Nur Diagnose: der Rückgabewert wird bewusst NICHT ausgewertet.
+        # Die Meldung darf weder den Lauf abbrechen noch den späteren
         # Accuracy-Check verhindern - sonst fehlt bei einem Fehlalarm auch
         # noch die Metrik.
         if _is_categorical(dataset) and results_step5.get("status") == "success":
@@ -4305,7 +4304,7 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
         t_main = results_step5.get("total_time") or 0.0
         total_time = preprocessing_time + t_main
 
-        # Diagnose: CDSE-Fehler koennen bedeuten dass das Format nicht
+        # Diagnose: CDSE-Fehler können bedeuten dass das Format nicht
         # akzeptiert wurde. Kein stiller Fehlschlag - klare Meldung.
         cdse_status = results_step5.get("status", "unknown")
         cdse_error = str(results_step5.get("error") or "").lower()
@@ -4348,8 +4347,8 @@ def run_strategy_local_pp(args, repeat_idx: int) -> dict:
 
         # Nginx Access-Logs vom Hetzner-Server holen (CDSE Zugriffe auf
         # Asset(s) + STAC). Bei --dem-tiles>1 alle Kachel-Assets + -Items
-        # + Collection - die ZEITLICHE VERTEILUNG der Range-Requests ueber
-        # die Kacheln ist dort die Messgroesse fuer Parallelitaet.
+        # + Collection - die ZEITLICHE VERTEILUNG der Range-Requests über
+        # die Kacheln ist dort die Messgröße für Parallelität.
         if tiles is not None:
             log_filenames = (tile_asset_names + tile_item_names
                              + [remote_coll_name])
@@ -4440,7 +4439,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         t_s2_dl_start = time.time()
         s2_results = run_openeo(args.api_url, str(s2_scenario), str(s2_dl_dir),
                                 job_timeout=args.job_timeout)
-        # CDSE total_time fuer S2 separat festhalten (waere genauer als wall-time,
+        # CDSE total_time für S2 separat festhalten (wäre genauer als wall-time,
         # aber wall-time deckt auch Submit/Queue ab. Beides ist 'extern'.)
         t_s2_download = s2_results.get("total_time") or (time.time() - t_s2_dl_start)
         s2_tifs = sorted(Path(p) for p in glob.glob(str(s2_dl_dir / "*.tif")))
@@ -4465,13 +4464,13 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
 
         # Schritt 3: Lokale Reprojektion(en)
         # Default: DEM exakt auf S2-Grid (kein target_crs).
-        # target_crs ohne reproject_s2: DEM nach target_crs (S2 unveraendert).
+        # target_crs ohne reproject_s2: DEM nach target_crs (S2 unverändert).
         # target_crs + reproject_s2: BEIDE nach target_crs.
         if target_crs_str is None:
             # --resolution != 10: die von CDSE gelieferten S2-TIFs sind
-            # nativ 10 m. Das S2-Grid gibt hier aber die Zellgroesse des
+            # nativ 10 m. Das S2-Grid gibt hier aber die Zellgröße des
             # ganzen Runs vor (das DEM wird gleich exakt darauf gezogen),
-            # also muss ZUERST S2 lokal auf die Zielaufloesung gebracht
+            # also muss ZUERST S2 lokal auf die Zielauflösung gebracht
             # werden - sonst bliebe --resolution in full_pp wirkungslos.
             if not _is_default_resolution(resolution):
                 print(f"\n  [Schritt 3a/7] S2 lokal auf {resolution:g} m "
@@ -4533,7 +4532,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
 
         # Schritt 3c: ALLE TIFs mit einfachem, breit dekodierbarem Profil
         # neu schreiben (S2 + DEM). NEUER Default 'simple_striped' (identisch
-        # zu dem was local_pp fuer das DEM benutzt und was CDSE nachweislich
+        # zu dem was local_pp für das DEM benutzt und was CDSE nachweislich
         # sauber verarbeitet). Sofort danach lokal per rasterio komplett
         # dekodieren - so ist belegbar, dass die hochgeladenen Dateien SELBST
         # lesbar sind und CDSE keine korrupte Eingabe bekommt.
@@ -4559,7 +4558,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         print(f"  {len(clean_s2)} S2 + 1 DEM neu geschrieben + lokal "
               f"vollstaendig dekodiert  ({t_clean:.2f} s)")
 
-        # Schritt 4: Alle TIFs auf Hetzner hochladen (mit Groessen-Verifikation).
+        # Schritt 4: Alle TIFs auf Hetzner hochladen (mit Größen-Verifikation).
         print(f"\n  [Schritt 4/7] {len(s2_for_upload)} S2 + 1 DEM TIF auf Hetzner hochladen (verified)...")
         s2_remote_names = []
         t_tif_uploads = 0.0
@@ -4571,17 +4570,17 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         t_tif_uploads += scp_upload_verified(dem_for_upload, dem_remote_tif_name)
         print(f"  TIF Uploads fertig  ({t_tif_uploads:.2f} s)")
 
-        # Groesse der hochgeladenen Rasterdaten (-> Spalte asset_bytes).
-        # ENTSCHEIDUNG: bei full_preprocessing zaehlen die S2-Raster MIT.
+        # Größe der hochgeladenen Rasterdaten (-> Spalte asset_bytes).
+        # ENTSCHEIDUNG: bei full_preprocessing zählen die S2-Raster MIT.
         # Grund: asset_bytes ist der Nenner des Lese-Anteils
-        # bytes_sent / asset_bytes, und der Zaehler kommt aus
-        # nginx_access_log - dort werden fuer full_pp genau diese
+        # bytes_sent / asset_bytes, und der Zähler kommt aus
+        # nginx_access_log - dort werden für full_pp genau diese
         # S2-Kacheln MITGELOGGT (log_filenames = S2-TIFs + S2-Items +
-        # Collection + DEM). Zaehlte man nur das DEM, stuende
-        # S2+DEM-Verkehr ueber DEM-Groesse und der Quotient waere um ein
+        # Collection + DEM). Zählte man nur das DEM, stünde
+        # S2+DEM-Verkehr über DEM-Größe und der Quotient wäre um ein
         # Vielfaches zu hoch. Bei local_preprocessing kommt umgekehrt nur
-        # das DEM von Hetzner, dort zaehlt auch nur das DEM.
-        # Die STAC-JSONs bleiben in beiden Faellen aussen vor (s.
+        # das DEM von Hetzner, dort zählt auch nur das DEM.
+        # Die STAC-JSONs bleiben in beiden Fällen außen vor (s.
         # _uploaded_raster_bytes).
         asset_bytes = _uploaded_raster_bytes(
             [stif for stif, _ in s2_remote_names] + [dem_for_upload])
@@ -4634,7 +4633,7 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         dem_stac_url = f"{HETZNER_URL_BASE}{dem_stac_remote_name}"
         dem_asset_url = f"{HETZNER_URL_BASE}{dem_remote_tif_name}"
         # Grid aus dem reprojizierten DEM-GeoTIFF lesen (full_pp ist immer
-        # gtiff; das Clean-Rewrite aendert nur das Layout, nie das Grid).
+        # gtiff; das Clean-Rewrite ändert nur das Layout, nie das Grid).
         dem_item = build_stac_item(
             region=region, asset_href=dem_asset_url, epsg=dem_epsg,
             item_id=f"full_pp_dem_{region}_{run_ts}", extent=geo_extent,
@@ -4655,14 +4654,14 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         print(f"  STAC fertig: {collection_url}  +  {dem_stac_url}  ({t_stac:.2f} s)")
 
         # preprocessing_time = DEM-Reproject + S2-Reproject + Clean-Rewrite +
-        # alle Uploads + STAC-Build (S2/DEM Downloads zaehlen separat, wie bei
+        # alle Uploads + STAC-Build (S2/DEM Downloads zählen separat, wie bei
         # local_preprocessing).
         preprocessing_time = (t_dem_reproject + t_s2_reproject + t_clean
                               + t_tif_uploads + t_stac_build + t_stac_uploads)
         print(f"  Pre-Processing-Zeit (ohne CDSE-Downloads): {preprocessing_time:.2f} s")
         print(f"  (S2 Download {t_s2_download:.1f} s + DEM Download {t_dem_download:.1f} s separat)")
 
-        # Schritt 6: full_pp Szenario bauen + ausfuehren
+        # Schritt 6: full_pp Szenario bauen + ausführen
         print(f"\n  [Schritt 6/7] full_pp Szenario (2x load_stac) auf CDSE ausfuehren...")
         fullpp_save_format = getattr(args, "fullpp_save_format", "GTiff")
         if fullpp_save_format != "GTiff":
@@ -4679,8 +4678,8 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
         )
         results_main = run_openeo(args.api_url, str(scenario_path), str(main_dir),
                                   job_timeout=args.job_timeout)
-        # Nur Diagnose: der Rueckgabewert wird bewusst NICHT ausgewertet.
-        # Die Meldung darf weder den Lauf abbrechen noch den spaeteren
+        # Nur Diagnose: der Rückgabewert wird bewusst NICHT ausgewertet.
+        # Die Meldung darf weder den Lauf abbrechen noch den späteren
         # Accuracy-Check verhindern - sonst fehlt bei einem Fehlalarm auch
         # noch die Metrik.
         if _is_categorical(dataset) and results_main.get("status") == "success":
@@ -4703,15 +4702,15 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
             resolution_m=resolution,
             asset_bytes=asset_bytes,
             dataset=dataset,
-            # full_pp behaelt seinen eigenen Schalter; nur der GEWAEHLTE Wert
-            # wandert in dieselbe Spalte, sonst waere ausgerechnet die
+            # full_pp behält seinen eigenen Schalter; nur der GEWÄHLTE Wert
+            # wandert in dieselbe Spalte, sonst wäre ausgerechnet die
             # Strategie, die diese Dimension schon hat, in der Auswertung
             # nicht unterscheidbar. Am Verhalten von --fullpp-save-format
-            # aendert das nichts.
+            # ändert das nichts.
             save_format=fullpp_save_format,
         )
 
-        # Nginx-Logs fuer ALLE relevanten Dateien (TIFs + STAC Items + Collection + DEM)
+        # Nginx-Logs für ALLE relevanten Dateien (TIFs + STAC Items + Collection + DEM)
         print(f"\n  [Logs] Hole nginx Access-Logs vom Hetzner-Server...")
         try:
             log_filenames = [n for _, n in s2_remote_names] + s2_item_remote_names + [
@@ -4740,14 +4739,14 @@ def run_strategy_full_pp(args, repeat_idx: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# local_reference: vollstaendig lokale Ground-Truth-Pipeline
+# local_reference: vollständig lokale Ground-Truth-Pipeline
 # ---------------------------------------------------------------------------
 
 def _box3_mean(arr):
     """3x3 Mittelwert-Filter mit Edge-Padding.
 
-    Aequivalent zu apply_kernel mit kernel=[[1/9]*3]*3 + replicate-padding.
-    Reine numpy-Implementierung, keine zusaetzliche Dependency.
+    Äquivalent zu apply_kernel mit kernel=[[1/9]*3]*3 + replicate-padding.
+    Reine numpy-Implementierung, keine zusätzliche Dependency.
     """
     import numpy as np
     a = arr.astype(np.float64, copy=False)
@@ -4766,16 +4765,16 @@ def _nodata_to_nan(data, nodata):
     unterscheiden sich je Kollektion, Backend und dtype: S2 kommt als int16
     mit -32768, das DEM als float mit NaN, Landcover als uint8 mit 0.
 
-    Warum das noetig ist: ohne diese Maske geht der ganzzahlige Sentinel als
+    Warum das nötig ist: ohne diese Maske geht der ganzzahlige Sentinel als
     echter Messwert in die Rechnung ein. Gemessen an
     outputs/run_20260826_134353_local_reference (berlin, large, merge_add):
-    das S2-Raster traegt nodata=-32768 auf 480576 Zellen, nach S2 + DEM
+    das S2-Raster trägt nodata=-32768 auf 480576 Zellen, nach S2 + DEM
     standen davon Werte um -32735 im Ergebnis (Minimum -32735.92, 841 Zellen
-    unter -1000). Weil das Ergebnis anschliessend NaN als Nodata deklarierte,
-    galten diese Artefakte als gueltige Messwerte und liefen in MAE/RMSE ein -
+    unter -1000). Weil das Ergebnis anschließend NaN als Nodata deklarierte,
+    galten diese Artefakte als gültige Messwerte und liefen in MAE/RMSE ein -
     der RMSE sprang dadurch von ~2 auf ~156.
 
-    NaN als Sentinel braucht keine Behandlung (ist schon NaN), None heisst
+    NaN als Sentinel braucht keine Behandlung (ist schon NaN), None heißt
     "Datei deklariert kein Nodata" - dann wird nichts maskiert.
     """
     import numpy as np
@@ -4789,12 +4788,12 @@ def _nodata_to_nan(data, nodata):
     if math.isnan(nd):
         return out
     out[out == nd] = np.nan
-    # Bilineare Reprojektion ueber eine Nodata-Grenze erzeugt Werte, die
+    # Bilineare Reprojektion über eine Nodata-Grenze erzeugt Werte, die
     # dem Sentinel nahekommen, ihn aber nicht exakt treffen. Gemessen an
     # outputs/run_20260823_181942_local_reference (rom, medium, merge_add):
-    # fuenf Zellen in Zeile 33 mit Werten um -32737 statt -32768, direkt
-    # unterhalb einer NaN-Zeile. Der exakte Vergleich liess sie durch, MAE
-    # 0,127 und RMSE 66 statt 0,001. Deshalb zusaetzlich alles maskieren,
+    # fünf Zellen in Zeile 33 mit Werten um -32737 statt -32768, direkt
+    # unterhalb einer NaN-Zeile. Der exakte Vergleich ließ sie durch, MAE
+    # 0,127 und RMSE 66 statt 0,001. Deshalb zusätzlich alles maskieren,
     # was innerhalb von 2768 Einheiten am Sentinel liegt. Echte Werte liegen
     # bei Sentinel-2 unter 20000 und beim DEM zwischen -500 und 9000, die
     # Schwelle bei 30000 trifft keinen davon.
@@ -4808,8 +4807,8 @@ def _nodata_to_nan(data, nodata):
 
 def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
                           out_dir: Path) -> list:
-    """Wende den Workflow lokal mit rasterio+numpy an. Alle Eingaben muessen
-    bereits auf dasselbe Grid (CRS, Aufloesung, Transform, Shape) reprojiziert
+    """Wende den Workflow lokal mit rasterio+numpy an. Alle Eingaben müssen
+    bereits auf dasselbe Grid (CRS, Auflösung, Transform, Shape) reprojiziert
     sein.
 
     workflow:
@@ -4817,31 +4816,31 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
       subtract             -> S2[B04] - DEM
       mask                 -> S2 mit SCL not in {4,5} maskiert, dann + DEM
       focal                -> (S2[B04] + DEM) -> 3x3 Mittelwert-Kernel
-      aggregation          -> mean_t(S2[B04] + DEM) ueber alle Dates
+      aggregation          -> mean_t(S2[B04] + DEM) über alle Dates
       filter_bbox          -> (S2[B04] + DEM) -> mittlere 50% des Extents
       lc_overlay           -> die Klassenkarte auf dem S2-Gitter (das lokale
-                              Gegenstueck zum durchreichenden overlap_resolver)
+                              Gegenstück zum durchreichenden overlap_resolver)
       lc_mask              -> S2[B04], maskiert auf LC_MASK_CLASS
 
     Schreibt openEO_*.tif unter denselben Dateinamen wie die S2-Eingaben in
-    out_dir und gibt deren Pfade zurueck.
+    out_dir und gibt deren Pfade zurück.
 
-    dtype des Outputs: float32 fuer alle rechnenden Workflows; bei
+    dtype des Outputs: float32 für alle rechnenden Workflows; bei
     lc_overlay bleibt das Raster im Quell-dtype (uint8), weil Klassen-IDs
-    keine Fliesskommazahlen sind - sonst wuerden spaeter Klassen ueber
+    keine Fließkommazahlen sind - sonst würden später Klassen über
     float-Gleichheit verglichen.
 
-    NODATA: beide Eingaben werden VOR jeder Rechnung ueber _nodata_to_nan
+    NODATA: beide Eingaben werden VOR jeder Rechnung über _nodata_to_nan
     maskiert - der Sentinel kommt aus dem nodata-Attribut der jeweiligen
-    Quelldatei. Das gilt fuer ALLE rechnenden Workflows, weil sie samt und
+    Quelldatei. Das gilt für ALLE rechnenden Workflows, weil sie samt und
     sonders auf s2_data/dem_data aufsetzen. Die float32-Ausgaben tragen
-    danach NaN als Nodata (s. _write_single); nur lc_overlay behaelt
+    danach NaN als Nodata (s. _write_single); nur lc_overlay behält
     Quell-dtype und Quell-Sentinel, dort ist das Ergebnis die Klassenkarte
     selbst.
 
-    Folgefehler in _box3_mean (focal): NaN breitet sich ueber das 3x3-Fenster
+    Folgefehler in _box3_mean (focal): NaN breitet sich über das 3x3-Fenster
     auf die Nachbarzellen aus. Das ist gewollt - apply_kernel auf dem Backend
-    zieht ungueltige Pixel genauso in die Nachbarschaft.
+    zieht ungültige Pixel genauso in die Nachbarschaft.
     """
     import numpy as np
 
@@ -4862,10 +4861,10 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
 
     def _write_single(out_path: Path, data, meta=None):
         # nodata MUSS zu den geschriebenen Werten passen: nach dem
-        # Ausmaskieren steht in ungueltigen Zellen NaN, also ist NaN der
+        # Ausmaskieren steht in ungültigen Zellen NaN, also ist NaN der
         # Sentinel des Ergebnisses. Ein aus dem Quell-Meta geerbter Wert
-        # (z.B. 0 aus einem uint8-Landcover) wuerde ungueltige Zellen als
-        # gueltig ausweisen - genau der Fehler in step4_result.
+        # (z.B. 0 aus einem uint8-Landcover) würde ungültige Zellen als
+        # gültig ausweisen - genau der Fehler in step4_result.
         m = (meta if meta is not None else ref_meta).copy()
         m.update({"count": 1, "dtype": "float32", "nodata": float("nan")})
         with rasterio.open(out_path, "w", **m) as dst:
@@ -4888,7 +4887,7 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
                 s2_nodata = s2_src.nodata
                 # Gleiches Vorgehen wie beim zweiten Raster: Sentinel aus der
                 # Quelldatei lesen, betroffene Zellen auf NaN. s2_raw bleibt
-                # roh fuer Bandtests auf Klassenwerten (SCL).
+                # roh für Bandtests auf Klassenwerten (SCL).
                 s2_data = _nodata_to_nan(s2_raw, s2_nodata)
 
             n_s2_masked = int(np.isnan(s2_data).sum())
@@ -4896,9 +4895,9 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
                 print(f"    {s2_tif.name}: {n_s2_masked:,} ungueltige "
                       f"S2-Zellen (nodata={s2_nodata}) -> NaN")
 
-            # Defensiver Shape-Check: S2 (per Band) und DEM muessen das
+            # Defensiver Shape-Check: S2 (per Band) und DEM müssen das
             # IDENTISCHE 2D-Grid haben. Sonst crasht das numpy-Broadcasting
-            # mit einer wenig hilfreichen Meldung; wir fangen das frueh ab
+            # mit einer wenig hilfreichen Meldung; wir fangen das früh ab
             # und sagen explizit was nicht passt.
             if s2_data.ndim != 3:
                 raise RuntimeError(
@@ -4917,7 +4916,7 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
                 )
 
             if workflow == "lc_overlay":
-                # Gegenstueck zum durchreichenden overlap_resolver: das
+                # Gegenstück zum durchreichenden overlap_resolver: das
                 # Ergebnis IST die Klassenkarte auf dem gemeinsamen Gitter.
                 # S2 wird nur gelesen, um den Shape-Check zu fahren.
                 _write_categorical(out_dir / s2_tif.name, dem_raw)
@@ -4925,7 +4924,7 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
 
             elif workflow == "lc_mask":
                 # B04 behalten, wo die Klasse getroffen ist, sonst NaN.
-                # Gegenstueck zu mask(data=B04, mask=NOT(klasse==ziel)).
+                # Gegenstück zu mask(data=B04, mask=NOT(klasse==ziel)).
                 keep = (dem_raw == LC_MASK_CLASS)
                 result = np.where(keep, s2_data[0], np.nan)
                 _write_single(out_dir / s2_tif.name, result)
@@ -4948,10 +4947,10 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
                         f"in {s2_tif.name} sind nur {s2_data.shape[0]}"
                     )
                 b04 = s2_data[0]
-                # SCL traegt Klassen-IDs: aus dem ROHEN Band lesen. Ueber
-                # s2_data (float, mit NaN) waere der int-Cast von NaN
+                # SCL trägt Klassen-IDs: aus dem ROHEN Band lesen. Über
+                # s2_data (float, mit NaN) wäre der int-Cast von NaN
                 # undefiniert; der Sentinel ist ohnehin keine der Klassen
-                # 4/5, ungueltige Zellen fallen also korrekt aus keep.
+                # 4/5, ungültige Zellen fallen also korrekt aus keep.
                 scl = s2_raw[1].astype(np.int64)
                 keep = np.isin(scl, (4, 5))
                 b04_masked = np.where(keep, b04, np.nan)
@@ -4996,18 +4995,17 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
                 )
         except Exception as exc:
             # Klare Fehlermeldung mit Dateinamen und Workflow, BEVOR die
-            # Exception nach oben propagiert. So weiss man sofort, an
-            # welcher S2-Datei + welcher Operation es haengt.
+            # Exception nach oben propagiert.
             print(f"\n  FEHLER in _apply_local_workflow "
                   f"(workflow={workflow}, file={s2_tif.name}): "
                   f"{type(exc).__name__}: {exc}")
             raise
 
     if workflow == "aggregation" and per_date_results:
-        # Temporal mean. CDSE-Output-Dateiname fuer aggregation ist nicht
+        # Temporal mean. CDSE-Output-Dateiname für aggregation ist nicht
         # garantiert; wir schreiben das mean-Ergebnis unter JEDER Date-
-        # Dateinamen, damit der Accuracy-Check den match auf die tatsaechliche
-        # CDSE-Datei zuverlaessig findet, unabhaengig von der Naming-
+        # Dateinamen, damit der Accuracy-Check den match auf die tatsächliche
+        # CDSE-Datei zuverlässig findet, unabhängig von der Naming-
         # Konvention des Backends.
         import numpy as np
         stacked = np.stack(per_date_results, axis=0)
@@ -5021,9 +5019,9 @@ def _apply_local_workflow(workflow: str, s2_tifs: list, dem_tif: Path,
 
 def run_strategy_local_reference(args, repeat_idx: int) -> dict:
     """
-    local_reference: KOMPLETT lokale Berechnung (S2 + DEM) als unabhaengige
+    local_reference: KOMPLETT lokale Berechnung (S2 + DEM) als unabhängige
     Ground-Truth gegen die alle CDSE-Strategien per --reference-check
-    verglichen werden koennen. Kein CDSE-Workflow-Job - nur die beiden
+    verglichen werden können. Kein CDSE-Workflow-Job - nur die beiden
     Downloads sind CDSE.
 
     Schritte:
@@ -5031,7 +5029,7 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
       2. DEM von CDSE herunterladen
       3. Beide lokal mit rasterio auf Ziel-CRS / 10 m / --local-resampling
          reprojizieren (definierte, dokumentierte Reprojektions-Settings)
-      4. Workflow-Operation lokal mit numpy ausfuehren
+      4. Workflow-Operation lokal mit numpy ausführen
       5. Ergebnis-TIFs schreiben (gleiche Dateinamen wie CDSE-S2 -> direkter
          Filename-Match im Accuracy-Check)
 
@@ -5048,10 +5046,10 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
     else:
         target_crs_str = f"EPSG:{region_epsg}"
 
-    # Marker-Scenario-JSON: enthaelt den equivalenten onthefly-Process-Graph
+    # Marker-Scenario-JSON: enthält den equivalenten onthefly-Process-Graph
     # plus ein _local_reference-Metadaten-Objekt. Wird von
     # _detect_folder_region / _detect_folder_workflow gefunden, ohne dass das
-    # Backend ihn ausgefuehrt hat.
+    # Backend ihn ausgeführt hat.
     resolution = _resolution_of(args)
     dataset = _dataset_of(args)
     marker_scenario_path = base / f"local_reference_{region}.json"
@@ -5117,9 +5115,9 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
         #      Width, Height, CRS), inkl. dem 10 m S2-Snap.
         #   2. DANN das DEM auf EXAKT das S2-Grid reprojizieren
         #      (reproject_dem_to_grid - keine eigene Snap-Logik mehr).
-        # Frueher wurden beide unabhaengig via reproject_dem_local gesnappt,
+        # Früher wurden beide unabhängig via reproject_dem_local gesnappt,
         # was bei leicht unterschiedlichen Source-Bounds zu (1139,1047) vs
-        # (1136,1044) Shape-Mismatches fuehrte und _apply_local_workflow zum
+        # (1136,1044) Shape-Mismatches führte und _apply_local_workflow zum
         # Crash brachte.
         print(f"\n  [Schritt 3/4] Lokale Reprojektion (rasterio, "
               f"{args.local_resampling}, {resolution:g} m, {target_crs_str})...")
@@ -5160,7 +5158,7 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
 
         # Schritt 4: lokale Workflow-Operation. Der finale, gemergte Output
         # liegt in step4_result/ - getrennt von den reprojizierten
-        # Zwischenrastern in step3_reprojected/, die zufaellig die gleichen
+        # Zwischenrastern in step3_reprojected/, die zufällig die gleichen
         # openEO_DATE.tif Dateinamen haben.
         print(f"\n  [Schritt 4/4] Lokale Workflow-Operation ({args.workflow})...")
         result_dir = base / "step4_result"
@@ -5183,7 +5181,7 @@ def run_strategy_local_reference(args, repeat_idx: int) -> dict:
         )
         total_time = preprocessing_time  # kein CDSE-Job
 
-        # Minimale results.json fuer import_run().
+        # Minimale results.json für import_run().
         results_payload = {
             "backend_url":         "local",
             "backend_name":        "local_rasterio",
@@ -5296,7 +5294,7 @@ def _pg_extent_matches(pg: dict, target: dict, exact: bool = False) -> bool:
     verschiedene extent_size-Werte (small/medium/large/xlarge/xxlarge) trotzdem
     zur selben Region matchen.
 
-    exact=True: zusaetzlich muessen alle 4 Bounds uebereinstimmen
+    exact=True: zusätzlich müssen alle 4 Bounds übereinstimmen
     (Toleranz 1e-4 deg ~ 10 m), so dass auch die extent_size passen muss.
     """
     pg_root = pg.get("process_graph", pg)
@@ -5331,7 +5329,7 @@ def _pg_extent_matches(pg: dict, target: dict, exact: bool = False) -> bool:
 
 
 def _folder_matches_extent(folder: Path, target_extent: dict) -> bool:
-    """True wenn eine Scenario-JSON im Ordner exakt diesen extent enthaelt."""
+    """True wenn eine Scenario-JSON im Ordner exakt diesen extent enthält."""
     for cand in folder.glob("*.json"):
         try:
             pg = json.loads(cand.read_text())
@@ -5344,7 +5342,7 @@ def _folder_matches_extent(folder: Path, target_extent: dict) -> bool:
 
 def _detect_folder_region(folder: Path) -> str:
     """Region eines Run-Ordners bestimmen, oder None."""
-    # 1) local_pp/full_pp: scenario_file heisst {strategy_label}_{region}.json
+    # 1) local_pp/full_pp: scenario_file heißt {strategy_label}_{region}.json
     for j in folder.glob("*.json"):
         stem = j.stem
         for region in REGIONS:
@@ -5378,7 +5376,7 @@ def _detect_pg_workflow(pg: dict):
     root = pg.get("process_graph", pg)
     if not isinstance(root, dict):
         return None
-    # lc_mask ZUERST: der Graph hat kein merge1, dafuer die eigenen Knoten.
+    # lc_mask ZUERST: der Graph hat kein merge1, dafür die eigenen Knoten.
     if "lcmask1" in root or "lcmaskbuild1" in root:
         return "lc_mask"
     # lc_overlay: merge1 ohne overlap_resolver + filter_bands aufs Klassenband.
@@ -5411,7 +5409,7 @@ def _detect_pg_workflow(pg: dict):
 
 
 def _detect_folder_workflow(folder: Path):
-    """Workflow eines Run-Ordners ueber den gespeicherten Process Graph
+    """Workflow eines Run-Ordners über den gespeicherten Process Graph
     bestimmen, oder None. Nur Graphen mit merge1 (oder applykernel1 bzw.
     dem lc_mask-Knoten) werden ausgewertet, damit reine S2-/DEM-Download-
     Szenarien (die in full_pp Runs ebenfalls als JSON liegen) ignoriert
@@ -5448,15 +5446,15 @@ def _detect_folder_workflow(folder: Path):
 
 
 def _detect_folder_resolution(folder: Path):
-    """Ziel-Zellgroesse eines Run-Ordners in Metern, oder None.
+    """Ziel-Zellgröße eines Run-Ordners in Metern, oder None.
 
     Reihenfolge:
       1. run_meta.json (von allen Runs seit --resolution geschrieben)
       2. _local_reference.target_resolution_m im Marker-Szenario
-      3. Pixelgroesse des ersten gefundenen Ergebnis-TIF (Fallback fuer
+      3. Pixelgröße des ersten gefundenen Ergebnis-TIF (Fallback für
          Runs, die vor --resolution entstanden sind - dort ist die
-         tatsaechliche Zellgroesse die verlaesslichste Quelle)
-    None heisst "unbekannt", nicht "10".
+         tatsächliche Zellgröße die verlässlichste Quelle)
+    None heißt "unbekannt", nicht "10".
     """
     meta_path = folder / RUN_META_FILENAME
     if meta_path.is_file():
@@ -5493,8 +5491,8 @@ def _detect_folder_dataset(folder: Path):
     Reihenfolge:
       1. run_meta.json (von allen Runs seit --dataset geschrieben)
       2. die Kollektions-ID in loadcollection2 eines Szenario-JSON
-         (Fallback fuer Ordner ohne run_meta.json)
-    None heisst "unbekannt", nicht "dem".
+         (Fallback für Ordner ohne run_meta.json)
+    None heißt "unbekannt", nicht "dem".
     """
     meta_path = folder / RUN_META_FILENAME
     if meta_path.is_file():
@@ -5528,8 +5526,8 @@ def _detect_folder_dataset(folder: Path):
 def _folder_matches_dataset(folder: Path, dataset: str) -> bool:
     """Passt der Run-Ordner zum geforderten Datensatz-Paar?
 
-    Unbekannt (weder run_meta.json noch erkennbare Kollektion) wird NUR fuer
-    das historische Default-Paar akzeptiert - alle Laeufe vor dieser
+    Unbekannt (weder run_meta.json noch erkennbare Kollektion) wird NUR für
+    das historische Default-Paar akzeptiert - alle Läufe vor dieser
     Experimentdimension liefen gegen COPERNICUS_30. Bei abweichender
     Anfrage lieber kein Kandidat als der falsche: ein Landcover-Lauf gegen
     eine DEM-Referenz verglichen liefert stumm Unsinn.
@@ -5553,19 +5551,19 @@ def _detect_folder_backend(folder: Path):
     """Backend eines Run-Ordners ('cdse'/'terrascope'), oder None.
 
     Reihenfolge:
-      1. run_meta.json (von allen Runs seit dieser Aenderung geschrieben)
+      1. run_meta.json (von allen Runs seit dieser Änderung geschrieben)
       2. backend_url der results.json - die erste, die auf eine bekannte
          Backend-URL zeigt.
 
-    Der zweite Weg ist der wichtige fuer BESTEHENDE Ordner: bei
-    local_reference steht im Run-Root "backend_url": "local" (dort laeuft
+    Der zweite Weg ist der wichtige für BESTEHENDE Ordner: bei
+    local_reference steht im Run-Root "backend_url": "local" (dort läuft
     kein Backend-Job), die beiden Downloads laufen aber sehr wohl gegen
     das Backend und run_openeo legt ihre results.json mit der echten URL
     in step1_s2_download/ bzw. step2_dem_download/ ab. Damit sind auch
-    Referenzlaeufe, die vor dieser Aenderung entstanden sind, ohne
-    nachtraegliches Markieren zuzuordnen.
+    Referenzläufe, die vor dieser Änderung entstanden sind, ohne
+    nachträgliches Markieren zuzuordnen.
 
-    None heisst "unbekannt", nicht "cdse" - die Auswertung dazu macht
+    None heißt "unbekannt", nicht "cdse" - die Auswertung dazu macht
     _folder_matches_backend.
     """
     meta_path = folder / RUN_META_FILENAME
@@ -5593,19 +5591,19 @@ def _detect_folder_backend(folder: Path):
 def _folder_matches_backend(folder: Path, backend: str) -> bool:
     """Passt der Run-Ordner zum geforderten Backend?
 
-    Warum das ueberhaupt gefiltert werden muss: die Backends halten
-    unterschiedliche Bestaende vor. Fuer denselben Ausschnitt und Zeitraum
+    Warum das überhaupt gefiltert werden muss: die Backends halten
+    unterschiedliche Bestände vor. Für denselben Ausschnitt und Zeitraum
     liefert CDSE 16 S2-Aufnahmen (Juli+August 2024), Terrascope 3 (nur
-    August); das Hoehenmodell traegt 2011-01-06 bzw. 2012-11-20, und die
+    August); das Höhenmodell trägt 2011-01-06 bzw. 2012-11-20, und die
     Nodata-Konvention ist -32768 bzw. 32767. Ein Terrascope-Messlauf gegen
     eine CDSE-Referenz gemessen ergibt Zahlen, die wie Ergebnisse aussehen,
     aber nichts messen (Lauf 1170, workflow=subtract, onthefly: MAE 50,41 /
-    RMSE 1255,27 gegen CDSE-Referenz, waehrend dieselbe Konfiguration auf
+    RMSE 1255,27 gegen CDSE-Referenz, während dieselbe Konfiguration auf
     CDSE bei MAE 1,697 liegt; workflow=focal: MAE 111605, RMSE 8,9 Mio.).
 
     Unbekannt (weder run_meta.json noch eine results.json mit bekannter
-    Backend-URL) wird NUR fuer das historische Default-Backend akzeptiert -
-    dieselbe Regel wie bei Datensatz und Aufloesung. Alle Laeufe vor
+    Backend-URL) wird NUR für das historische Default-Backend akzeptiert -
+    dieselbe Regel wie bei Datensatz und Auflösung. Alle Läufe vor
     --backend liefen gegen CDSE.
     """
     detected = _detect_folder_backend(folder)
@@ -5615,14 +5613,14 @@ def _folder_matches_backend(folder: Path, backend: str) -> bool:
 
 
 def _folder_matches_resolution(folder: Path, resolution: float) -> bool:
-    """Passt der Run-Ordner zur geforderten Zellgroesse?
+    """Passt der Run-Ordner zur geforderten Zellgröße?
 
-    Unbekannte Aufloesung (weder run_meta.json noch Marker noch lesbares
-    TIF) wird NUR fuer die historische Default-Aufloesung akzeptiert: alle
-    Laeufe vor dieser Experimentdimension liefen mit 10 m. Bei einer
+    Unbekannte Auflösung (weder run_meta.json noch Marker noch lesbares
+    TIF) wird NUR für die historische Default-Auflösung akzeptiert: alle
+    Läufe vor dieser Experimentdimension liefen mit 10 m. Bei einer
     abweichenden Anfrage lieber keinen Kandidaten als den falschen - sonst
     vergleicht der Accuracy-Check zwei verschiedene Gitter und die
-    MAE-Werte waeren wertlos.
+    MAE-Werte wären wertlos.
     """
     detected = _detect_folder_resolution(folder)
     if detected is None:
@@ -5636,19 +5634,19 @@ def _find_latest_run_dir(base: str, suffix: str, region: str,
                           resolution: float = None,
                           dataset: str = None,
                           backend: str = None):
-    """Neuesten outputs/run_*_{suffix} fuer Region zurueckgeben, oder None.
+    """Neuesten outputs/run_*_{suffix} für Region zurückgeben, oder None.
 
-    Wenn extent_size gesetzt ist, werden nur Ordner beruecksichtigt, deren
-    Scenario-JSON exakt diesen Extent enthaelt (Bounding-Box-Vergleich).
-    Wenn workflow gesetzt ist, muss zusaetzlich der im Process Graph
-    erkannte Workflow uebereinstimmen - das verhindert das versehentliche
+    Wenn extent_size gesetzt ist, werden nur Ordner berücksichtigt, deren
+    Scenario-JSON exakt diesen Extent enthält (Bounding-Box-Vergleich).
+    Wenn workflow gesetzt ist, muss zusätzlich der im Process Graph
+    erkannte Workflow übereinstimmen - das verhindert das versehentliche
     Vergleichen verschiedener Workflow-Varianten der gleichen Region/Extent.
-    Wenn resolution gesetzt ist, muss auch die Zellgroesse uebereinstimmen -
-    ohne das wuerde ein 60-m-Run gegen eine 10-m-Referenz verglichen.
-    Wenn dataset gesetzt ist, muss zusaetzlich das Datensatz-Paar passen -
-    sonst wuerde ein Landcover-Lauf gegen eine DEM-Referenz verglichen.
+    Wenn resolution gesetzt ist, muss auch die Zellgröße übereinstimmen -
+    ohne das würde ein 60-m-Run gegen eine 10-m-Referenz verglichen.
+    Wenn dataset gesetzt ist, muss zusätzlich das Datensatz-Paar passen -
+    sonst würde ein Landcover-Lauf gegen eine DEM-Referenz verglichen.
     Wenn backend gesetzt ist, muss der Ordner vom SELBEN Backend stammen -
-    die Bestaende von CDSE und Terrascope unterscheiden sich in Zeitreihe,
+    die Bestände von CDSE und Terrascope unterscheiden sich in Zeitreihe,
     DEM-Datum und Nodata-Konvention (s. _folder_matches_backend).
     """
     base_p = Path(base)
@@ -5703,14 +5701,14 @@ def _compare_tif_pair(ref_tif: Path, test_tif: Path,
         )
         ref_data, test_data, _ = aligned
         # Die in den Dateien deklarierten Sentinels je Seite durchreichen.
-        # Ohne sie zaehlt ein Terrascope-Ergebnis seine 32767-Zellen als
+        # Ohne sie zählt ein Terrascope-Ergebnis seine 32767-Zellen als
         # Messwerte mit (Lauf 1165: 107433 Zellen, MAE 1,6233 statt
         # 0,00128; bei workflow=focal MAE 112463). CDSE-Ergebnisse und die
         # lokale Referenz tragen beide NaN - dort greift schon die
-        # isfinite-Maske, die Werte sollten sich also NICHT aendern.
+        # isfinite-Maske, die Werte sollten sich also NICHT ändern.
         # DAS IST EINE ERWARTUNG, KEINE ZUSICHERUNG: sobald eine
-        # CDSE-Datei doch einen Zahlen-Sentinel deklariert, aendert sich
-        # ihr Wert - und zwar zu Recht. Nach dem Einspielen gehoert ein
+        # CDSE-Datei doch einen Zahlen-Sentinel deklariert, ändert sich
+        # ihr Wert - und zwar zu Recht. Nach dem Einspielen gehört ein
         # Kontrollvergleich einer bekannten CDSE-Konfiguration gegen den
         # alten Wert dazu (s. Kommentar in calculate_metrics).
         results = calculate_metrics(
@@ -5737,14 +5735,14 @@ def _compare_tif_pair_categorical(ref_tif: Path, test_tif: Path,
                                   nodata=None):
     """Kategorialer Vergleich eines TIF-Paars.
 
-    Gibt das Dict von calculate_categorical_metrics zurueck (oder None bei
-    Fehler). Das Alignment laeuft IMMER mit nearest - alles andere wuerde
+    Gibt das Dict von calculate_categorical_metrics zurück (oder None bei
+    Fehler). Das Alignment läuft IMMER mit nearest - alles andere würde
     Klassen-IDs mischen.
 
     Die Nodata-Werte werden aus BEIDEN Dateien gelesen und zusammen mit dem
-    uebergebenen Registry-Wert ausgeschlossen. Nur den Registry-Wert zu
-    nehmen reicht nicht: dort steht 0, die CDSE-Datei traegt aber -32768.
-    Ohne das zaehlen Nodata-Pixel als perfekt uebereinstimmendes
+    übergebenen Registry-Wert ausgeschlossen. Nur den Registry-Wert zu
+    nehmen reicht nicht: dort steht 0, die CDSE-Datei trägt aber -32768.
+    Ohne das zählen Nodata-Pixel als perfekt übereinstimmendes
     Klassenpaar mit und -32768 landet als eigene "Klasse" in der
     Verwechslungsmatrix.
     """
@@ -5781,7 +5779,7 @@ def _compare_tif_pair_categorical(ref_tif: Path, test_tif: Path,
 
 
 def _lookup_run_id_for_dir(step3_dir: Path):
-    """run_id ueber timestamp aus results.json in der DB nachschlagen."""
+    """run_id über timestamp aus results.json in der DB nachschlagen."""
     results_path = step3_dir / "results.json"
     if not results_path.exists():
         return None
@@ -5807,7 +5805,7 @@ def _lookup_run_id_for_dir(step3_dir: Path):
 
 
 def _ensure_accuracy_reference_column(conn) -> None:
-    """Idempotente Migration fuer reference_run_id in aelteren DBs.
+    """Idempotente Migration für reference_run_id in älteren DBs.
 
     Wird vor jedem INSERT in accuracy aufgerufen damit die Insert-Liste
     stabil bleibt selbst wenn create_database() nicht lief.
@@ -5815,10 +5813,10 @@ def _ensure_accuracy_reference_column(conn) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info('accuracy')").fetchall()}
     if "reference_run_id" not in cols:
         conn.execute("ALTER TABLE accuracy ADD COLUMN reference_run_id INTEGER")
-    # Kategoriale Metriken in EIGENEN Spalten. Sie duerfen NICHT in
-    # rmse/mae landen: analyze.fetch_accuracy mittelt blind ueber run_id,
-    # eine Uebereinstimmungsquote in der mae-Spalte wuerde alle bisherigen
-    # Auswertungen still verfaelschen.
+    # Kategoriale Metriken in EIGENEN Spalten. Sie dürfen NICHT in
+    # rmse/mae landen: analyze.fetch_accuracy mittelt blind über run_id,
+    # eine Übereinstimmungsquote in der mae-Spalte würde alle bisherigen
+    # Auswertungen still verfälschen.
     if "agreement_pct" not in cols:
         conn.execute("ALTER TABLE accuracy ADD COLUMN agreement_pct DOUBLE")
     if "kappa" not in cols:
@@ -5840,14 +5838,14 @@ def _persist_accuracy(run_id: int, mae: float, rmse: float,
 
     metric_kind='continuous': mae/rmse gesetzt, kategoriale Spalten NULL.
     metric_kind='categorical'/'categorical_validity': agreement_pct/kappa/
-    confusion_json gesetzt, mae/rmse bleiben NULL - ueber Klassen-IDs sind
-    sie bedeutungslos, und ein Wert dort wuerde in bestehende Auswertungen
+    confusion_json gesetzt, mae/rmse bleiben NULL - über Klassen-IDs sind
+    sie bedeutungslos, und ein Wert dort würde in bestehende Auswertungen
     einlaufen.
 
     reference_run_id: run_id des Ground-Truth-Runs (onthefly oder
-    local_reference). Wird fuer die Cleanup-Abhaengigkeitsanalyse gebraucht:
+    local_reference). Wird für die Cleanup-Abhängigkeitsanalyse gebraucht:
     solange ein CDSE-Run seinen accuracy-Eintrag noch nicht hat, darf die
-    zugehoerige Referenz nicht geloescht werden.
+    zugehörige Referenz nicht gelöscht werden.
     """
     try:
         import duckdb
@@ -5875,7 +5873,7 @@ def _persist_accuracy(run_id: int, mae: float, rmse: float,
 
 
 # ---------------------------------------------------------------------------
-# Plattenplatz-Schutz + Cleanup (verhindert das 100%-Fuell-Fiasko)
+# Plattenplatz-Schutz + Cleanup (verhindert das 100%-Füll-Fiasko)
 # ---------------------------------------------------------------------------
 
 def _free_gb(path) -> float:
@@ -5892,11 +5890,11 @@ def _free_gb(path) -> float:
 
 def check_disk_space(output_dir: str, min_free_gb: float,
                      context: str = "") -> None:
-    """Bricht mit RuntimeError ab wenn der freie Platz unter min_free_gb faellt.
+    """Bricht mit RuntimeError ab wenn der freie Platz unter min_free_gb fällt.
 
-    context: kurzes Label fuer die Fehlermeldung, z.B. "Strategie=local_pp,
+    context: kurzes Label für die Fehlermeldung, z.B. "Strategie=local_pp,
     Run 1/3". Wird bei jedem einzelnen Run vor dem Start aufgerufen, damit
-    ein anlaufender Batch nicht spaeter mitten drin die Platte volllaeuft.
+    ein anlaufender Batch nicht später mitten drin die Platte vollläuft.
     """
     if min_free_gb is None or min_free_gb <= 0:
         return
@@ -5912,7 +5910,7 @@ def check_disk_space(output_dir: str, min_free_gb: float,
 
 
 def _run_has_accuracy(run_id: int) -> bool:
-    """True wenn fuer run_id mindestens eine accuracy-Zeile existiert.
+    """True wenn für run_id mindestens eine accuracy-Zeile existiert.
 
     _persist_accuracy schreibt nur bei erfolgreichem Vergleich - jede Zeile
     ist damit gleichbedeutend mit 'Accuracy erfolgreich gemessen'.
@@ -5936,8 +5934,8 @@ def _run_has_accuracy(run_id: int) -> bool:
 def _accuracy_test_run_ids_for_reference(reference_run_id: int) -> set:
     """Alle test-run_ids die diese Referenz erfolgreich verwendet haben.
 
-    Fuer die Entscheidung ob eine local_reference geloescht werden darf:
-    solange ein erwarteter Abhaengiger noch nicht in dieser Menge steht,
+    Für die Entscheidung ob eine local_reference gelöscht werden darf:
+    solange ein erwarteter Abhängiger noch nicht in dieser Menge steht,
     bleibt die Referenz erhalten.
     """
     if reference_run_id is None:
@@ -5961,8 +5959,8 @@ def _accuracy_test_run_ids_for_reference(reference_run_id: int) -> set:
 def _list_run_tifs(run_dir: Path) -> list:
     """Alle *.tif rekursiv unter run_dir. Case-insensitive.
 
-    Werden ausschliesslich die grossen Raster geloescht - results.json,
-    scenario_*.json, STAC Items und sonstige Metadaten bleiben unberuehrt.
+    Werden ausschließlich die großen Raster gelöscht - results.json,
+    scenario_*.json, STAC Items und sonstige Metadaten bleiben unberührt.
     """
     run_dir = Path(run_dir)
     if not run_dir.is_dir():
@@ -5970,16 +5968,16 @@ def _list_run_tifs(run_dir: Path) -> list:
     tifs = []
     for pat in ("*.tif", "*.TIF", "*.tiff", "*.TIFF"):
         tifs.extend(run_dir.rglob(pat))
-    # dedupe (case-insensitive glob ueberlappt auf case-insensitive FS)
+    # dedupe (case-insensitive glob überlappt auf case-insensitive FS)
     return sorted({p.resolve() for p in tifs if p.is_file()})
 
 
 def delete_run_tifs(run_dir: Path, run_id, output_dir: str = "outputs",
                     dry_run: bool = False, label: str = "") -> dict:
-    """Loescht alle *.tif eines Run-Ordners. Loggt run_id, Ordner, Anzahl,
-    freien Platz danach. Gibt Statistik-Dict zurueck.
+    """Löscht alle *.tif eines Run-Ordners. Loggt run_id, Ordner, Anzahl,
+    freien Platz danach. Gibt Statistik-Dict zurück.
 
-    dry_run: nichts wirklich loeschen, nur berichten was WUERDE geloescht.
+    dry_run: nichts wirklich löschen, nur berichten was WÜRDE gelöscht.
     """
     run_dir = Path(run_dir)
     tifs = _list_run_tifs(run_dir)
@@ -6025,20 +6023,20 @@ def delete_run_tifs(run_dir: Path, run_id, output_dir: str = "outputs",
     }
 
 
-# Strategien die eine Referenz verwenden (also von Accuracy abhaengen).
+# Strategien die eine Referenz verwenden (also von Accuracy abhängen).
 _CDSE_TEST_STRATEGIES = ("onthefly", "local_preprocessing",
                          "local_pp_cached", "full_preprocessing")
 
 
 def cleanup_after_accuracy(session_results: list, output_dir: str,
                            dry_run: bool = False) -> None:
-    """Orchestriert das Aufraeumen NACH allen Accuracy-Checks.
+    """Orchestriert das Aufräumen NACH allen Accuracy-Checks.
 
     Zwingende Reihenfolge:
-      1. CDSE-Strategie-Runs (onthefly / local_pp / full_pp) werden geloescht
+      1. CDSE-Strategie-Runs (onthefly / local_pp / full_pp) werden gelöscht
          wenn ihr eigener Accuracy-Eintrag in der DB steht.
-      2. local_reference wird ERST geloescht wenn jeder erwartete
-         Abhaengige (gleiche Region + Extent + Workflow, aus dieser Session)
+      2. local_reference wird ERST gelöscht wenn jeder erwartete
+         Abhängige (gleiche Region + Extent + Workflow, aus dieser Session)
          seinen Accuracy-Eintrag mit reference_run_id=local_reference.run_id
          hat.
 
@@ -6077,7 +6075,7 @@ def cleanup_after_accuracy(session_results: list, output_dir: str,
         delete_run_tifs(run_dir, run_id, output_dir=output_dir,
                         dry_run=dry_run, label=r.get("strategy"))
 
-    # 2) local_reference-Runs mit Abhaengigkeits-Pruefung
+    # 2) local_reference-Runs mit Abhängigkeits-Prüfung
     for r in ref_runs:
         ref_id = r["run_id"]
         run_dir = Path(r["outdir"])
@@ -6085,7 +6083,7 @@ def cleanup_after_accuracy(session_results: list, output_dir: str,
         extent_size = r.get("extent_size")
         workflow = r.get("workflow")
 
-        # Erwartete Abhaengige aus dieser Session: alle CDSE-Runs mit
+        # Erwartete Abhängige aus dieser Session: alle CDSE-Runs mit
         # gleicher Region + Extent + Workflow.
         expected_deps = {
             t["run_id"] for t in test_runs
@@ -6121,10 +6119,10 @@ def cleanup_after_accuracy(session_results: list, output_dir: str,
 
 
 # Mapping: Strategie -> (suffix in run_*_{suffix}, Unterordner mit den TIFs).
-# Wird sowohl fuer test_strategy als auch fuer reference_strategy genutzt.
+# Wird für test_strategy und reference_strategy genutzt.
 # Achtung: local_reference legt seine Zwischenraster (reprojiziertes S2 / DEM)
 # in step3_reprojected ab - die haben dieselben openEO_DATE.tif Dateinamen wie
-# die finalen Outputs und wuerden den Accuracy-Match verfaelschen. Deshalb
+# die finalen Outputs und würden den Accuracy-Match verfälschen. Deshalb
 # liegt der FINAL gemergte Output in einem eigenen step4_result/ Ordner.
 _ACCURACY_LAYOUT = {
     "onthefly":            ("onthefly",        ""),
@@ -6144,7 +6142,7 @@ def _tif_dir(run_dir: Path, strategy: str) -> Path:
 
 # Strikt: nur openEO_YYYY-MM-DD*.tif (CDSE-Output und local_reference-Output
 # folgen diesem Pattern). dem.tif aus step3_reprojected oder andere
-# Hilfsdateien werden so zuverlaessig ausgefiltert.
+# Hilfsdateien werden so zuverlässig ausgefiltert.
 _ACCURACY_TIF_RE = re.compile(r"^openEO_\d{4}-\d{2}-\d{2}.*\.tif$",
                               re.IGNORECASE)
 
@@ -6158,17 +6156,17 @@ def _collect_workflow_tifs(tif_dir: Path) -> dict:
 
 
 # Workflows, die die Zeitdimension im Prozessgraphen KOLLABIEREN lassen.
-# Ihr Ergebnis ist EIN Raster ohne Datum, das Backend schreibt dafuer
+# Ihr Ergebnis ist EIN Raster ohne Datum, das Backend schreibt dafür
 # genau eine Datei (CDSE: "openEO.tif"). Ein Namensvergleich gegen die
 # datierten Referenzdateien kann daher nie greifen.
 # Aktuell nur 'aggregation' (setzt reducedimension1 mit dimension='t',
-# s. _build_workflow_pg). 'reducedimension_dem' zaehlt NICHT dazu - das
+# s. _build_workflow_pg). 'reducedimension_dem' zählt NICHT dazu - das
 # entfernt t nur am statischen DEM-Cube, der S2-Zeitstapel bleibt.
-# Kommt ein weiterer zeitreduzierender Workflow dazu, gehoert er hier
-# hinein, dann traegt der Vergleich ihn automatisch mit.
+# Kommt ein weiterer zeitreduzierender Workflow dazu, gehört er hier
+# hinein, dann trägt der Vergleich ihn automatisch mit.
 TIME_REDUCING_WORKFLOWS = ("aggregation",)
 
-# Undatierte Backend-Ausgabe: "openEO.tif", auch "openEO-1.tif" o.ae.,
+# Undatierte Backend-Ausgabe: "openEO.tif", auch "openEO-1.tif" o.ä.,
 # aber NICHT die datierten openEO_YYYY-MM-DD*.tif und nichts anderes.
 _REDUCED_TIF_RE = re.compile(r"^openEO[^_]*\.tif$", re.IGNORECASE)
 
@@ -6176,7 +6174,7 @@ _REDUCED_TIF_RE = re.compile(r"^openEO[^_]*\.tif$", re.IGNORECASE)
 def _collect_netcdf_outputs(tif_dir: Path) -> list:
     """Namen der netCDF-Ausgaben eines Ergebnisordners (--save-format netCDF).
 
-    Nur fuer die Diagnose im Accuracy-Check: liegt hier etwas, dann hat das
+    Nur für die Diagnose im Accuracy-Check: liegt hier etwas, dann hat das
     Backend kein GeoTIFF geschrieben und der Pixelvergleich kann nicht
     greifen - er soll das dann klar sagen statt mit "keine gemeinsamen
     TIF-Dateien" zu enden, was nach einem fehlenden Lauf aussieht.
@@ -6192,30 +6190,30 @@ def _collect_reduced_tifs(tif_dir: Path) -> dict:
 
 
 def _pair_time_reduced(reference_tifs: dict, test_tif_dir: Path):
-    """Paar (Referenzdatei, Testdatei, Label) fuer einen zeitreduzierten
+    """Paar (Referenzdatei, Testdatei, Label) für einen zeitreduzierten
     Lauf, oder None.
 
-    Warum ueberhaupt: bei workflow=aggregation reduziert der Prozessgraph
+    Warum überhaupt: bei workflow=aggregation reduziert der Prozessgraph
     die Zeitdimension per reduce_dimension(mean), das Backend schreibt
     genau EINE undatierte Datei. Die lokale Referenz rechnet denselben
     temporalen Mittelwert, legt ihn aber unter JEDEM Datumsnamen ab (s.
-    _apply_local_workflow) - die Namensmengen ueberschneiden sich also
+    _apply_local_workflow) - die Namensmengen überschneiden sich also
     nie, und der Vergleich fiel bisher mit "keine gemeinsamen TIF-Dateien"
     aus.
 
-    Geloest wird das hier auf der VERGLEICHSSEITE statt beim Schreiben der
+    Gelöst wird das hier auf der VERGLEICHSSEITE statt beim Schreiben der
     Referenz. Grund: der Dateiname der Backend-Ausgabe ist nicht
     garantiert - er ist eine Konvention des jeweiligen Backends, und seit
     --backend terrascope gibt es mehr als eins. Die Referenz auf genau
-    einen erratenen Namen umzustellen wuerde die Kopplung an diese
-    Konvention verschaerfen; der Inhaltsvergleich hier kommt ohne sie aus.
+    einen erratenen Namen umzustellen würde die Kopplung an diese
+    Konvention verschärfen; der Inhaltsvergleich hier kommt ohne sie aus.
 
-    Zulaessig ist die Paarung nur bei GENAU EINER undatierten Testdatei -
-    mehrere waeren ein anderer Fall und werden bewusst nicht geraten. Als
+    Zulässig ist die Paarung nur bei GENAU EINER undatierten Testdatei -
+    mehrere wären ein anderer Fall und werden bewusst nicht geraten. Als
     Referenz dient die alphabetisch erste Datei: sie sind per
     Konstruktion alle identisch (derselbe Mittelwert unter allen Namen),
     die Wahl ist also inhaltlich beliebig und nur der Determinismus
-    zaehlt.
+    zählt.
     """
     if not reference_tifs:
         return None
@@ -6241,7 +6239,7 @@ def run_accuracy_check(output_base: str, region: str,
 
     reference_strategy: "onthefly" (Default) oder "local_reference" (lokale
     Ground-Truth). Bei "local_reference" werden alle CDSE-Strategien
-    (onthefly, local_preprocessing, full_preprocessing) als gueltige
+    (onthefly, local_preprocessing, full_preprocessing) als gültige
     test_strategy akzeptiert.
 
     test_strategy: explizit gesetzt oder per Auto-Detect aus dem
@@ -6250,31 +6248,31 @@ def run_accuracy_check(output_base: str, region: str,
     test_strategy darf NIE gleich reference_strategy sein.
 
     Es werden nur Runs verglichen, deren Region, extent_size UND Workflow
-    uebereinstimmen - damit nicht versehentlich ein alter Run einer anderen
+    übereinstimmen - damit nicht versehentlich ein alter Run einer anderen
     Konfiguration verglichen wird.
 
     resampling_method wird an align_rasters durchgereicht und sollte mit
-    --local-resampling uebereinstimmen, damit der Accuracy-Vergleich die
+    --local-resampling übereinstimmen, damit der Accuracy-Vergleich die
     gleiche Resampling-Methode nutzt wie die zu vergleichende Pipeline.
 
-    Speichert den Median(MAE)/Median(RMSE) ueber alle gemeinsamen Date-TIFs in
+    Speichert den Median(MAE)/Median(RMSE) über alle gemeinsamen Date-TIFs in
     die accuracy-Tabelle (run_id des Test-Runs).
 
     Bei kategorialen Datensatz-/Workflow-Kombinationen (--dataset landcover)
-    wird stattdessen die Uebereinstimmungsquote + Cohen's Kappa berechnet und
+    wird stattdessen die Übereinstimmungsquote + Cohen's Kappa berechnet und
     in die eigenen Spalten geschrieben; mae/rmse bleiben NULL. Aggregiert
-    wird dort PIXELGEWICHTET ueber alle Date-TIFs, nicht per Median: ein
-    Median von Quoten ueber unterschiedlich grosse Bilder verzerrt.
+    wird dort PIXELGEWICHTET über alle Date-TIFs, nicht per Median: ein
+    Median von Quoten über unterschiedlich große Bilder verzerrt.
 
-    backend: 'cdse'/'terrascope'. Referenz UND Test muessen vom selben
-    Backend stammen - die Bestaende unterscheiden sich (s.
+    backend: 'cdse'/'terrascope'. Referenz UND Test müssen vom selben
+    Backend stammen - die Bestände unterscheiden sich (s.
     _folder_matches_backend). Ohne Angabe wird nicht gefiltert, das
     entspricht dem Verhalten vor --backend.
 
     test_dir / reference_dir: konkrete Run-Ordner statt der Auswahl per
     _find_latest_run_dir. Ohne sie bleibt alles wie bisher - "neuester
-    passender Ordner". Mit ihnen laesst sich EIN BESTIMMTER Lauf pruefen,
-    was bei --repeat > 1 noetig ist: dort existieren mehrere gleich gute
+    passender Ordner". Mit ihnen lässt sich EIN BESTIMMTER Lauf prüfen,
+    was bei --repeat > 1 nötig ist: dort existieren mehrere gleich gute
     Ordner, und "der neueste" ist immer nur die letzte Wiederholung. Wird
     test_dir gesetzt, muss auch test_strategy gesetzt sein - erst sie sagt,
     in welchem Unterordner die Ergebnis-TIFs liegen (_ACCURACY_LAYOUT).
@@ -6381,9 +6379,9 @@ def run_accuracy_check(output_base: str, region: str,
 
     # Zeitreduzierender Workflow (aggregation): das Backend schreibt genau
     # eine undatierte Datei, die Referenz liegt unter datierten Namen -
-    # kein Namensmatch moeglich. Dann inhaltlich paaren statt zu skippen.
+    # kein Namensmatch möglich. Dann inhaltlich paaren statt zu skippen.
     # Greift NUR wenn der Namensvergleich leer ausgeht: findet ein Backend
-    # doch einen datierten Namen, bleibt der bisherige Weg unveraendert.
+    # doch einen datierten Namen, bleibt der bisherige Weg unverändert.
     if not common and workflow in TIME_REDUCING_WORKFLOWS:
         pair = _pair_time_reduced(reference_tifs, test_tif_dir)
         if pair:
@@ -6400,7 +6398,7 @@ def run_accuracy_check(output_base: str, region: str,
 
     if not common:
         # netCDF-Ausgabe (--save-format / --fullpp-save-format netCDF):
-        # der Vergleich liest GeoTIFFs ueber rasterio/align_rasters, ein
+        # der Vergleich liest GeoTIFFs über rasterio/align_rasters, ein
         # .nc-Ergebnis kann er nicht paaren. Das ist kein Fehler des Laufs,
         # deshalb hier eine eigene, eindeutige Meldung statt "keine
         # gemeinsamen TIF-Dateien" - und kein Abbruch.
@@ -6424,7 +6422,7 @@ def run_accuracy_check(output_base: str, region: str,
         print(f"    {test_strategy} TIFs: {sorted(test_tifs)}")
         return None
 
-    # Kategorialer Zweig: Uebereinstimmungsquote statt MAE/RMSE.
+    # Kategorialer Zweig: Übereinstimmungsquote statt MAE/RMSE.
     categorical = bool(dataset and workflow
                        and _categorical_output(dataset, workflow))
     if categorical:
@@ -6465,7 +6463,7 @@ def run_accuracy_check(output_base: str, region: str,
     if run_id is None:
         run_id = _lookup_run_id_for_dir(test_tif_dir)
 
-    # reference_run_id: fuer die Cleanup-Abhaengigkeitsanalyse. results.json
+    # reference_run_id: für die Cleanup-Abhängigkeitsanalyse. results.json
     # der Referenz liegt sowohl bei onthefly als auch bei local_reference im
     # Run-Root - _lookup_run_id_for_dir liest exakt das.
     reference_run_id = _lookup_run_id_for_dir(reference_dir)
@@ -6510,11 +6508,11 @@ def _run_accuracy_check_categorical(common, reference_tifs, test_tifs,
                                     test_run_id):
     """Kategorialer Teil von run_accuracy_check.
 
-    Aggregation PIXELGEWICHTET ueber alle Date-TIFs (Summe der
-    uebereinstimmenden Pixel / Summe der gueltigen), nicht per Median: der
-    Median von Quoten ueber unterschiedlich grosse Bilder verzerrt. Kappa
+    Aggregation PIXELGEWICHTET über alle Date-TIFs (Summe der
+    übereinstimmenden Pixel / Summe der gültigen), nicht per Median: der
+    Median von Quoten über unterschiedlich große Bilder verzerrt. Kappa
     wird aus der aufsummierten Verwechslungsmatrix neu berechnet, nicht
-    ueber Einzel-Kappas gemittelt.
+    über Einzel-Kappas gemittelt.
     """
     # lc_mask liefert maskiertes B04 - dort steckt die Aussage in der
     # Maskenkante, nicht im Wert (s. CATEGORICAL_WORKFLOWS).
@@ -6624,9 +6622,9 @@ def _run_accuracy_check_categorical(common, reference_tifs, test_tifs,
 def _reference_is_usable(run_dir: Path, workflow: str = None) -> bool:
     """Taugt dieser local_reference-Ordner als Referenz?
 
-    Der Ordner allein reicht nicht: --cleanup-after-accuracy loescht die
-    TIFs und laesst results.json/Prozessgraphen stehen. So ein Ordner ist
-    ein Treffer fuer _find_latest_run_dir, aber als Referenz wertlos.
+    Der Ordner allein reicht nicht: --cleanup-after-accuracy löscht die
+    TIFs und lässt results.json/Prozessgraphen stehen. So ein Ordner ist
+    ein Treffer für _find_latest_run_dir, aber als Referenz wertlos.
     """
     tif_dir = _tif_dir(run_dir, "local_reference")
     if _collect_workflow_tifs(tif_dir):
@@ -6638,19 +6636,19 @@ def _reference_is_usable(run_dir: Path, workflow: str = None) -> bool:
 
 def _preflight_reference(args, strategies, dataset, resolution,
                          backend: str = None) -> None:
-    """Vor dem ersten Lauf pruefen, ob --reference-check ueberhaupt
+    """Vor dem ersten Lauf prüfen, ob --reference-check überhaupt
     aufgehen kann - sonst gar nicht erst starten.
 
-    Anlass: fuer wien und newyork war der local_reference-Lauf am
-    CDSE-Warteschlangen-Timeout gescheitert. Der anschliessende Aufruf mit
-    --reference-check liess trotzdem alle Messlaeufe durchlaufen (zwoelf
-    Backend-Jobs, echte Credits) und meldete erst ganz am Ende, dass kein
-    Vergleich moeglich ist. Die Pruefung kostet einen Verzeichnis-Scan und
-    faengt genau das ab.
+    Anlass: für wien und newyork war der local_reference-Lauf am
+    CDSE-Warteschlangen-Timeout gescheitert. Der anschließende Aufruf mit
+    --reference-check ließ trotzdem alle Messläufe durchlaufen (zwölf
+    Backend-Jobs, echte Credits) und meldete erst am Ende, dass kein
+    Vergleich möglich ist. Die Prüfung kostet einen Verzeichnis-Scan und
+    fängt genau das ab.
 
-    Nicht geprueft wird, wenn local_reference in diesem Aufruf selbst
-    laeuft (dann entsteht die Referenz ja gerade) oder wenn ueberhaupt
-    keine Laeufe anstehen (--repeat 0).
+    Nicht geprüft wird, wenn local_reference in diesem Aufruf selbst
+    läuft (dann entsteht die Referenz ja gerade) oder wenn überhaupt
+    keine Läufe anstehen (--repeat 0).
     """
     if not args.reference_check or args.repeat < 1:
         return
@@ -6701,22 +6699,22 @@ def _preflight_reference(args, strategies, dataset, resolution,
 
 
 def _accuracy_targets_from_session(all_results, strategies) -> list:
-    """Alle erfolgreichen Laeufe DIESES Aufrufs, die als Test-Seite eines
+    """Alle erfolgreichen Läufe DIESES Aufrufs, die als Test-Seite eines
     Accuracy-Vergleichs taugen - einer je Wiederholung.
 
     Warum: vorher merkte sich main() pro Strategie genau EINE test_run_id
-    (die Schleife ueberschrieb sie bei jeder Wiederholung), und
-    run_accuracy_check loeste das Verzeichnis ueber _find_latest_run_dir
+    (die Schleife überschrieb sie bei jeder Wiederholung), und
+    run_accuracy_check löste das Verzeichnis über _find_latest_run_dir
     auf - beides zeigte auf die LETZTE Wiederholung. Bei --repeat 3 bekam
     damit nur der dritte Lauf eine Zeile in der accuracy-Tabelle, die
     ersten beiden blieben leer. Die Werte sind deterministisch, es geht
-    also nicht um neue Erkenntnis, sondern um vollstaendige Daten je
+    also nicht um neue Erkenntnis, sondern um vollständige Daten je
     run_id.
 
-    Rueckgabe: [(strategy, run_id, outdir), ...] in Laufreihenfolge.
-    strategy ist auf die Schluessel von _ACCURACY_LAYOUT normalisiert
+    Rückgabe: [(strategy, run_id, outdir), ...] in Laufreihenfolge.
+    strategy ist auf die Schlüssel von _ACCURACY_LAYOUT normalisiert
     (local_pp_cached -> local_preprocessing), damit Suffix und
-    Ergebnis-Unterordner aufloesbar bleiben.
+    Ergebnis-Unterordner auflösbar bleiben.
     """
     targets = []
     for r in all_results:
@@ -6746,39 +6744,39 @@ def main() -> None:
                              f"Verhalten): {CDSE_URL}, Anmeldung wie bisher "
                              "ohne expliziten provider_id. terrascope: "
                              f"{TERRASCOPE_URL}, Anmeldung per OIDC-Anbieter "
-                             "'CDSE' (dieselbe Identitaet). Geaendert werden "
+                             "'CDSE' (dieselbe Identität). Geändert werden "
                              "NUR Endpunkt und Anmeldung - Prozessgraphen, "
                              "Strategien, Formate, Workflows, Hosting-Server "
                              "und STAC-Erzeugung bleiben identisch. "
                              "--api-url hat Vorrang.")
     parser.add_argument("--api-url", default=None,
-                        help="OpenEO Backend URL. Ueberschreibt --backend. "
-                             f"Ohne Angabe die URL des gewaehlten Backends "
+                        help="OpenEO Backend URL. Überschreibt --backend. "
+                             f"Ohne Angabe die URL des gewählten Backends "
                              f"(Default: {CDSE_URL}).")
     parser.add_argument("--strategy", default="all",
                         choices=ALL_STRATEGIES + EXTRA_STRATEGIES + ["all"],
-                        help="Strategie(n) ausfuehren. 'all' = onthefly + "
+                        help="Strategie(n) ausführen. 'all' = onthefly + "
                              "local_preprocessing (full_preprocessing nur "
-                             "separat, weil deutlich laenger).")
+                             "separat, weil deutlich länger).")
     parser.add_argument("--region", default="berlin",
                         choices=sorted(REGIONS.keys()),
-                        help="Region (waehlt extent + Ziel-UTM-CRS)")
+                        help="Region (wählt extent + Ziel-UTM-CRS)")
     parser.add_argument("--repeat", type=int, default=1,
                         help="Wie oft jede Strategie wiederholen (Standard: 1)")
     parser.add_argument("--run-type", default="auto",
                         choices=["cold", "hot", "auto"],
                         help="cold/hot/auto (auto: erster Run cold, Rest hot)")
     parser.add_argument("--output-dir", default="outputs",
-                        help="Basisverzeichnis fuer Output-Ordner (Standard: outputs/)")
+                        help="Basisverzeichnis für Output-Ordner (Standard: outputs/)")
     parser.add_argument("--dem-cache", action="store_true",
                         help="DEM nur einmal pro Region herunterladen + cachen "
                              "(outputs/dem_cache/dem_{region}.tif). "
                              "Ohne Flag wird das DEM bei jedem Run neu geladen. "
-                             "Download zaehlt in keinem Fall zur preprocessing_time.")
+                             "Download zählt in keinem Fall zur preprocessing_time.")
     parser.add_argument("--accuracy-check", action="store_true",
                         help="Nach den Runs Accuracy-Vergleich (MAE/RMSE) zwischen "
                              "dem neuesten onthefly- und local_pp/full_pp-Output "
-                             "fuer die Region ausfuehren. Mit --repeat 0 auch "
+                             "für die Region ausführen. Mit --repeat 0 auch "
                              "standalone auf existierenden Outputs verwendbar.")
     parser.add_argument("--reference-check", action="store_true",
                         help="Vergleicht JEDE in dieser Session gelaufene CDSE-"
@@ -6787,35 +6785,35 @@ def main() -> None:
                              "local_reference-Run der gleichen Region/Workflow/"
                              "Extent. Setzt voraus dass ein local_reference-Run "
                              "existiert (entweder in dieser Session via "
-                             "--strategy local_reference oder ein frueherer). "
+                             "--strategy local_reference oder ein früherer). "
                              "Unterscheidet sich von --accuracy-check dadurch, "
-                             "dass die unabhaengige lokale Pipeline als "
+                             "dass die unabhängige lokale Pipeline als "
                              "Ground-Truth dient statt onthefly. Fehlt die "
                              "Referenz, bricht der Aufruf VOR dem ersten Lauf "
                              "ab (s. --allow-missing-reference) - es wird nie "
                              "eine andere Strategie ersatzweise verglichen.")
     parser.add_argument("--allow-missing-reference", action="store_true",
-                        help="Die Vorabpruefung von --reference-check nur "
-                             "warnen lassen statt abzubrechen. Die Laeufe "
-                             "starten dann ohne dass ein Vergleich moeglich "
+                        help="Die Vorabprüfung von --reference-check nur "
+                             "warnen lassen statt abzubrechen. Die Läufe "
+                             "starten dann ohne dass ein Vergleich möglich "
                              "ist - sie kosten Credits und bleiben ohne "
-                             "Genauigkeitswert. Nachtragen geht spaeter mit "
+                             "Genauigkeitswert. Nachtragen geht später mit "
                              "backfill_accuracy.py, sobald die Referenz "
                              "existiert.")
     parser.add_argument("--extent-size", default="medium",
                         choices=("small", "medium", "large", "xlarge", "xxlarge"),
-                        help="AOI-Kantenlaenge um das Region-Zentrum: "
+                        help="AOI-Kantenlänge um das Region-Zentrum: "
                              "small=5km, medium=10km (Default = bisheriger fester "
-                             "REGIONS-Extent, rueckwaertskompatibel), large=50km, "
-                             "xlarge=100km, xxlarge=200km (ueberschreitet die "
+                             "REGIONS-Extent, rückwärtskompatibel), large=50km, "
+                             "xlarge=100km, xxlarge=200km (überschreitet die "
                              "CDSE-Tile-Grenze von 120km und macht die "
                              "Tile-Boundary-Penalty messbar). Wirkt auf "
                              "onthefly, DEM-Download und local_pp Szenarien "
                              "sowie das STAC Item.")
     # default=None statt "merge_add": so ist unterscheidbar, ob der Nutzer
     # den Workflow gesetzt hat. Nicht gesetzt -> Default des Datensatzes
-    # (merge_add fuer dem, lc_overlay fuer landcover), aufgeloest direkt
-    # nach parse_args. Fuer --dataset dem aendert das nichts.
+    # (merge_add für dem, lc_overlay für landcover), aufgelöst direkt
+    # nach parse_args. Für --dataset dem ändert das nichts.
     parser.add_argument("--workflow", default=None,
                         choices=WORKFLOWS,
                         help="openEO Workflow: "
@@ -6826,7 +6824,7 @@ def main() -> None:
                              "aggregation (B04+DEM/add, dann temporal mean), "
                              "focal (B04+DEM/add, dann 3x3 mean apply_kernel), "
                              "resample (DEM CDSE-seitig nach EPSG:3035@30m und "
-                             "zurueck nach Region-UTM@10m, dann B04+DEM/add), "
+                             "zurück nach Region-UTM@10m, dann B04+DEM/add), "
                              "filter_bbox (B04+DEM/add, dann filter_bbox auf "
                              "die mittleren 50%% des Extents). "
                              "NUR mit --dataset landcover: "
@@ -6842,41 +6840,41 @@ def main() -> None:
                              "verwendet.")
     parser.add_argument("--local-resampling", default="nearest",
                         choices=tuple(LOCAL_RESAMPLING.keys()),
-                        help="Resampling-Methode fuer die Reprojektion des "
+                        help="Resampling-Methode für die Reprojektion des "
                              "zweiten Rasters. nearest (Default) ist "
                              "pixelidentisch zu CDSE - der Accuracy-Check liefert "
                              "dann MAE=RMSE=0. bilinear/cubic weichen vom "
                              "CDSE-Output ab und machen den Accuracy-Check "
-                             "aussagekraeftig. mode (Mehrheitsentscheidung) "
+                             "aussagekräftig. mode (Mehrheitsentscheidung) "
                              "nur mit --dataset landcover: das fachlich "
-                             "richtige Vergroeberungsverfahren fuer Klassen, "
+                             "richtige Vergröberungsverfahren für Klassen, "
                              "weil es keine Klassen-IDs mittelt. "
                              "WIRKT AUF BEIDE SEITEN: der Wert bestimmt "
-                             "seit dieser Aenderung auch die method der "
+                             "seit dieser Änderung auch die method der "
                              "serverseitigen resample_spatial-/"
                              "resample_cube_spatial-Knoten (nearest -> near). "
                              "Vorher stand dort fest 'near', wodurch lokale "
-                             "und CDSE-seitige Vergroeberung bei "
+                             "und CDSE-seitige Vergröberung bei "
                              "--resolution != 10 auseinanderliefen.")
     parser.add_argument("--resolution", type=float, default=DEFAULT_RESOLUTION_M,
-                        help=f"Ziel-Zellgroesse in METERN fuer ALLE Pfade "
+                        help=f"Ziel-Zellgröße in METERN für ALLE Pfade "
                              f"(Default {DEFAULT_RESOLUTION_M:g} = Sentinel-2 "
                              f"B04 nativ, bisheriges Verhalten byte-identisch). "
-                             f"Steuert die lokale Reprojektion (Pixelgroesse + "
+                             f"Steuert die lokale Reprojektion (Pixelgröße + "
                              f"outward-Snap auf Vielfache dieses Werts), das "
                              f"aus dem Extent rekonstruierte Zielgitter "
                              f"(--snap-dem-to-s2) und die local_reference-"
                              f"Pipeline. Bei Werten != "
                              f"{DEFAULT_RESOLUTION_M:g} bekommt der openEO-"
-                             f"Graph zusaetzlich ein explizites "
+                             f"Graph zusätzlich ein explizites "
                              f"resample_spatial(projection, resolution) hinter "
                              f"loadcollection1, damit CDSE nicht sein natives "
-                             f"10-m-Gitter erzwingt. Experimentdimension fuer "
-                             f"den Einfluss der Zellgroesse auf Laufzeit, "
+                             f"10-m-Gitter erzwingt. Experimentdimension für "
+                             f"den Einfluss der Zellgröße auf Laufzeit, "
                              f"Datenvolumen und Genauigkeit; wird als "
                              f"resolution_m in die DB geschrieben. Referenz- "
-                             f"und Test-Run muessen dieselbe Aufloesung haben - "
-                             f"der Accuracy-Check waehlt die Referenz danach "
+                             f"und Test-Run müssen dieselbe Auflösung haben - "
+                             f"der Accuracy-Check wählt die Referenz danach "
                              f"aus.")
     parser.add_argument("--dataset", default=DEFAULT_DATASET,
                         choices=sorted(DATASETS),
@@ -6886,15 +6884,15 @@ def main() -> None:
                              f"bisheriges Verhalten, byte-identisch. "
                              f"landcover: {DATASETS['landcover']['label']}. "
                              f"Zweck: die bisherigen Genauigkeitsbefunde "
-                             f"beruhen ausschliesslich auf kontinuierlichen "
-                             f"Hoehendaten; ein kategorialer Datensatz macht "
+                             f"beruhen ausschließlich auf kontinuierlichen "
+                             f"Höhendaten; ein kategorialer Datensatz macht "
                              f"sie belastbarer. Bei landcover gelten eigene "
                              f"Workflows (lc_overlay, lc_mask), nur "
                              f"--local-resampling=nearest, und der "
-                             f"Accuracy-Check rechnet Uebereinstimmungsquote "
+                             f"Accuracy-Check rechnet Übereinstimmungsquote "
                              f"+ Cohen's Kappa statt MAE/RMSE. Referenz- und "
-                             f"Test-Run muessen dasselbe Paar haben - der "
-                             f"Accuracy-Check waehlt die Referenz danach aus.")
+                             f"Test-Run müssen dasselbe Paar haben - der "
+                             f"Accuracy-Check wählt die Referenz danach aus.")
     parser.add_argument("--dem-layout", default="striped",
                         choices=DEM_LAYOUTS,
                         help="Interne Struktur des reprojizierten DEM-GeoTIFF "
@@ -6904,8 +6902,8 @@ def main() -> None:
                              "tiled_uncompressed: gekachelt 128x128, "
                              "unkomprimiert, keine Overviews. "
                              "cog: gekachelt 128x128, deflate, interne Overviews. "
-                             "Nur das Schreibprofil aendert sich - die Pixelwerte "
-                             "sind ueber alle Varianten identisch. "
+                             "Nur das Schreibprofil ändert sich - die Pixelwerte "
+                             "sind über alle Varianten identisch. "
                              "Wird bei --dem-format!=gtiff ignoriert.")
     parser.add_argument("--dem-format", default="gtiff",
                         choices=DEM_FORMATS,
@@ -6916,12 +6914,12 @@ def main() -> None:
                              "'pip install xarray zarr'). "
                              "netcdf: xarray-NetCDF-4 Datei (braucht "
                              "'pip install xarray netcdf4'). "
-                             "Machbarkeitstest ob CDSE ueber load_stac andere "
+                             "Machbarkeitstest ob CDSE über load_stac andere "
                              "Formate als GeoTIFF akzeptiert - kann vom Backend "
                              "abgelehnt werden.")
     parser.add_argument("--dem-tiles", type=int, default=1,
                         help="(nur local_preprocessing, nur "
-                             "--dem-format=gtiff) Anzahl raeumlicher "
+                             "--dem-format=gtiff) Anzahl räumlicher "
                              "Kacheln, in die das reprojizierte DEM zerlegt "
                              "wird (Default 1 = bisheriges Verhalten, 4 = "
                              "2x2-Raster). Bei N>1 wird jede Kachel als "
@@ -6930,16 +6928,16 @@ def main() -> None:
                              "proj-Felder) in einer Collection verlinkt; "
                              "load_stac zeigt auf die Collection. Mehrere "
                              "Assets in EINEM Item gehen nicht: der "
-                             "geopyspark-Treiber laedt pro Item und "
+                             "geopyspark-Treiber lädt pro Item und "
                              "Bandnamen nur das erste Asset, mosaikiert "
-                             "wird nur ueber Items. Die Kacheln stammen "
+                             "wird nur über Items. Die Kacheln stammen "
                              "aus demselben reprojizierten Puffer (reines "
                              "Slicing, kein zweiter Warp), ihre "
                              "Vereinigung ist bitgenau das Einzel-DEM "
                              "(lokale Pflicht-Verifikation vor Upload). "
-                             "Experiment: laedt CDSE die Kacheln parallel? "
+                             "Experiment: lädt CDSE die Kacheln parallel? "
                              "Das Datenvolumen sinkt durch die Zerlegung "
-                             "NICHT - nur Parallelitaet kann Zeit sparen.")
+                             "NICHT - nur Parallelität kann Zeit sparen.")
     parser.add_argument("--zarr-via-item", action="store_true",
                         help="Nur --dem-format=zarr: load_stac zeigt auf die "
                              "STAC-ITEM-URL statt auf die Collection-URL. "
@@ -6952,7 +6950,7 @@ def main() -> None:
                              "(from_stac_catalog liefert 'Collected 0 "
                              "projection metadata entries from 1 items', "
                              "danach 'NoneType' object has no attribute "
-                             "'crs'). netcdf laeuft ueber die Item-URL "
+                             "'crs'). netcdf läuft über die Item-URL "
                              "erfolgreich - dieses Flag testet, ob der "
                              "Collection-Pfad der Blocker ist und nicht das "
                              "Format. Auf --dem-tiles>1 hat das Flag keine "
@@ -6968,60 +6966,60 @@ def main() -> None:
                              "Verzeichnis-Store direkt, "
                              "https://HOST/x.zarr. "
                              "store-vsicurl: derselbe Store mit "
-                             "GDAL-Pfad-Praefix, /vsicurl/https://HOST/x.zarr "
+                             "GDAL-Pfad-Präfix, /vsicurl/https://HOST/x.zarr "
                              "- gleiche Bauform wie der funktionierende "
-                             "netcdf-href (kein Treiberpraefix, keine Quotes, "
+                             "netcdf-href (kein Treiberpräfix, keine Quotes, "
                              "kein Array-Pfad), damit CDSE ihn nicht als "
-                             "relativen Pfad hinter die Basis-URL haengt. "
-                             "Lokal gegen GDAL geprueft: oeffnet den "
-                             "unveraenderten Store mit korrektem CRS und "
+                             "relativen Pfad hinter die Basis-URL hängt. "
+                             "Lokal gegen GDAL geprüft: öffnet den "
+                             "unveränderten Store mit korrektem CRS und "
                              "Transform. "
                              "chunk: erster Array-Chunk unter bekannter "
                              "Bild-Endung, https://HOST/x.zarr/DEM/0.0.tif "
                              "(setzt eine so benannte Kopie auf dem Server "
                              "voraus - der Upload legt sie NICHT an, der "
-                             "Store enthaelt den Chunk als '0.0'). "
+                             "Store enthält den Chunk als '0.0'). "
                              "driver-fragment: GDAL-Treiberausdruck mit "
                              "Endung als URL-Fragment, "
                              "ZARR:\"/vsicurl/https://HOST/x.zarr\":/DEM"
                              "#x.tif. "
                              "driver-plain: derselbe Ausdruck ohne Fragment. "
                              "driver-novsi: derselbe Ausdruck ohne "
-                             "/vsicurl/-Praefix. "
+                             "/vsicurl/-Präfix. "
                              "driver-noquote: Treiberausdruck OHNE "
-                             "Anfuehrungszeichen, "
+                             "Anführungszeichen, "
                              "ZARR:/vsicurl/https://HOST/x.zarr:/DEM. "
-                             "driver-minimal: nur Praefix und URL, ohne "
+                             "driver-minimal: nur Präfix und URL, ohne "
                              "Array-Pfad und ohne Quotes, "
                              "ZARR:https://HOST/x.zarr. "
-                             "Es aendert sich NUR der href - der Asset "
-                             "traegt in allen Formen kein type-Feld, damit "
-                             "pro Lauf genau eine Groesse variiert. "
-                             "Wird von --zarr-legacy-asset ueberstimmt.")
+                             "Es ändert sich NUR der href - der Asset "
+                             "trägt in allen Formen kein type-Feld, damit "
+                             "pro Lauf genau eine Größe variiert. "
+                             "Wird von --zarr-legacy-asset überstimmt.")
     parser.add_argument("--zarr-asset-media-type",
                         default=DEFAULT_ZARR_ASSET_MEDIA_TYPE,
                         choices=ZARR_ASSET_MEDIA_TYPES,
                         help="Nur --dem-format=zarr: welchen Medientyp der "
                              "data-Asset deklariert. none (Default, "
                              "bisheriges Verhalten): gar kein type-Feld - "
-                             "der Medientyp-Check in _is_band_asset haengt "
-                             "an 'if asset.media_type:' und entfaellt damit, "
-                             "entschieden wird ueber roles=['data'] (in "
+                             "der Medientyp-Check in _is_band_asset hängt "
+                             "an 'if asset.media_type:' und entfällt damit, "
+                             "entschieden wird über roles=['data'] (in "
                              "einem CDSE-Lauf belegt: Asset ohne type-Feld "
                              "akzeptiert, opensearch_stats assets=1). "
                              "image/tiff: deklariert einen Typ aus der "
-                             "Whitelist - sachlich falsch fuer einen "
+                             "Whitelist - sachlich falsch für einen "
                              "Zarr-Store, aber die von der CDSE-Doku "
-                             "verlangte Form; fuer die Reader-Wahl folgenlos, "
-                             "die haengt allein an der Pfadendung. "
-                             "Wird von --zarr-legacy-asset ueberstimmt "
+                             "verlangte Form; für die Reader-Wahl folgenlos, "
+                             "die hängt allein an der Pfadendung. "
+                             "Wird von --zarr-legacy-asset überstimmt "
                              "(dort gilt application/vnd+zarr).")
     parser.add_argument("--zarr-legacy-asset", action="store_true",
                         help="Nur --dem-format=zarr: die alte Asset-Form im "
                              "STAC-Item wiederherstellen, also "
                              "type=application/vnd+zarr UND href mit "
                              "Schluss-Slash. Default AUS, d.h. der zarr-Asset "
-                             "traegt GAR KEIN type-Feld und der href endet "
+                             "trägt GAR KEIN type-Feld und der href endet "
                              "auf '.zarr'. Hintergrund (Backend-Quelltext): "
                              "load_stac.py::_is_band_asset verwirft Assets "
                              "mit deklariertem, nicht gelistetem Medientyp "
@@ -7041,7 +7039,7 @@ def main() -> None:
                              "spatial_extent bauen, sodass CDSE die "
                              "Ausdehnung wieder selbst aus den STAC-"
                              "Metadaten ableiten muss. Default AUS, d.h. bei "
-                             "zarr traegt loadstac1 einen expliziten "
+                             "zarr trägt loadstac1 einen expliziten "
                              "spatial_extent (west/south/east/north + crs als "
                              "int-EPSG des Rasters, Zahlen bitgleich dem "
                              "proj:bbox des Items). Hintergrund: der "
@@ -7049,16 +7047,16 @@ def main() -> None:
                              "derive a spatial extent from provided STAC "
                              "metadata ..., please provide a spatial extent' "
                              "(Log: load_params={'spatial_extent': {}, ...}), "
-                             "waehrend ein gtiff-Item mit denselben "
-                             "proj-Feldern durchlaeuft. Auf gtiff/netcdf hat "
+                             "während ein gtiff-Item mit denselben "
+                             "proj-Feldern durchläuft. Auf gtiff/netcdf hat "
                              "das Flag keine Wirkung.")
     parser.add_argument("--snap-dem-to-s2", action="store_true",
                         help="(nur local_preprocessing) DEM pixelgenau auf "
                              "das erwartete CDSE/S2-Zielgitter bringen: "
                              "Ziel-Grid wird aus dem angefragten Extent "
                              "abgeleitet (nach UTM projiziert, Kanten "
-                             "outward auf 10 m); die Reprojektion laeuft "
-                             "unveraendert, danach wird der Puffer per "
+                             "outward auf 10 m); die Reprojektion läuft "
+                             "unverändert, danach wird der Puffer per "
                              "reinem Slicing auf dieses Grid GECROPPT - "
                              "die hochgeladenen Pixelwerte sind bitgenau "
                              "dieselben wie ohne Flag, nur der Extent "
@@ -7066,12 +7064,12 @@ def main() -> None:
                              "Differenz zum CDSE-Ergebnis-Grid, sodass "
                              "load_stac nichts mehr zuschneiden/resampeln "
                              "muss. Default AUS (bisheriges Verhalten), "
-                             "damit Laeufe MIT und OHNE Snapping "
+                             "damit Läufe MIT und OHNE Snapping "
                              "vergleichbar sind. Inklusive lokaler Pflicht-"
-                             "Verifikation (Grid-Check + Crop-Identitaet). "
+                             "Verifikation (Grid-Check + Crop-Identität). "
                              "Wird bei Nicht-UTM --target-crs ignoriert.")
     parser.add_argument("--target-crs", default=None,
-                        help="Ziel-CRS fuer die lokale DEM-Reprojektion. "
+                        help="Ziel-CRS für die lokale DEM-Reprojektion. "
                              "local_preprocessing: Default = UTM-EPSG der Region "
                              "+ 10 m S2-Grid-Snap. full_preprocessing: Default "
                              "= DEM wird exakt auf das S2-Grid (UTM) gesnapped. "
@@ -7086,52 +7084,52 @@ def main() -> None:
                              "geladenen DEM ausgerichtet, statt dass CDSE "
                              "das DEM auf sein S2-abgeleitetes Zielgitter "
                              "zwingt (zweites serverseitiges Resampling). "
-                             "NUR S2 wird resampled, das DEM laeuft durch "
+                             "NUR S2 wird resampled, das DEM läuft durch "
                              "kein Resample. Ob CDSE das DEM-Gitter wirklich "
-                             "uebernimmt, zeigt der Ursprung des Ergebnis-"
+                             "übernimmt, zeigt der Ursprung des Ergebnis-"
                              "Grids im Serverlauf. Default AUS.")
     parser.add_argument("--force-target-crs", action="store_true",
-                        help="Nur onthefly: explizites Ziel-CRS (primaere "
+                        help="Nur onthefly: explizites Ziel-CRS (primäre "
                              "UTM-Zone der Region) auch dann in den Graphen "
                              "setzen, wenn der Extent nur EINE UTM-Zone "
-                             "beruehrt. Bei Extents ueber einer Zonengrenze "
+                             "berührt. Bei Extents über einer Zonengrenze "
                              "(z.B. berlin xxlarge) passiert das automatisch, "
                              "weil CDSE sonst am Multi-CRS-Input scheitert "
                              "('no target CRS specified, but multiple CRSes "
                              "across input'). Achtung: die erzwungene "
-                             "Projektion ueber die Zonengrenze verzerrt "
+                             "Projektion über die Zonengrenze verzerrt "
                              "zonenfremde Daten zunehmend mit dem Abstand "
                              "zur Zielzone - das ist der Messgegenstand, "
                              "kein Neutralum.")
     parser.add_argument("--reproject-s2", action="store_true",
-                        help="Nur fuer full_preprocessing + --target-crs: "
+                        help="Nur für full_preprocessing + --target-crs: "
                              "Auch die S2-Raster lokal nach --target-crs "
                              "reprojizieren (Szenario 3: BEIDE Raster im "
                              "Nicht-UTM-Ziel-CRS).")
     parser.add_argument("--job-timeout", type=int, default=3600,
-                        help="Maximale Wartezeit in Sekunden fuer einen "
+                        help="Maximale Wartezeit in Sekunden für einen "
                              "CDSE-Job (Default: 3600 = 1h). Bei xxlarge "
-                             "(200km) oder grossen Workflows ggf. hoeher "
+                             "(200km) oder großen Workflows ggf. höher "
                              "setzen, z.B. --job-timeout 7200.")
     parser.add_argument("--host", default=None,
-                        help="ssh/scp Ziel fuer Asset-Uploads (z.B. "
+                        help="ssh/scp Ziel für Asset-Uploads (z.B. "
                              "root@dima-prox.dima.tu-berlin.de). Default: "
                              "ENV BENCHMARK_HOST oder root@46.224.62.97.")
     parser.add_argument("--web-path", default=None,
-                        help="Remote-Pfad fuer das Web-Verzeichnis "
+                        help="Remote-Pfad für das Web-Verzeichnis "
                              "(trailing slash). Default: ENV "
                              "BENCHMARK_WEB_PATH oder /var/www/benchmark-data/.")
     parser.add_argument("--url-base", default=None,
-                        help="Oeffentliche URL-Basis fuer Assets/STAC "
+                        help="Öffentliche URL-Basis für Assets/STAC "
                              "(trailing slash). Default: ENV "
                              "BENCHMARK_URL_BASE oder "
                              "http://46.224.62.97/benchmark-data/.")
     parser.add_argument("--fullpp-upload-profile", default="simple_striped",
                         choices=_REWRITE_PROFILES,
-                        help="Schreibprofil fuer die S2- und DEM-Uploads bei "
+                        help="Schreibprofil für die S2- und DEM-Uploads bei "
                              "full_preprocessing. simple_striped (Default, "
                              "NEUER Bugfix): gestreiftes, unkomprimiertes "
-                             "GeoTIFF - identisch zu dem was local_pp fuer "
+                             "GeoTIFF - identisch zu dem was local_pp für "
                              "das DEM benutzt und was CDSE nachweislich sauber "
                              "liest. tiled_deflate (alter Default): tiled "
                              "256x256 mit deflate, wahrscheinlichere Ursache "
@@ -7139,34 +7137,34 @@ def main() -> None:
                              "full_pp. Nur zur Regressions-Diagnose.")
     parser.add_argument("--save-format", default=DEFAULT_SAVE_FORMAT,
                         choices=SAVE_FORMATS,
-                        help="Ausgabeformat des save_result-Knotens fuer "
+                        help="Ausgabeformat des save_result-Knotens für "
                              "onthefly und local_preprocessing. Default "
-                             "GTiff (unveraendertes Verhalten). netCDF "
+                             "GTiff (unverändertes Verhalten). netCDF "
                              "umgeht den GTiff-Writer des Backends: bei "
                              "onthefly/berlin/xlarge/merge_add scheiterten "
-                             "5 von 5 Laeufen reproduzierbar mit "
+                             "5 von 5 Läufen reproduzierbar mit "
                              "'openEO_2024-07-24Z_<id>.tif is corrupt / "
                              "ZIPDecode: Decoding error at scanline 5248' - "
                              "gleicher Termin, gleiche Scanline, "
-                             "verschiedene Executoren, waehrend "
+                             "verschiedene Executoren, während "
                              "local_preprocessing denselben Ausschnitt "
                              "fehlerfrei verarbeitet. Der Wert landet in "
                              "runs.save_format. Achtung: der Accuracy-Check "
-                             "vergleicht GeoTIFFs und ueberspringt "
-                             "netCDF-Ausgaben mit Meldung. Fuer "
+                             "vergleicht GeoTIFFs und überspringt "
+                             "netCDF-Ausgaben mit Meldung. Für "
                              "full_preprocessing gilt weiterhin der eigene "
                              "Schalter --fullpp-save-format.")
     parser.add_argument("--fullpp-save-format", default="GTiff",
                         choices=("GTiff", "netCDF"),
                         help="save_result Format des CDSE-Jobs bei "
                              "full_preprocessing. Default GTiff. netCDF ist "
-                             "als Diagnose-Alternative gedacht, um zu pruefen "
+                             "als Diagnose-Alternative gedacht, um zu prüfen "
                              "ob die beobachtete Output-Korruption GTiff-"
                              "spezifisch beim CDSE-Writer ist.")
     parser.add_argument("--include-full-pp", default="auto",
                         choices=("auto", "yes", "no"),
                         help="Steuert ob full_preprocessing bei "
-                             "--strategy all mitlaeuft. auto (Default): "
+                             "--strategy all mitläuft. auto (Default): "
                              "ja bei extent in {small,medium,large}, nein "
                              "bei {xlarge,xxlarge} (zu viele Range-Requests "
                              "-> Timeouts). yes: immer einbeziehen. "
@@ -7175,41 +7173,41 @@ def main() -> None:
                         help="Minimaler freier Plattenplatz (in GB) im "
                              "--output-dir, unterhalb dessen ein Run gar nicht "
                              "erst startet. Default 20 GB. 0 deaktiviert die "
-                             "Pruefung. Faengt das '100%%-Fuell-Fiasko' ab.")
+                             "Prüfung. Fängt das '100%%-Füll-Fiasko' ab.")
     parser.add_argument("--cleanup-after-accuracy", action="store_true",
                         help="Nach jedem erfolgreich verbuchten Accuracy-Check "
-                             "die TIF-Ausgaben des Runs loeschen. "
+                             "die TIF-Ausgaben des Runs löschen. "
                              "results.json, Prozessgraphen und Metadaten "
                              "bleiben erhalten. Reihenfolge ist zwingend: "
-                             "erst Run, dann Accuracy-Eintrag, dann Loeschen. "
-                             "local_reference wird erst geloescht wenn alle "
-                             "abhaengigen CDSE-Runs (gleiche Region/Extent/"
+                             "erst Run, dann Accuracy-Eintrag, dann Löschen. "
+                             "local_reference wird erst gelöscht wenn alle "
+                             "abhängigen CDSE-Runs (gleiche Region/Extent/"
                              "Workflow) einen Accuracy-Eintrag haben. "
                              "Default: aus (bisheriges Verhalten).")
     parser.add_argument("--dry-run-cleanup", action="store_true",
-                        help="Zeigt beim Aufraeumen nur an was geloescht "
-                             "WUERDE, ohne wirklich zu loeschen. Impliziert "
+                        help="Zeigt beim Aufräumen nur an was gelöscht "
+                             "WÜRDE, ohne wirklich zu löschen. Impliziert "
                              "--cleanup-after-accuracy nicht - beides muss "
-                             "explizit gesetzt sein. Nuetzlich um vor dem "
-                             "ersten Live-Lauf die Loeschliste zu pruefen.")
+                             "explizit gesetzt sein. Nützlich um vor dem "
+                             "ersten Live-Lauf die Löschliste zu prüfen.")
 
     args = parser.parse_args()
 
-    # Backend aufloesen: --api-url hat Vorrang vor --backend. Deshalb ist
+    # Backend auflösen: --api-url hat Vorrang vor --backend. Deshalb ist
     # der argparse-Default von --api-url None statt CDSE_URL - nur so ist
     # "explizit gesetzt" von "nicht angegeben" unterscheidbar. Nach dieser
-    # Zeile traegt args.api_url wieder eine echte URL, alle bestehenden
-    # Aufrufstellen bleiben unveraendert; ohne Flags ist das Ergebnis
+    # Zeile trägt args.api_url wieder eine echte URL, alle bestehenden
+    # Aufrufstellen bleiben unverändert; ohne Flags ist das Ergebnis
     # exakt CDSE_URL wie bisher.
     _api_url_explicit = args.api_url is not None
     if not _api_url_explicit:
         args.api_url = BACKENDS[args.backend]["url"]
     _provider = _oidc_provider_for(args.api_url)
 
-    # Datensatz-Paar aufloesen und pruefen, BEVOR irgendetwas laeuft.
+    # Datensatz-Paar auflösen und prüfen, BEVOR irgendetwas läuft.
     # Workflow-Default kommt vom Datensatz, damit '--dataset landcover'
     # allein schon funktioniert; bei 'dem' ist das Ergebnis merge_add,
-    # also unveraendert.
+    # also unverändert.
     dataset = _dataset_of(args)
     if args.workflow is None:
         args.workflow = DATASETS[dataset]["default_workflow"]
@@ -7229,10 +7227,10 @@ def main() -> None:
 
     strategies = ALL_STRATEGIES if args.strategy == "all" else [args.strategy]
 
-    # Safeguard: full_preprocessing bei grossen Extents per Default ausnehmen,
+    # Safeguard: full_preprocessing bei großen Extents per Default ausnehmen,
     # weil die Anzahl Range-Requests pro xlarge-Run schon ~1170 erreicht
-    # (gemessen in nginx_access_log) und der Backend-Job dadurch regelmaessig
-    # timeoutet. --include-full-pp=yes uebersteuert das.
+    # (gemessen in nginx_access_log) und der Backend-Job dadurch regelmäßig
+    # timeoutet. --include-full-pp=yes übersteuert das.
     if args.strategy == "all" and "full_preprocessing" in strategies:
         if args.include_full_pp == "no":
             print(f"\n[--include-full-pp=no] full_preprocessing wird ausgelassen.")
@@ -7267,14 +7265,14 @@ def main() -> None:
     print(f"Repeats:    {args.repeat}")
     print(f"Run-Type:   {args.run_type}")
 
-    # Backend-Schluessel aus der tatsaechlich benutzten URL: --api-url hat
+    # Backend-Schlüssel aus der tatsächlich benutzten URL: --api-url hat
     # Vorrang vor --backend, und nur die URL sagt, gegen welchen Bestand
-    # gemessen wird. Faellt zurueck auf --backend, falls jemand eine
+    # gemessen wird. Fällt zurück auf --backend, falls jemand eine
     # unbekannte URL setzt.
     backend_key = _backend_for_url(args.api_url) or args.backend
 
-    # Erst pruefen, dann messen: ohne local_reference kann --reference-check
-    # nichts vergleichen, und die Laeufe waeren fuer die Auswertung wertlos.
+    # Erst prüfen, dann messen: ohne local_reference kann --reference-check
+    # nichts vergleichen, und die Läufe wären für die Auswertung wertlos.
     _preflight_reference(args, strategies, dataset, _resolution_of(args),
                          backend=backend_key)
 
@@ -7313,7 +7311,7 @@ def main() -> None:
                 break
             result = runners[strategy](args, i)
             # Cleanup-Orchestrator braucht Region/Extent/Workflow um die
-            # local_reference-Abhaengigkeiten aufzuloesen.
+            # local_reference-Abhängigkeiten aufzulösen.
             result.setdefault("region", args.region)
             result.setdefault("extent_size", args.extent_size)
             result.setdefault("workflow", args.workflow)
@@ -7323,7 +7321,7 @@ def main() -> None:
 
     if args.accuracy_check:
         # Ein Vergleich JE LAUF dieses Aufrufs, mit dessen eigenem Ordner
-        # und dessen eigener run_id - sonst bekaeme bei --repeat N nur die
+        # und dessen eigener run_id - sonst bekäme bei --repeat N nur die
         # letzte Wiederholung eine Zeile in der accuracy-Tabelle.
         targets = _accuracy_targets_from_session(
             all_results, ("local_preprocessing", "full_preprocessing"))
@@ -7342,7 +7340,7 @@ def main() -> None:
                                    backend=backend_key)
         else:
             # Kein eigener Lauf in dieser Session (z.B. --repeat 0):
-            # unveraendert der neueste passende Ordner von der Platte.
+            # unverändert der neueste passende Ordner von der Platte.
             run_accuracy_check(args.output_dir, args.region,
                                test_strategy=None,
                                test_run_id=None,
@@ -7362,7 +7360,7 @@ def main() -> None:
         # Disk-Lookup der neueste passende Ordner ohne run_id.
         candidate_strategies = ("onthefly", "local_preprocessing",
                                 "full_preprocessing")
-        # Je Strategie ALLE Laeufe dieser Session, nicht nur den letzten.
+        # Je Strategie ALLE Läufe dieser Session, nicht nur den letzten.
         session_runs = {}
         for s, rid, odir in _accuracy_targets_from_session(
                 all_results, candidate_strategies):
@@ -7416,8 +7414,8 @@ def main() -> None:
             print("\n[--reference-check] Keine CDSE-Strategie-Runs gefunden "
                   "die gegen local_reference verglichen werden koennten.")
 
-    # Aufraeumen erst NACH allen Accuracy-Checks - sonst waeren die TIFs
-    # bereits geloescht bevor die Accuracy sie gelesen hat.
+    # Aufräumen erst NACH allen Accuracy-Checks - sonst wären die TIFs
+    # bereits gelöscht bevor die Accuracy sie gelesen hat.
     if args.cleanup_after_accuracy or args.dry_run_cleanup:
         cleanup_after_accuracy(all_results, output_dir=args.output_dir,
                                dry_run=args.dry_run_cleanup)
